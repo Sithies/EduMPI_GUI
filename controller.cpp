@@ -31,6 +31,7 @@ void Controller::connect(QString hostname, QString databasename, int port, QStri
     tempFile.setAutoRemove(false);
     if (!tempFile.open()) {
         qWarning() << "Failed to create env file:" << tempFile.errorString();
+        emit connectionSignal(false);
         return;
     }
 
