@@ -6,6 +6,7 @@
 #include <fstream>
 #include <QProcess>
 #include <QFile>
+#include <QSqlQuery>
 #include <qdatetime.h>
 #include <QMetaObject>
 
@@ -579,14 +580,18 @@ void Controller::slotFetchEduMPIJobs(){
 
 
 bool Controller::connectToDB(const QString &hostname, const QString &databasename, const int &port, const QString &username, const QString &password){
-    if (QSqlDatabase::contains(m_connectionName)) {
-        auto db = QSqlDatabase::database(m_connectionName);
-        if (db.isOpen()) {
+    auto db = QSqlDatabase::contains(m_connectionName)
+                  ? QSqlDatabase::database(m_connectionName, false)
+                  : QSqlDatabase::addDatabase("QPSQL", m_connectionName);
+    if (db.isOpen()) {
+        // isOpen() bleibt true, auch wenn der DB-Server inzwischen neu gestartet wurde
+        if (checkDatabase()) {
             qDebug() << "Database Connection " << m_connectionName << " is already open.";
             return true;
         }
+        db.close();
     }
-    auto db = QSqlDatabase::addDatabase("QPSQL", m_connectionName);
+    db.setConnectOptions("connect_timeout=3");
     db.setHostName(hostname);
     db.setPort(port);
     db.setDatabaseName(databasename);
@@ -604,6 +609,13 @@ QString Controller::getDatabaseConnection(){
 
 QString Controller::getClusterIdent(){
     return m_cluster_ident;
+}
+
+bool Controller::checkDatabase(){
+    if (!QSqlDatabase::contains(m_connectionName))
+        return false;
+    auto db = QSqlDatabase::database(m_connectionName, false);
+    return db.isOpen() && QSqlQuery(db).exec("SELECT 1");
 }
 
 void Controller::setComponentsBuild(bool b){
