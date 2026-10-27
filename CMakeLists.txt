@@ -135,6 +135,13 @@ target_link_libraries(appGUI_Cluster PRIVATE
     Qt6::Sql
 )
 
+# Dev-Modus für den lokalen Dev-Cluster (EduMPI/dev): Verbindungswerte aus EDUMPI_DEV_ENV,
+# Auto-Connect. Nie in Release-Builds; aktiv erst, wenn EDUMPI_DEV_ENV gesetzt ist.
+option(EDUMPI_DEV_MODE "Dev-Modus: Auto-Connect gegen den lokalen Dev-Cluster" OFF)
+if(EDUMPI_DEV_MODE)
+    target_compile_definitions(appGUI_Cluster PRIVATE EDUMPI_DEV_MODE)
+endif()
+
 install(TARGETS appGUI_Cluster
     BUNDLE DESTINATION .
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})

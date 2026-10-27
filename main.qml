@@ -15,7 +15,12 @@ Window {
     visible: true
 
     //property alias actualScreen: actualScreen
-    title: qsTr("EduMPI")
+    title: qsTr("EduMPI") + (devConfig.enabled ? (devConfig.sshWrapper ? " [DEV]" : " [DEV – SSH-Wrapper fehlt]") : "")
+
+    // Dev-Modus: Wert aus EduMPI/dev/gui.env, sonst der normale Standardwert
+    function devValue(key, fallback) {
+        return devConfig.enabled && devConfig[key] !== undefined ? devConfig[key] : fallback
+    }
 
     property bool p2p: true
     property bool collective: true
@@ -350,6 +355,40 @@ Window {
         onTriggered: {
             controller.outputHandling(path);
                 // Hier kommt die Logik, die nach der Verzögerung ausgeführt werden soll
+        }
+    }
+
+    // Dev-Modus: beim Start mit DB und Dev-Cluster verbinden und neu verbinden, wenn der
+    // Dev-Cluster neu gestartet wurde. Erst DB (synchron), dann Cluster – die Job-Liste wird
+    // nur bei bestehender DB-Verbindung geladen.
+    property bool devClusterConnecting: false
+    Timer {
+        id: devAutoConnect
+        interval: 5000
+        repeat: true
+        triggeredOnStart: true
+        running: devConfig.enabled
+        onTriggered: {
+            if (!controller.db_connection || !controller.checkDatabase()) {
+                root.db_host = devConfig.EDUMPI_DEV_DB_HOST
+                root.db_port = devConfig.EDUMPI_DB_PORT
+                root.db_name = devConfig.EDUMPI_DEV_DB_NAME
+                root.db_user = devConfig.EDUMPI_DEV_DB_USER
+                root.db_password = devConfig.EDUMPI_DEV_DB_PW
+                controller.connect(root.db_host, root.db_name, parseInt(root.db_port), root.db_user, root.db_password)
+                console.log("[DEV] Datenbank " + root.db_host + ":" + root.db_port + ": "
+                            + (controller.db_connection ? "verbunden" : "nicht erreichbar, neuer Versuch in 5 s"))
+                if (!controller.db_connection)
+                    return
+            }
+            if (!controller.cluster_connection && !root.devClusterConnecting) {
+                root.devClusterConnecting = true
+                controller.connectClusterAsync(devConfig.EDUMPI_DEV_CLUSTER_HOST, devConfig.EDUMPI_DEV_CLUSTER_USER,
+                                               devConfig.EDUMPI_DEV_EDUMPI_PATH, function(result) {
+                    root.devClusterConnecting = false
+                    console.log("[DEV] Cluster " + devConfig.EDUMPI_DEV_CLUSTER_HOST + ": " + result)
+                })
+            }
         }
     }
 }

@@ -16,7 +16,41 @@
 #include <QtQuick3D/qquick3d.h>
 
 #include <QLoggingCategory>
+#include <QFile>
+#include <QStandardPaths>
+#include <QVariantMap>
 
+// Dev-Modus (CMake-Option EDUMPI_DEV_MODE): Verbindungswerte des lokalen Dev-Clusters aus der
+// Datei in EDUMPI_DEV_ENV (EduMPI/dev/gui.env). Ohne Flag oder Datei: enabled = false.
+static QVariantMap loadDevConfig()
+{
+    QVariantMap config{{"enabled", false}};
+#ifdef EDUMPI_DEV_MODE
+    const QString path = qEnvironmentVariable("EDUMPI_DEV_ENV");
+    QFile file(path);
+    if (path.isEmpty() || !file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        qWarning() << "[DEV] EDUMPI_DEV_ENV nicht gesetzt oder nicht lesbar - Dev-Modus aus"
+                   << "(vorher 'source EduMPI/dev/ssh/activate')";
+        return config;
+    }
+    while (!file.atEnd()) {
+        const QString line = QString::fromUtf8(file.readLine()).trimmed();
+        const qsizetype eq = line.indexOf('=');
+        if (line.startsWith('#') || eq <= 0)
+            continue;
+        const QString key = line.left(eq);
+        // Gesetzte Umgebungsvariablen haben Vorrang, wie bei dev/compose.sh
+        config[key] = qEnvironmentVariable(key.toUtf8().constData(), line.mid(eq + 1));
+    }
+    // Die GUI ruft ssh fest mit -p 22 auf; nur der Wrapper leitet auf den Dev-Cluster um
+    const QString ssh = QStandardPaths::findExecutable("ssh");
+    config["sshWrapper"] = ssh.contains("/dev/ssh/bin/");
+    if (!config["sshWrapper"].toBool())
+        qWarning() << "[DEV] ssh ist nicht der Wrapper aus EduMPI/dev/ssh/bin:" << ssh;
+    config["enabled"] = true;
+#endif
+    return config;
+}
 
 int main(int argc, char *argv[])
 {
@@ -53,6 +87,8 @@ int main(int argc, char *argv[])
     // Set default pictures path for screenshots
     engine.rootContext()->setContextProperty("picturesDirectory",
                                              QStandardPaths::writableLocation(QStandardPaths::PicturesLocation));
+
+    engine.rootContext()->setContextProperty("devConfig", loadDevConfig());
 
     //qmlRegisterType<CustomLineGeometry>("CustomGeometry", 1, 0, "CustomLineGeometry");
 

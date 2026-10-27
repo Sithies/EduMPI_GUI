@@ -77,6 +77,14 @@ The GUI acts as the **frontend client** in the EduMPI ecosystem:
 3. Build using CMake
 4. Run the resulting binary
 
+### Dev mode (local dev cluster)
+For development against the local container cluster in the EduMPI repo (`dev/`), configure with
+`-DEDUMPI_DEV_MODE=ON` (never used for release builds) and start the GUI from a shell where
+`source <EduMPI>/dev/ssh/activate` was run. The GUI then reads the connection values from
+`<EduMPI>/dev/gui.env`, connects to the database and the cluster automatically, reconnects every 5 s
+after a restart of the dev cluster, and shows "[DEV]" in the window title. Without the flag or without
+`EDUMPI_DEV_ENV` the GUI behaves as before. Details: `dev/README.md` in the EduMPI repo.
+
 ## 📚 References
 
 EduMPI is described in:
