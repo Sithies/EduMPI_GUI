@@ -13,3 +13,6 @@ endfunction()
 
 edumpi_add_trace_test(build)
 edumpi_add_trace_test(aggregator ring4_scenario.h ring4_scenario.cpp)
+edumpi_add_trace_test(otf2_reader
+    otf2_fixture.h otf2_fixture.cpp
+    ring4_scenario.h ring4_scenario.cpp)
