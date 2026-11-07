@@ -1,5 +1,10 @@
 #include <QtTest>
 
+#include <otf2/otf2.h>
+
+#include <cstdarg>
+#include <thread>
+
 #include "otf2_fixture.h"
 #include "otf2_trace_reader.h"
 #include "ring4_scenario.h"
@@ -9,6 +14,12 @@ using namespace trace;
 class TstTraceOtf2Reader : public QObject
 {
     Q_OBJECT
+
+    static OTF2_ErrorCode sentinelHandler(void *, const char *, uint64_t, const char *,
+                                          OTF2_ErrorCode code, const char *, va_list)
+    {
+        return code;
+    }
 
     static bool readTrace(const QString &anchor, TraceSummary *s, TraceMeta *meta, QString *error)
     {
@@ -157,6 +168,79 @@ private slots:
         QVERIFY(!readOtf2(path, agg, &meta, &error));
         QVERIFY(!error.isEmpty());
         qInfo() << "error:" << error;
+    }
+
+    // Several trace windows may load at once on worker threads; the OTF2 error handler is
+    // process-wide, so concurrent reads (successful and failing) must not interfere.
+    void concurrentReads()
+    {
+        QTemporaryDir tmp;
+        QVERIFY(tmp.isValid());
+        const QString anchor = writeRing4Otf2(tmp.filePath(QStringLiteral("ring4")));
+        QVERIFY(!anchor.isEmpty());
+        const QString bad = tmp.filePath(QStringLiteral("bad/traces.otf2"));
+        QVERIFY(QDir().mkpath(QFileInfo(bad).path()));
+        QFile f(bad);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("this is not an OTF2 anchor file\n");
+        f.close();
+
+        QString reference;
+        {
+            TraceAggregator agg;
+            TraceMeta meta;
+            QVERIFY(!readOtf2(bad, agg, &meta, &reference));
+        }
+
+        // The process-wide handler installed before the reads must be in place afterwards.
+        const OTF2_ErrorCallback original = OTF2_Error_RegisterCallback(&sentinelHandler, nullptr);
+
+        constexpr int kIterations = 50;
+        struct Result {
+            int ok = 0;
+            int failed = 0;
+            int correct = 0;
+            int expectedError = 0;
+            QString lastError;
+        };
+        auto reader = [&](const QString &path, Result *res) {
+            for (int i = 0; i < kIterations; ++i) {
+                TraceAggregator agg;
+                TraceMeta meta;
+                QString error;
+                if (readOtf2(path, agg, &meta, &error)) {
+                    ++res->ok;
+                    const TraceSummary s = agg.finish(meta.traceLengthNs);
+                    if (s.seconds == 3 && s.unmatchedMessages == 1 && s.rankCount == 4
+                        && s.rows.value(0).size() == 4 && s.rows.value(1).size() == 4)
+                        ++res->correct;
+                } else {
+                    ++res->failed;
+                    res->lastError = error;
+                    if (error == reference)
+                        ++res->expectedError;
+                }
+            }
+        };
+
+        Result a, b, c;
+        std::thread ta(reader, anchor, &a);
+        std::thread tb(reader, anchor, &b);
+        std::thread tc(reader, bad, &c);
+        ta.join();
+        tb.join();
+        tc.join();
+
+        QVERIFY2(a.failed == 0, qPrintable(a.lastError));
+        QVERIFY2(b.failed == 0, qPrintable(b.lastError));
+        QCOMPARE(a.correct, kIterations);
+        QCOMPARE(b.correct, kIterations);
+        const OTF2_ErrorCallback after = OTF2_Error_RegisterCallback(original, nullptr);
+        QVERIFY(after == &sentinelHandler);
+
+        QCOMPARE(c.failed, kIterations);
+        QVERIFY2(c.expectedError == kIterations, qPrintable(c.lastError)); // captured, not lost
+
     }
 
     void rejectsMissingFile()

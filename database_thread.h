@@ -8,18 +8,7 @@
 #include <QSqlDatabase>
 #include <QStandardItemModel>
 #include <database_connection.h>
-
-struct DataColumn
-{
-    QString proc_name;
-    QString comm_type;
-    int proc_rank;
-    long recv_datasize;
-    long send_datasize;
-    float late_sender;
-    float late_receiver;
-    float time_diff;
-};
+#include "data_column.h"
 
 
 class Database_Thread : public QObject

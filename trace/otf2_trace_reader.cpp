@@ -14,6 +14,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <memory>
+#include <mutex>
 
 namespace trace {
 
@@ -48,6 +49,9 @@ constexpr qint64 kNsPerSecond = 1'000'000'000;
 // ---------------------------------------------------------------------------------------
 // OTF2 error capture: OTF2 reports errors through a process-wide handler (default: print
 // to stderr). While a read is running, the last message is captured for *error instead.
+// Reads may run concurrently on several worker threads: the capturing handler (which writes
+// to thread-local storage) is installed by the first active read and the previous handler
+// restored by the last one, so overlapping reads never restore each other's state.
 
 thread_local QString tLastOtf2Error;
 
@@ -67,9 +71,16 @@ public:
     Otf2ErrorCapture()
     {
         tLastOtf2Error.clear();
-        m_previous = OTF2_Error_RegisterCallback(&captureOtf2Error, nullptr);
+        const std::lock_guard<std::mutex> lock(s_mutex);
+        if (s_active++ == 0)
+            s_previous = OTF2_Error_RegisterCallback(&captureOtf2Error, nullptr);
     }
-    ~Otf2ErrorCapture() { OTF2_Error_RegisterCallback(m_previous, nullptr); }
+    ~Otf2ErrorCapture()
+    {
+        const std::lock_guard<std::mutex> lock(s_mutex);
+        if (--s_active == 0)
+            OTF2_Error_RegisterCallback(s_previous, nullptr);
+    }
     Otf2ErrorCapture(const Otf2ErrorCapture &) = delete;
     Otf2ErrorCapture &operator=(const Otf2ErrorCapture &) = delete;
 
@@ -80,7 +91,9 @@ public:
     }
 
 private:
-    OTF2_ErrorCallback m_previous;
+    static inline std::mutex s_mutex;
+    static inline int s_active = 0;
+    static inline OTF2_ErrorCallback s_previous = nullptr;
 };
 
 struct ReaderCloser {

@@ -58,6 +58,7 @@ qt_add_executable(appGUI_Cluster
     #controller.cpp
     nodes_instances.h nodes_instances.cpp
     #ranks_instances.h ranks_instances.cpp
+    data_column.h
     database_thread.h database_thread.cpp
     bash_process_manager.h bash_process_manager.cpp
     table_userid.h table_userid.cpp

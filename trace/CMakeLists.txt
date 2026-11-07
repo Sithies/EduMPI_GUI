@@ -36,8 +36,12 @@ add_library(edumpi_trace STATIC
     trace_aggregator.cpp
     otf2_trace_reader.h
     otf2_trace_reader.cpp
+    ${PROJECT_SOURCE_DIR}/data_column.h
+    trace_data_source.h
+    trace_data_source.cpp
 )
 
-target_include_directories(edumpi_trace PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# PROJECT_SOURCE_DIR: shared app headers without heavy dependencies (data_column.h).
+target_include_directories(edumpi_trace PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR})
 target_compile_options(edumpi_trace PUBLIC ${OTF2_CFLAGS})
 target_link_libraries(edumpi_trace PUBLIC Qt6::Core ${OTF2_LDFLAGS} ${OTF2_LIBS})
