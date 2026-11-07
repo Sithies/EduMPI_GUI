@@ -1,13 +1,15 @@
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
-qt_add_executable(trace_tests
-    tst_trace_build.cpp
-)
+# One Qt Test executable per test class (each with its own QTEST_GUILESS_MAIN),
+# registered with CTest as trace_<name>. The umbrella target `trace_tests` builds all.
+add_custom_target(trace_tests)
 
-target_link_libraries(trace_tests PRIVATE
-    Qt6::Core
-    Qt6::Test
-    edumpi_trace
-)
+function(edumpi_add_trace_test name)
+    qt_add_executable(tst_trace_${name} tst_trace_${name}.cpp ${ARGN})
+    target_link_libraries(tst_trace_${name} PRIVATE Qt6::Core Qt6::Test edumpi_trace)
+    add_test(NAME trace_${name} COMMAND tst_trace_${name})
+    add_dependencies(trace_tests tst_trace_${name})
+endfunction()
 
-add_test(NAME trace_tests COMMAND trace_tests)
+edumpi_add_trace_test(build)
+edumpi_add_trace_test(aggregator ring4_scenario.h ring4_scenario.cpp)

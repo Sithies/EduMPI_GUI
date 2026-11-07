@@ -31,6 +31,9 @@ _otf2_config(OTF2_LIBS --libs)
 add_library(edumpi_trace STATIC
     trace_version.h
     trace_version.cpp
+    trace_records.h
+    trace_aggregator.h
+    trace_aggregator.cpp
 )
 
 target_include_directories(edumpi_trace PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
