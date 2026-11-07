@@ -74,8 +74,19 @@ The GUI acts as the **frontend client** in the EduMPI ecosystem:
     cd EduMPI_GUI
     ```
 2. Install dependencies: Qt 6.12 (Quick3D, ShaderTools, Sql)
-3. Build using CMake
-4. Run the resulting binary
+3. Build OTF2 (needed for trace support, a C compiler and make suffice):
+    ```bash
+    scripts/build-otf2.sh "$HOME/.local/otf2"
+    ```
+4. Build using CMake:
+    ```bash
+    cmake -S . -B build -DEDUMPI_TRACE=ON -DOTF2_ROOT="$HOME/.local/otf2"
+    cmake --build build
+    ```
+    Trace tests: `cmake --build build --target trace_tests && ctest --test-dir build -R trace`.
+    Windows builds have no trace support (`-DEDUMPI_TRACE=OFF`, forced automatically); on other
+    platforms `-DEDUMPI_TRACE=OFF` skips OTF2 as well.
+5. Run the resulting binary
 
 ### Dev mode (local dev cluster)
 For development against the local container cluster in the EduMPI repo (`dev/`), configure with
