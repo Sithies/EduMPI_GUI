@@ -9,6 +9,7 @@ qt_add_qml_module(sidebar
         Sidebar.qml
         Sidebar_Item.qml
         MPI_Application_Start.qml
+        Trace_Load.qml
         Sidebar_Run_Analysis.qml
         Options.qml
         Options_Bar.qml

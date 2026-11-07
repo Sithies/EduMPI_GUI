@@ -11,6 +11,13 @@ Item {
     width: 260
     property Item rootScreen: parent
 
+    Component.onCompleted: {
+        // Trace loading (OTF2) is not built on Windows.
+        if (Qt.platform.os !== "windows") {
+            sidebarModel.insert(1, { name: "Trace", icon: "qrc:/icons/view.png", aVisible: false, aSource: "Trace_Load.qml" })
+        }
+    }
+
 
     Rectangle {
         id: rectangle

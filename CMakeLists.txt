@@ -91,6 +91,7 @@ qt_add_qml_module(appGUI_Cluster
         Application_Start_Scorep.qml
         Table_Userid_Selection.qml
         MPI_Run_Analysis.qml
+        Trace_Analysis.qml
         Application_Start_OpenMP.qml
         Detailed_Information_Bar.qml
     SOURCES

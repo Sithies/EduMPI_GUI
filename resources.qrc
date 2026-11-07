@@ -18,6 +18,7 @@
         <file>Application_Start_Scorep.qml</file>
         <file>Table_Userid_Selection.qml</file>
         <file>MPI_Run_Analysis.qml</file>
+        <file>Trace_Analysis.qml</file>
         <file>Application_Start_OpenMP.qml</file>
         <file>Detailed_Information_Bar.qml</file>
         <file>icons/play.png</file>
