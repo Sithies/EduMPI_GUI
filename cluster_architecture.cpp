@@ -1,6 +1,10 @@
 #include "cluster_architecture.h"
 #include "database_thread.h"
 
+#ifdef EDUMPI_TRACE
+#include "trace_data_source.h"
+#endif
+
 Cluster_Architecture::Cluster_Architecture(QObject *parent) : QObject(parent) {
 
 }
@@ -8,13 +12,16 @@ Cluster_Architecture::Cluster_Architecture(QObject *parent) : QObject(parent) {
 Cluster_Architecture::~Cluster_Architecture()
 {
     if (database_thread.isRunning()) {
-        if (database_thread.isRunning()) {
+        if (m_dbThread) {
             // Signal zum Beenden des Threads senden
             m_dbThread->set_thread_running(false);
             emit signalToClearDB();
             database_thread.quit();  // Veranlasst den Thread, die Ereignisschleife zu verlassen
             database_thread.wait();  // Wartet, bis der Thread beendet ist
             delete m_dbThread;
+            m_dbThread = nullptr;
+        } else if (m_traceSource) {
+            stopTraceSource();
         }
         //delete database_thread;  // Löscht den Thread, nachdem er beendet wurde
         //database_thread = nullptr;
@@ -30,12 +37,15 @@ void Cluster_Architecture::initialize(QString db_connection, bool live){
 void Cluster_Architecture::resetCluster_Architecture(){
 
     if (database_thread.isRunning()) {
-        if (database_thread.isRunning()) {
+        if (m_dbThread) {
             // Signal zum Beenden des Threads senden
             emit signalToClearDB();
             database_thread.quit();  // Veranlasst den Thread, die Ereignisschleife zu verlassen
             database_thread.wait();  // Wartet, bis der Thread beendet ist
             delete m_dbThread;
+            m_dbThread = nullptr;
+        } else if (m_traceSource) {
+            stopTraceSource();
         }
         //delete database_thread;  // Löscht den Thread, nachdem er beendet wurde
         //database_thread = nullptr;
@@ -82,38 +92,71 @@ void Cluster_Architecture::startThread(){
     //clone_db.moveToThread(&database_thread);
 
     //m_dbThread->moveToThread(dbThread);
-    Database_Thread::connect(m_dbThread, &Database_Thread::clusterComponentsReady, this, &Cluster_Architecture::buildClusterComponents);
-    Database_Thread::connect(this, &Cluster_Architecture::signalToDBConnection, m_dbThread, &Database_Thread::connectToDB);
-    Database_Thread::connect(this, &Cluster_Architecture::startDatabaseThread, m_dbThread, &Database_Thread::threadbuildClusterComponents);
-
-    Database_Thread::connect(this, &Cluster_Architecture::signalToUpdateData, m_dbThread, &Database_Thread::updateData);
-    Database_Thread::connect(m_dbThread, &Database_Thread::updateDataReady, this, &Cluster_Architecture::updateDataToUI);
-
-    Database_Thread::connect(this, &Cluster_Architecture::signalToClearDB, m_dbThread, &Database_Thread::clearDatabase);
-    Database_Thread::connect(m_dbThread, &Database_Thread::dbCleared, this, &Cluster_Architecture::removeClusterComponents);
-
-    Database_Thread::connect(this, &Cluster_Architecture::signalToShowTimestampData, m_dbThread, &Database_Thread::showDataFromTimePeriod);
-    Database_Thread::connect(m_dbThread, &Database_Thread::setTimestamp, this, &Cluster_Architecture::handleTimestamp);
-
-    Database_Thread::connect(this, &Cluster_Architecture::waitForEnd, m_dbThread, &Database_Thread::selectEndTimestamp);
-    Database_Thread::connect(this, &Cluster_Architecture::end_timeChanged, m_dbThread, &Database_Thread::set_end_timestamp_db);
-
-    Database_Thread::connect(this, &Cluster_Architecture::reset_bottom_bar, m_dbThread, &Database_Thread::reset_actual_timestamp);
-    Database_Thread::connect(m_dbThread, &Database_Thread::updateDetailedP2P, &m_detailed_p2p, &Detailed_p2p_data::queryData);
-    Database_Thread::connect(m_dbThread, &Database_Thread::updateDetailedColl, &m_detailed_coll, &Detailed_coll_data::queryData);
-
-    Database_Thread::connect(m_dbThread, &Database_Thread::setFunctionsString, this, &Cluster_Architecture::set_mpi_functions);
-    Database_Thread::connect(m_dbThread, &Database_Thread::setCommMatrixP2PSend, this, &Cluster_Architecture::set_p2p_send_volume_matrix);
-    Database_Thread::connect(m_dbThread, &Database_Thread::setCommMatrixP2PRecv, this, &Cluster_Architecture::set_p2p_recv_volume_matrix);
-    Database_Thread::connect(m_dbThread, &Database_Thread::setCommMatrixCollSend, this, &Cluster_Architecture::set_coll_send_volume_matrix);
-    Database_Thread::connect(m_dbThread, &Database_Thread::setCommMatrixCollRecv, this, &Cluster_Architecture::set_coll_recv_volume_matrix);
-
-    Database_Thread::connect(m_dbThread, &Database_Thread::setCommMatrixTotalSend, this, &Cluster_Architecture::set_total_send_volume_matrix);
-
+    wireDataSource(m_dbThread);
 
     //database_thread.start();
     database_thread.start();
 
+}
+
+bool Cluster_Architecture::startTraceSource(const QString &tracePathOrUrl){
+#ifdef EDUMPI_TRACE
+    if (database_thread.isRunning()) {
+        qWarning() << "startTraceSource: a data source is already running; call resetCluster_Architecture() first.";
+        return false;
+    }
+
+    auto *src = new Trace_Data_Source(tracePathOrUrl);
+    src->moveToThread(&database_thread);
+    m_traceSource = src;
+
+    wireDataSource(src);
+    // A load cancelled by us (stopTraceSource / set_end_time(-1)) is not an error for the user.
+    connect(src, &Trace_Data_Source::loadFailed, this, [this](QString message) {
+        if (!m_traceCancelled)
+            emit traceLoadFailed(message);
+    });
+    // proc_num feeds the averages of the detailed matrices; set it before forwarding the info.
+    connect(src, &Trace_Data_Source::traceInfoReady, this,
+            [this](QString, int ranks, double, int) { set_proc_num(ranks); });
+    connect(src, &Trace_Data_Source::traceInfoReady, this, &Cluster_Architecture::traceInfoReady);
+
+    m_traceCancelled = false;
+    m_live_run = false;
+    m_option = 0;
+    database_thread.start();
+    emit signalToDBConnection();
+    emit startDatabaseThread();
+    return true;
+#else
+    Q_UNUSED(tracePathOrUrl);
+    qWarning() << "startTraceSource: built without trace support (EDUMPI_TRACE=OFF).";
+    return false;
+#endif
+}
+
+void Cluster_Architecture::stopTraceSource(){
+#ifdef EDUMPI_TRACE
+    if (!m_traceSource) {
+        return;
+    }
+    // Cancels a load in progress (atomic flag, safe across threads).
+    m_traceCancelled = true;
+    static_cast<Trace_Data_Source *>(m_traceSource)->set_thread_running(false);
+    emit signalToClearDB();
+    database_thread.quit();
+    database_thread.wait();
+    delete m_traceSource;
+    m_traceSource = nullptr;
+    // The worker has stopped, so nothing new can arrive from the old source; drop its
+    // deliveries that are already queued in this thread (clusterComponentsReady,
+    // updateDataReady, setTimestamp, loadFailed, traceInfoReady, detail lists, matrices,
+    // dbCleared) so they cannot leak into the next session. Only Trace_Data_Source posts
+    // queued calls to these receivers while a trace session is active.
+    QCoreApplication::removePostedEvents(this, QEvent::MetaCall);
+    QCoreApplication::removePostedEvents(&m_detailed_p2p, QEvent::MetaCall);
+    QCoreApplication::removePostedEvents(&m_detailed_coll, QEvent::MetaCall);
+#endif
 }
 
 void Cluster_Architecture::buildClusterComponents(const QMap<QString, QVector<int>> &map){
@@ -253,8 +296,15 @@ void Cluster_Architecture::set_proc_num(int proc){
 
 void Cluster_Architecture::set_end_time(int time){
     if(time == -1){
-        QThread::msleep(2000);
-        m_dbThread->set_thread_running(false);
+        if (m_dbThread) {
+            QThread::msleep(2000);
+            m_dbThread->set_thread_running(false);
+        } else if (m_traceSource) {
+#ifdef EDUMPI_TRACE
+            m_traceCancelled = true;
+            static_cast<Trace_Data_Source *>(m_traceSource)->set_thread_running(false);
+#endif
+        }
     } else {
         m_end_time = time;
         QDateTime timestamp = m_start_timestamp.addSecs(time);

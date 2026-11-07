@@ -102,6 +102,10 @@ public:
     //Initialization
     Q_INVOKABLE void initialize(QString db_connection, bool live);
     Q_INVOKABLE void startThread();
+    // Feeds this instance from a local OTF2 trace (file, directory or file:// URL) instead
+    // of the database. Returns false when built without EDUMPI_TRACE or while a source
+    // thread is already running.
+    Q_INVOKABLE bool startTraceSource(const QString &tracePathOrUrl);
     Q_INVOKABLE void set_slurm_id(int id);
     Q_INVOKABLE void set_proc_num(int proc);
     Q_INVOKABLE void set_time_display(int dis);
@@ -161,6 +165,10 @@ signals:
 
     void reset_bottom_bar();
 
+    //Signals of the trace data source (startTraceSource)
+    void traceLoadFailed(QString message);
+    void traceInfoReady(QString name, int ranks, double durationSeconds, int unmatched);
+
     void p2p_send_volume_matrix_changed();
     void p2p_recv_volume_matrix_changed();
     void coll_send_volume_matrix_changed();
@@ -191,7 +199,48 @@ private:
 
     //database-connection
     QString m_connectionName;
-    Database_Thread *m_dbThread;
+    Database_Thread *m_dbThread = nullptr;
+    // Trace_Data_Source when started via startTraceSource (only with EDUMPI_TRACE).
+    QObject *m_traceSource = nullptr;
+    // Set when we cancel the trace source ourselves; suppresses the resulting loadFailed.
+    bool m_traceCancelled = false;
+
+    // Connects a data source (Database_Thread or Trace_Data_Source, which share signal and
+    // slot names) with this instance.
+    template <typename Source>
+    void wireDataSource(Source *src)
+    {
+        QObject::connect(src, &Source::clusterComponentsReady, this, &Cluster_Architecture::buildClusterComponents);
+        QObject::connect(this, &Cluster_Architecture::signalToDBConnection, src, &Source::connectToDB);
+        QObject::connect(this, &Cluster_Architecture::startDatabaseThread, src, &Source::threadbuildClusterComponents);
+
+        QObject::connect(this, &Cluster_Architecture::signalToUpdateData, src, &Source::updateData);
+        QObject::connect(src, &Source::updateDataReady, this, &Cluster_Architecture::updateDataToUI);
+
+        QObject::connect(this, &Cluster_Architecture::signalToClearDB, src, &Source::clearDatabase);
+        QObject::connect(src, &Source::dbCleared, this, &Cluster_Architecture::removeClusterComponents);
+
+        QObject::connect(this, &Cluster_Architecture::signalToShowTimestampData, src, &Source::showDataFromTimePeriod);
+        QObject::connect(src, &Source::setTimestamp, this, &Cluster_Architecture::handleTimestamp);
+
+        QObject::connect(this, &Cluster_Architecture::waitForEnd, src, &Source::selectEndTimestamp);
+        QObject::connect(this, &Cluster_Architecture::end_timeChanged, src, &Source::set_end_timestamp_db);
+
+        QObject::connect(this, &Cluster_Architecture::reset_bottom_bar, src, &Source::reset_actual_timestamp);
+        QObject::connect(src, &Source::updateDetailedP2P, &m_detailed_p2p, &Detailed_p2p_data::queryData);
+        QObject::connect(src, &Source::updateDetailedColl, &m_detailed_coll, &Detailed_coll_data::queryData);
+
+        QObject::connect(src, &Source::setFunctionsString, this, &Cluster_Architecture::set_mpi_functions);
+        QObject::connect(src, &Source::setCommMatrixP2PSend, this, &Cluster_Architecture::set_p2p_send_volume_matrix);
+        QObject::connect(src, &Source::setCommMatrixP2PRecv, this, &Cluster_Architecture::set_p2p_recv_volume_matrix);
+        QObject::connect(src, &Source::setCommMatrixCollSend, this, &Cluster_Architecture::set_coll_send_volume_matrix);
+        QObject::connect(src, &Source::setCommMatrixCollRecv, this, &Cluster_Architecture::set_coll_recv_volume_matrix);
+
+        QObject::connect(src, &Source::setCommMatrixTotalSend, this, &Cluster_Architecture::set_total_send_volume_matrix);
+    }
+
+    // Stops the trace source's load, quits the source thread and deletes the trace source.
+    void stopTraceSource();
 
     bool m_componentsBuilt = false;
     QVector<Cluster_Node*> m_nodes;
