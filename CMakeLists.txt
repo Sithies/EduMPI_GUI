@@ -21,6 +21,11 @@ if(APPLE)
 endif()
 
 
+option(EDUMPI_TRACE "Build OTF2 trace loading support" ON)
+if(WIN32)
+    set(EDUMPI_TRACE OFF CACHE BOOL "Build OTF2 trace loading support" FORCE)
+endif()
+
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Quick3D Sql Concurrent OpenGL)
 find_package(PostgreSQL REQUIRED)
 
@@ -109,6 +114,12 @@ qt_add_qml_module(appGUI_Cluster
 
 add_subdirectory(Sidebar)
 
+if(EDUMPI_TRACE)
+    add_subdirectory(trace)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+
 
 set_target_properties(appGUI_Cluster PROPERTIES
     #MACOSX_BUNDLE_GUI_IDENTIFIER my.example.com
@@ -137,6 +148,11 @@ target_link_libraries(appGUI_Cluster PRIVATE
 option(EDUMPI_DEV_MODE "Dev-Modus: Auto-Connect gegen den lokalen Dev-Cluster" OFF)
 if(EDUMPI_DEV_MODE)
     target_compile_definitions(appGUI_Cluster PRIVATE EDUMPI_DEV_MODE)
+endif()
+
+if(EDUMPI_TRACE)
+    target_link_libraries(appGUI_Cluster PRIVATE edumpi_trace)
+    target_compile_definitions(appGUI_Cluster PRIVATE EDUMPI_TRACE=1)
 endif()
 
 install(TARGETS appGUI_Cluster
