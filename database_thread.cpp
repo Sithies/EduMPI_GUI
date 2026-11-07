@@ -8,6 +8,7 @@
 #include <QSqlError>
 #include <QTimeZone>
 #include <QCoreApplication>
+#include <QElapsedTimer>
 
 Database_Thread::Database_Thread(QString dbConnectionName, int slurm_id, int proc_num, bool live_run, QObject *parent)
     : QObject(parent) {
