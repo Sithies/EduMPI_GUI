@@ -26,7 +26,7 @@ Window {
             TextField {
                 id: hostnameField
                 Layout.fillWidth: true
-                text: "10.32.47.10"
+                text: root.devValue("EDUMPI_DEV_CLUSTER_HOST", "10.32.47.10")
                 placeholderText: "<enter host>"
                 background: Rectangle {
                     color: "#4d4d4d"
@@ -41,7 +41,7 @@ Window {
             TextField {
                 id: authField
                 Layout.fillWidth: true
-                text: ""
+                text: root.devValue("EDUMPI_DEV_CLUSTER_USER", "")
                 placeholderText: "<enter name>"
                 //inputMethodHints: Qt.ImhDigitsOnly
                 background: Rectangle {
@@ -56,7 +56,7 @@ Window {
 
             TextField {
                 id: installpathField
-                text: "/opt/edumpi"
+                text: root.devValue("EDUMPI_DEV_EDUMPI_PATH", "/opt/edumpi")
                 Layout.fillWidth: true
                 placeholderText: "<enter path>"
                 background: Rectangle {
