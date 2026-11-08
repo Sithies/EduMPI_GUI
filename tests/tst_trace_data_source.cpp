@@ -182,6 +182,48 @@ private slots:
         QCOMPARE(lastMatrix(total), expectedSend);
     }
 
+    // Receives completed by MPI_Wait / MPI_Waitall must reach the p2p receive matrix and
+    // appear as "MPI_Irecv" in the functions string (EduMPI DB books them on MPI_Irecv rows).
+    void nonblockingReceivesFillRecvMatrix()
+    {
+        QTemporaryDir tmp;
+        QVERIFY(tmp.isValid());
+        const QString anchor = writeNonblockingOtf2(tmp.path());
+        QVERIFY(!anchor.isEmpty());
+        Trace_Data_Source src(anchor);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        QSignalSpy fn(&src, &Trace_Data_Source::setFunctionsString);
+        QSignalSpy p2p(&src, &Trace_Data_Source::updateDetailedP2P);
+        QSignalSpy pSend(&src, &Trace_Data_Source::setCommMatrixP2PSend);
+        QSignalSpy pRecv(&src, &Trace_Data_Source::setCommMatrixP2PRecv);
+        QSignalSpy total(&src, &Trace_Data_Source::setCommMatrixTotalSend);
+
+        src.updateData(0);
+
+        const QString s = fn.last().at(0).toString();
+        QVERIFY2(s.contains("MPI_Irecv, "), qPrintable(s));
+        QVERIFY2(s.contains("MPI_Isend, "), qPrintable(s));
+        QCOMPARE(s.size(), QString("MPI_Irecv, MPI_Isend, ").size());
+
+        const auto p2pList = p2p.last().at(0).value<QList<QVariantList>>();
+        QVERIFY(p2pList.contains(QVariantList{QString("MPI_Irecv"), 0, 1}));
+        QVERIFY(p2pList.contains(QVariantList{QString("MPI_Irecv"), 1, 0}));
+        QVERIFY(p2pList.contains(QVariantList{QString("MPI_Isend"), 0, 1}));
+        QVERIFY(p2pList.contains(QVariantList{QString("MPI_Isend"), 1, 0}));
+
+        Matrix expectedRecv(4, QVector<long>(4, 0));
+        expectedRecv[0][1] = 400;
+        expectedRecv[1][0] = 300;
+        QCOMPARE(lastMatrix(pRecv), expectedRecv);
+        Matrix expectedSend(4, QVector<long>(4, 0));
+        expectedSend[0][1] = 300;
+        expectedSend[1][0] = 400;
+        QCOMPARE(lastMatrix(pSend), expectedSend);
+        QCOMPARE(lastMatrix(total), expectedSend);
+    }
+
     void advancesAndClampsToLastSecond()
     {
         Trace_Data_Source src(m_anchor);

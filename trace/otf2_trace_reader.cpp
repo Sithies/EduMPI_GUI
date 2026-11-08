@@ -226,11 +226,13 @@ bool readGlobalDefs(OTF2_Reader *reader, GlobalDefs &defs, QString *error)
     OTF2_GlobalDefReaderCallbacks_SetGroupCallback(cb, &onGroup);
     OTF2_GlobalDefReaderCallbacks_SetCommCallback(cb, &onComm);
     OTF2_GlobalDefReaderCallbacks_SetRegionCallback(cb, &onRegion);
-    OTF2_Reader_RegisterGlobalDefCallbacks(reader, gdr, cb, &defs);
+    const OTF2_ErrorCode regRc = OTF2_Reader_RegisterGlobalDefCallbacks(reader, gdr, cb, &defs);
     OTF2_GlobalDefReaderCallbacks_Delete(cb);
 
     uint64_t read = 0;
-    const OTF2_ErrorCode rc = OTF2_Reader_ReadAllGlobalDefinitions(reader, gdr, &read);
+    const OTF2_ErrorCode rc = regRc != OTF2_SUCCESS
+        ? regRc
+        : OTF2_Reader_ReadAllGlobalDefinitions(reader, gdr, &read);
     OTF2_Reader_CloseGlobalDefReader(reader, gdr);
     if (rc != OTF2_SUCCESS) {
         *error = QStringLiteral("Cannot read OTF2 global definitions: %1").arg(Otf2ErrorCapture::message(rc));
@@ -434,15 +436,22 @@ public:
         }
     }
 
+    // fixedFn: function name of the record regardless of the enclosing region (used for
+    // MpiIrecv completions, which lie inside MPI_Wait* / MPI_Test*); otherwise the record is
+    // named after its enclosing MPI region, or fallbackFn outside of any. The record always
+    // takes the times of the enclosing region.
     void recv(LocationState &st, OTF2_CommRef comm, uint32_t sender, uint32_t tag, uint64_t bytes,
-              qint64 ns, const char *fallbackFn)
+              qint64 ns, const char *fallbackFn, const char *fixedFn = nullptr)
     {
         const int peer = worldRank(comm, sender, st.rank);
         if (peer < 0)
             return;
         P2PRecv r{st.rank, peer, comm, tag, bytes, {}, ns, ns};
+        if (fixedFn)
+            r.function = QString::fromLatin1(fixedFn);
         if (st.stack.isEmpty()) {
-            r.function = QString::fromLatin1(fallbackFn);
+            if (!fixedFn)
+                r.function = QString::fromLatin1(fallbackFn);
             m_agg.addRecv(r);
         } else {
             st.stack.last().recvs.append(r);
@@ -503,7 +512,8 @@ private:
             m_agg.addSend(s);
         }
         for (P2PRecv rv : r.recvs) {
-            rv.function = info.name;
+            if (rv.function.isEmpty())
+                rv.function = info.name;
             rv.enterNs = r.enterNs;
             rv.leaveNs = leaveNs;
             m_agg.addRecv(rv);
@@ -580,11 +590,12 @@ OTF2_CallbackCode onMpiRecv(OTF2_LocationRef loc, OTF2_TimeStamp time, void *ud,
 }
 
 // Completion of an MPI_Irecv; occurs inside the completing MPI_Wait* / MPI_Test* region.
+// Booked as "MPI_Irecv" (like EduMPI's DB rows) with the times of the completing region.
 OTF2_CallbackCode onMpiIrecv(OTF2_LocationRef loc, OTF2_TimeStamp time, void *ud, OTF2_AttributeList *,
                              uint32_t sender, OTF2_CommRef comm, uint32_t tag, uint64_t bytes, uint64_t)
 {
     EVT_PROLOGUE;
-    tr->recv(*st, comm, sender, tag, bytes, ns, "MPI_Irecv");
+    tr->recv(*st, comm, sender, tag, bytes, ns, "MPI_Irecv", "MPI_Irecv");
     return OTF2_CALLBACK_SUCCESS;
 }
 
@@ -600,8 +611,18 @@ OTF2_CallbackCode onMpiCollectiveEnd(OTF2_LocationRef loc, OTF2_TimeStamp time, 
 
 #undef EVT_PROLOGUE
 
+QString incompleteTrace(const char *what, OTF2_LocationRef loc, OTF2_ErrorCode rc)
+{
+    return QStringLiteral("Trace is incomplete or damaged: could not read %1 of location %2 — %3")
+        .arg(QLatin1String(what))
+        .arg(loc)
+        .arg(Otf2ErrorCapture::message(rc));
+}
+
 // Selects the locations, reads their local definitions (mapping tables, clock offsets)
-// and opens their event readers.
+// and opens their event readers. Missing local definition files are tolerated; local
+// definitions that exist but cannot be read, or a missing event reader, fail the load
+// (the mapping tables would be missing, i.e. names / partners silently wrong).
 bool prepareLocations(OTF2_Reader *reader, const QList<OTF2_LocationRef> &locations, QString *error)
 {
     for (OTF2_LocationRef loc : locations)
@@ -617,11 +638,21 @@ bool prepareLocations(OTF2_Reader *reader, const QList<OTF2_LocationRef> &locati
         if (haveDefFiles) {
             if (OTF2_DefReader *dr = OTF2_Reader_GetDefReader(reader, loc)) {
                 uint64_t read = 0;
-                OTF2_Reader_ReadAllLocalDefinitions(reader, dr, &read);
+                const OTF2_ErrorCode drc = OTF2_Reader_ReadAllLocalDefinitions(reader, dr, &read);
                 OTF2_Reader_CloseDefReader(reader, dr);
+                if (drc != OTF2_SUCCESS) {
+                    *error = incompleteTrace("definitions", loc, drc);
+                    OTF2_Reader_CloseDefFiles(reader);
+                    return false;
+                }
             }
         }
-        OTF2_Reader_GetEvtReader(reader, loc);
+        if (!OTF2_Reader_GetEvtReader(reader, loc)) {
+            *error = incompleteTrace("events", loc, OTF2_ERROR_INVALID);
+            if (haveDefFiles)
+                OTF2_Reader_CloseDefFiles(reader);
+            return false;
+        }
     }
     if (haveDefFiles)
         OTF2_Reader_CloseDefFiles(reader);
@@ -641,11 +672,13 @@ OTF2_ErrorCode readEvents(OTF2_Reader *reader, EventTranslator &tr)
     OTF2_GlobalEvtReaderCallbacks_SetMpiRecvCallback(cb, &onMpiRecv);
     OTF2_GlobalEvtReaderCallbacks_SetMpiIrecvCallback(cb, &onMpiIrecv);
     OTF2_GlobalEvtReaderCallbacks_SetMpiCollectiveEndCallback(cb, &onMpiCollectiveEnd);
-    OTF2_Reader_RegisterGlobalEvtCallbacks(reader, ger, cb, &tr);
+    const OTF2_ErrorCode regRc = OTF2_Reader_RegisterGlobalEvtCallbacks(reader, ger, cb, &tr);
     OTF2_GlobalEvtReaderCallbacks_Delete(cb);
 
     uint64_t read = 0;
-    const OTF2_ErrorCode rc = OTF2_Reader_ReadAllGlobalEvents(reader, ger, &read);
+    const OTF2_ErrorCode rc = regRc != OTF2_SUCCESS
+        ? regRc
+        : OTF2_Reader_ReadAllGlobalEvents(reader, ger, &read);
     OTF2_Reader_CloseGlobalEvtReader(reader, ger);
     OTF2_Reader_CloseEvtFiles(reader);
     return rc;
@@ -675,7 +708,8 @@ bool readOtf2(const QString &anchorFile, TraceAggregator &agg, TraceMeta *meta, 
     if (!reader)
         return fail(error, QStringLiteral("Not a readable OTF2 trace: %1 — %2")
                                .arg(anchorFile, Otf2ErrorCapture::message(OTF2_ERROR_INVALID)));
-    OTF2_Reader_SetSerialCollectiveCallbacks(reader.get());
+    if (const OTF2_ErrorCode rc = OTF2_Reader_SetSerialCollectiveCallbacks(reader.get()); rc != OTF2_SUCCESS)
+        return fail(error, QStringLiteral("Cannot initialise OTF2 reader: %1").arg(Otf2ErrorCapture::message(rc)));
 
     GlobalDefs defs;
     if (!readGlobalDefs(reader.get(), defs, &err))

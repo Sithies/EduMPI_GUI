@@ -22,8 +22,10 @@ enum StringId : OTF2_StringRef {
     S_Rank0, S_Rank1, S_Rank2, S_Rank3, S_Thread,
     S_Main, S_Send, S_Recv, S_Allreduce, S_Ssend,
     S_CommLocations, S_World, S_Sub,
+    S_Isend, S_Irecv, S_Wait, S_Waitall,
 };
-enum RegionId : OTF2_RegionRef { R_Main, R_Send, R_Recv, R_Allreduce, R_Ssend };
+enum RegionId : OTF2_RegionRef { R_Main, R_Send, R_Recv, R_Allreduce, R_Ssend, R_Isend, R_Irecv, R_Wait, R_Waitall };
+enum class Scenario { Ring4, Truncated, Nonblocking };
 enum GroupId : OTF2_GroupRef { G_Locations, G_World, G_Sub };
 enum CommId : OTF2_CommRef { C_World, C_Sub };
 enum NodeId : OTF2_SystemTreeNodeRef { N_Machine, N_NodeA, N_NodeB };
@@ -74,6 +76,32 @@ public:
             leave(leaveMs, R_Recv);
     }
 
+    // MPI_Isend region [enterMs, enterMs + 1] with the MpiIsend event at enterMs.
+    void isend(uint64_t enterMs, uint32_t to, uint32_t tag, uint64_t bytes, uint64_t request)
+    {
+        enter(enterMs, R_Isend);
+        check(OTF2_EvtWriter_MpiIsend(m_writer, nullptr, t(enterMs), to, C_World, tag, bytes, request));
+        leave(enterMs + 1, R_Isend);
+    }
+
+    // MPI_Irecv region [enterMs, enterMs + 1] with the MpiIrecvRequest event at enterMs.
+    void irecv(uint64_t enterMs, uint64_t request)
+    {
+        enter(enterMs, R_Irecv);
+        check(OTF2_EvtWriter_MpiIrecvRequest(m_writer, nullptr, t(enterMs), request));
+        leave(enterMs + 1, R_Irecv);
+    }
+
+    // Completion events inside an open MPI_Wait / MPI_Waitall region.
+    void isendComplete(uint64_t ms, uint64_t request)
+    {
+        check(OTF2_EvtWriter_MpiIsendComplete(m_writer, nullptr, t(ms), request));
+    }
+    void irecvComplete(uint64_t ms, uint32_t from, uint32_t tag, uint64_t bytes, uint64_t request)
+    {
+        check(OTF2_EvtWriter_MpiIrecv(m_writer, nullptr, t(ms), from, C_World, tag, bytes, request));
+    }
+
     void allreduce(uint64_t enterMs, uint64_t leaveMs)
     {
         enter(enterMs, R_Allreduce);
@@ -96,13 +124,52 @@ private:
     bool m_ok = true;
 };
 
-bool writeEvents(OTF2_Archive *archive, bool truncated, std::array<uint64_t, kRanks> &counts)
+// Nonblocking exchange between ranks 0 and 1 (ranks 2, 3 only run main):
+//   R0: Irecv(from 1, tag 1) [100,101], Isend(to 1, tag 2, 300 B) [101,102],
+//       Wait [110,250] completing the Irecv (400 B) at 250, Wait [250,251] completing the Isend.
+//   R1: Irecv(from 0, tag 2) [100,101], Isend(to 0, tag 1, 400 B) [200,201],
+//       Waitall [300,301] completing both (Irecv 300 B at 301).
+void writeNonblockingRank(RankWriter &w, int rank)
+{
+    switch (rank) {
+    case 0:
+        w.irecv(100, 1);
+        w.isend(101, 1, 2, 300, 2);
+        w.enter(110, R_Wait);
+        w.irecvComplete(250, 1, 1, 400, 1);
+        w.leave(250, R_Wait);
+        w.enter(250, R_Wait);
+        w.isendComplete(251, 2);
+        w.leave(251, R_Wait);
+        break;
+    case 1:
+        w.irecv(100, 1);
+        w.isend(200, 0, 1, 400, 2);
+        w.enter(300, R_Waitall);
+        w.isendComplete(301, 2);
+        w.irecvComplete(301, 0, 2, 300, 1);
+        w.leave(301, R_Waitall);
+        break;
+    default:
+        break;
+    }
+}
+
+bool writeEvents(OTF2_Archive *archive, Scenario scenario, std::array<uint64_t, kRanks> &counts)
 {
     bool ok = true;
     for (int rank = 0; rank < kRanks; ++rank) {
         RankWriter w(archive, rank);
-        const bool cutR0 = truncated && rank == 0;
+        const bool cutR0 = scenario == Scenario::Truncated && rank == 0;
         w.enter(0, R_Main);
+        if (scenario == Scenario::Nonblocking) {
+            writeNonblockingRank(w, rank);
+            w.leave(kLengthMs, R_Main);
+            ok = ok && w.ok();
+            counts[rank] = w.events();
+            ok = ok && OTF2_Archive_CloseEvtWriter(archive, w.handle()) == OTF2_SUCCESS;
+            continue;
+        }
         switch (rank) {
         case 0:
             w.send(R_Send, 100, 101, 1, C_World, 7, 1000);
@@ -169,6 +236,7 @@ bool writeGlobalDefs(OTF2_Archive *archive, bool withRealtime, const std::array<
         "Rank 0", "Rank 1", "Rank 2", "Rank 3", "Master thread",
         "main", "MPI_Send", "MPI_Recv", "MPI_Allreduce", "MPI_Ssend",
         "", "MPI_COMM_WORLD", "SUB",
+        "MPI_Isend", "MPI_Irecv", "MPI_Wait", "MPI_Waitall",
     };
     for (OTF2_StringRef i = 0; i < sizeof(strings) / sizeof(strings[0]); ++i)
         check(OTF2_GlobalDefWriter_WriteString(g, i, strings[i]));
@@ -197,6 +265,10 @@ bool writeGlobalDefs(OTF2_Archive *archive, bool withRealtime, const std::array<
     region(R_Recv, S_Recv, OTF2_REGION_ROLE_POINT2POINT, OTF2_PARADIGM_MPI);
     region(R_Allreduce, S_Allreduce, OTF2_REGION_ROLE_COLL_ALL2ALL, OTF2_PARADIGM_MPI);
     region(R_Ssend, S_Ssend, OTF2_REGION_ROLE_POINT2POINT, OTF2_PARADIGM_MPI);
+    region(R_Isend, S_Isend, OTF2_REGION_ROLE_POINT2POINT, OTF2_PARADIGM_MPI);
+    region(R_Irecv, S_Irecv, OTF2_REGION_ROLE_POINT2POINT, OTF2_PARADIGM_MPI);
+    region(R_Wait, S_Wait, OTF2_REGION_ROLE_POINT2POINT, OTF2_PARADIGM_MPI);
+    region(R_Waitall, S_Waitall, OTF2_REGION_ROLE_POINT2POINT, OTF2_PARADIGM_MPI);
 
     const uint64_t locations[] = {0, 1, 2, 3};
     const uint64_t world[] = {0, 1, 2, 3};
@@ -213,7 +285,7 @@ bool writeGlobalDefs(OTF2_Archive *archive, bool withRealtime, const std::array<
     return ok;
 }
 
-QString writeArchive(const QString &dir, bool withRealtime, bool truncated)
+QString writeArchive(const QString &dir, bool withRealtime, Scenario scenario)
 {
     if (!QDir().mkpath(dir))
         return {};
@@ -229,7 +301,7 @@ QString writeArchive(const QString &dir, bool withRealtime, bool truncated)
            && OTF2_Archive_OpenEvtFiles(archive) == OTF2_SUCCESS;
 
     std::array<uint64_t, kRanks> counts{};
-    ok = ok && writeEvents(archive, truncated, counts);
+    ok = ok && writeEvents(archive, scenario, counts);
     ok = ok && OTF2_Archive_CloseEvtFiles(archive) == OTF2_SUCCESS;
     ok = ok && writeLocalDefs(archive);
     ok = ok && writeGlobalDefs(archive, withRealtime, counts);
@@ -241,10 +313,15 @@ QString writeArchive(const QString &dir, bool withRealtime, bool truncated)
 
 QString writeRing4Otf2(const QString &dir, bool withRealtime)
 {
-    return writeArchive(dir, withRealtime, false);
+    return writeArchive(dir, withRealtime, Scenario::Ring4);
 }
 
 QString writeTruncatedOtf2(const QString &dir)
 {
-    return writeArchive(dir, true, true);
+    return writeArchive(dir, true, Scenario::Truncated);
+}
+
+QString writeNonblockingOtf2(const QString &dir)
+{
+    return writeArchive(dir, true, Scenario::Nonblocking);
 }

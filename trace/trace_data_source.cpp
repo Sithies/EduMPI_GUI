@@ -217,7 +217,9 @@ void Trace_Data_Source::emitDetails(int from, int to)
 
         if (k.commType == QLatin1String("p2p")) {
             p2pList.append(QVariantList{k.function, procRank, partRank});
-            if (k.function == QLatin1String("MPI_Wait"))
+            // The DB skips MPI_Wait rows here: they carry partner -1 (bytes are on the
+            // MPI_Irecv rows). Skip by that property, not by name.
+            if (partRank < 0)
                 continue;
             const QString fun = k.function + QStringLiteral(", ");
             if (!s.contains(fun))

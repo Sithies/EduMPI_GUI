@@ -13,3 +13,9 @@ QString writeRing4Otf2(const QString &dir, bool withRealtime = true);
 
 // ring4 without R0's final Leave of main and without R0's MPI_Recv Leave.
 QString writeTruncatedOtf2(const QString &dir);
+
+// Same definitions as ring4 (plus MPI_Isend / MPI_Irecv / MPI_Wait / MPI_Waitall regions) with a
+// nonblocking exchange between ranks 0 and 1 (see otf2_fixture.cpp, writeNonblockingRank):
+// R0's Irecv (400 B from R1) completes in MPI_Wait [110, 250] ms, R1's Irecv (300 B from R0)
+// in MPI_Waitall [300, 301] ms; R0 sends 300 B (Isend at 101 ms), R1 400 B (Isend at 200 ms).
+QString writeNonblockingOtf2(const QString &dir);

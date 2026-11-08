@@ -2,6 +2,8 @@
 
 #include <QtTest>
 
+#include <cmath>
+
 using namespace trace;
 
 namespace {
