@@ -19,3 +19,14 @@ QString writeTruncatedOtf2(const QString &dir);
 // R0's Irecv (400 B from R1) completes in MPI_Wait [110, 250] ms, R1's Irecv (300 B from R0)
 // in MPI_Waitall [300, 301] ms; R0 sends 300 B (Isend at 101 ms), R1 400 B (Isend at 200 ms).
 QString writeNonblockingOtf2(const QString &dir);
+
+// 2 ranks (both on nodeA), WORLD = {0, 1}, trace length 3 s, user (COMPILER) regions:
+// main [0, 3 s] > phase_a [0.1, 1.5 s] > send_to [0.5, 0.6 s] > MPI_Send [0.5, 0.501 s] to the
+// other rank (tag 1, 100 B, received in MPI_Recv [0.7, 0.701 s] inside phase_a), and
+// main > phase_b [1.5, 2.9 s] with MPI_Allreduce [1.6, 1.7 s] and the artificial region
+// "TRACE BUFFER FLUSH" [2.0, 2.01 s] (role ARTIFICIAL, paradigm MEASUREMENT_SYSTEM).
+QString writePhasesOtf2(const QString &dir);
+
+// ring4 plus metric definitions: a "bytes_sent" metric member (type OTHER) and, with
+// withClass, a PAPI member in a SYNCHRONOUS_STRICT metric class (as Score-P writes with PAPI).
+QString writeMetricsOtf2(const QString &dir, bool withClass);

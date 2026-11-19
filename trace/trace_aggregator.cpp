@@ -93,11 +93,17 @@ void TraceAggregator::addCall(const MpiCall &call)
         += nsToSeconds(call.leaveNs - call.enterNs);
 }
 
-void TraceAggregator::bookMatch(int sender, int receiver, const PendingSend &s, const PendingRecv &r)
+void TraceAggregator::bookMatch(const P2PSend &s, const P2PRecv &r)
 {
-    bucket(r.enterNs, receiver, false).lateSender += nsToSeconds(std::max<qint64>(0, s.enterNs - r.enterNs));
-    if (s.enterNs < r.enterNs && r.enterNs < s.leaveNs)
-        bucket(s.enterNs, sender, false).lateReceiver += nsToSeconds(r.enterNs - s.enterNs);
+    const double lateSender = nsToSeconds(std::max<qint64>(0, s.enterNs - r.enterNs));
+    const double lateReceiver = s.enterNs < r.enterNs && r.enterNs < s.leaveNs
+        ? nsToSeconds(r.enterNs - s.enterNs)
+        : 0.0;
+    bucket(r.enterNs, r.rank, false).lateSender += lateSender;
+    if (lateReceiver > 0.0)
+        bucket(s.enterNs, s.rank, false).lateReceiver += lateReceiver;
+    if (m_listener)
+        m_listener->onMatched({s, r, lateSender, lateReceiver});
 }
 
 void TraceAggregator::addSend(const P2PSend &send)
@@ -106,15 +112,14 @@ void TraceAggregator::addSend(const P2PSend &send)
     addDetail(send.enterNs, {false, send.function, send.rank, send.peer, {}}, qint64(send.bytes), 0);
 
     const MatchKey key{send.rank, send.peer, send.comm, send.tag};
-    const PendingSend s{send.enterNs, send.leaveNs};
     auto it = m_pending.find(key);
     if (it != m_pending.end() && !it->recvs.isEmpty()) {
-        bookMatch(send.rank, send.peer, s, it->recvs.dequeue());
+        bookMatch(send, it->recvs.dequeue());
         if (it->recvs.isEmpty() && it->sends.isEmpty())
             m_pending.erase(it);
         return;
     }
-    m_pending[key].sends.enqueue(s);
+    m_pending[key].sends.enqueue(send);
 }
 
 void TraceAggregator::addRecv(const P2PRecv &recv)
@@ -123,27 +128,37 @@ void TraceAggregator::addRecv(const P2PRecv &recv)
     addDetail(recv.enterNs, {false, recv.function, recv.rank, recv.peer, {}}, 0, qint64(recv.bytes));
 
     const MatchKey key{recv.peer, recv.rank, recv.comm, recv.tag};
-    const PendingRecv r{recv.enterNs};
     auto it = m_pending.find(key);
     if (it != m_pending.end() && !it->sends.isEmpty()) {
-        bookMatch(recv.peer, recv.rank, it->sends.dequeue(), r);
+        bookMatch(it->sends.dequeue(), recv);
         if (it->recvs.isEmpty() && it->sends.isEmpty())
             m_pending.erase(it);
         return;
     }
-    m_pending[key].recvs.enqueue(r);
+    m_pending[key].recvs.enqueue(recv);
 }
 
 void TraceAggregator::completeCollective(const PendingCollective &inst)
 {
     qint64 maxEnter = 0;
     bool first = true;
-    for (const Arrival &a : inst.arrived) {
+    for (const Collective &a : inst.arrived) {
         maxEnter = first ? a.enterNs : std::max(maxEnter, a.enterNs);
         first = false;
     }
-    for (const Arrival &a : inst.arrived)
-        bucket(a.enterNs, a.rank, true).lateSender += nsToSeconds(maxEnter - a.enterNs);
+    CompletedCollective done;
+    if (m_listener) {
+        done.members = inst.arrived;
+        done.lateSender.reserve(inst.arrived.size());
+    }
+    for (const Collective &a : inst.arrived) {
+        const double late = nsToSeconds(maxEnter - a.enterNs);
+        bucket(a.enterNs, a.rank, true).lateSender += late;
+        if (m_listener)
+            done.lateSender.append(late);
+    }
+    if (m_listener)
+        m_listener->onCollective(done);
 }
 
 void TraceAggregator::addCollective(const Collective &coll)
@@ -158,7 +173,7 @@ void TraceAggregator::addCollective(const Collective &coll)
     const auto instKey = qMakePair(coll.comm, index);
     PendingCollective &inst = m_pendingColl[instKey];
     inst.expected = std::max<int>(1, int(coll.members.size()));
-    inst.arrived.append({coll.rank, coll.enterNs});
+    inst.arrived.append(coll);
     if (inst.arrived.size() >= inst.expected) {
         completeCollective(inst);
         m_pendingColl.remove(instKey);
@@ -174,8 +189,15 @@ TraceSummary TraceAggregator::finish(qint64 traceLengthNs)
     m_pendingColl.clear();
     m_collSeq.clear();
 
-    for (const MatchQueues &q : std::as_const(m_pending))
+    for (const MatchQueues &q : std::as_const(m_pending)) {
         s.unmatchedMessages += int(q.sends.size() + q.recvs.size());
+        if (m_listener) {
+            for (const P2PSend &send : q.sends)
+                m_listener->onUnmatchedSend(send);
+            for (const P2PRecv &recv : q.recvs)
+                m_listener->onUnmatchedRecv(recv);
+        }
+    }
     m_pending.clear();
 
     for (auto it = m_rankNodes.cbegin(); it != m_rankNodes.cend(); ++it)

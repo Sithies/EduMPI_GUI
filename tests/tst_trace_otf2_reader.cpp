@@ -11,6 +11,34 @@
 
 using namespace trace;
 
+namespace {
+// Records the sink call sequence (forwarding to an aggregator is not needed here).
+struct RecordingSink : TraceSink {
+    int beginCalls = 0;
+    int callsBeforeBegin = 0;
+    int ranksBeforeBegin = 0;
+    int calls = 0;
+    TraceMeta begun;
+    QVector<UserRegion> userRegions;
+    void begin(const TraceMeta &meta) override
+    {
+        ++beginCalls;
+        begun = meta;
+        callsBeforeBegin = calls;
+    }
+    void addRank(int, const QString &) override
+    {
+        if (beginCalls == 0)
+            ++ranksBeforeBegin;
+    }
+    void addCall(const MpiCall &) override { ++calls; }
+    void addSend(const P2PSend &) override { ++calls; }
+    void addRecv(const P2PRecv &) override { ++calls; }
+    void addCollective(const Collective &) override { ++calls; }
+    void addUserRegion(const UserRegion &r) override { userRegions.append(r); }
+};
+} // namespace
+
 class TstTraceOtf2Reader : public QObject
 {
     Q_OBJECT
@@ -55,6 +83,100 @@ private slots:
         QCOMPARE(meta.realtimeStart, QDateTime(QDate(2026, 1, 1), QTime(10, 0), QTimeZone::UTC));
         QCOMPARE(meta.name, QStringLiteral("ring4"));
         verifyRing4(s);
+    }
+
+    void beginReportsEventCount()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeRing4Otf2(tmp.filePath(QStringLiteral("ring4")));
+        QVERIFY(!anchor.isEmpty());
+        RecordingSink sink;
+        TraceMeta meta;
+        QString error;
+        QVERIFY2(readOtf2(anchor, sink, &meta, &error), qPrintable(error));
+        QCOMPARE(sink.beginCalls, 1);
+        QCOMPARE(sink.callsBeforeBegin, 0);
+        QVERIFY(sink.calls > 0);
+        QCOMPARE(sink.ranksBeforeBegin, 4);
+        QVERIFY(sink.begun.eventCount > 0);
+        QCOMPARE(sink.begun.traceLengthNs, qint64(2'500'000'000));
+        QCOMPARE(sink.begun.name, QStringLiteral("ring4"));
+        QVERIFY(!sink.begun.hasMetrics);
+        QCOMPARE(meta.eventCount, sink.begun.eventCount);
+        QCOMPARE(meta.traceLengthNs, qint64(2'500'000'000));
+    }
+
+    void detectsMetrics()
+    {
+        QTemporaryDir tmp;
+        const QString withClass = writeMetricsOtf2(tmp.filePath(QStringLiteral("papi")), true);
+        const QString membersOnly = writeMetricsOtf2(tmp.filePath(QStringLiteral("members")), false);
+        QVERIFY(!withClass.isEmpty());
+        QVERIFY(!membersOnly.isEmpty());
+        QString error;
+        RecordingSink a;
+        QVERIFY2(readOtf2(withClass, a, nullptr, &error), qPrintable(error));
+        QVERIFY(a.begun.hasMetrics);
+        RecordingSink b;
+        QVERIFY2(readOtf2(membersOnly, b, nullptr, &error), qPrintable(error));
+        QVERIFY(!b.begun.hasMetrics);
+    }
+
+    void readsUserRegions()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writePhasesOtf2(tmp.filePath(QStringLiteral("phases")));
+        QVERIFY(!anchor.isEmpty());
+        RecordingSink sink;
+        TraceMeta meta;
+        QString error;
+        QVERIFY2(readOtf2(anchor, sink, &meta, &error), qPrintable(error));
+        QCOMPARE(meta.traceLengthNs, qint64(3'000'000'000));
+
+        constexpr qint64 ms = 1'000'000;
+        struct Expected { QString fn; int depth; qint64 enter; qint64 leave; };
+        // Reported on Leave, i.e. innermost first.
+        const QVector<Expected> expected = {
+            {QStringLiteral("send_to"), 2, 500 * ms, 600 * ms},
+            {QStringLiteral("phase_a"), 1, 100 * ms, 1500 * ms},
+            {QStringLiteral("phase_b"), 1, 1500 * ms, 2900 * ms},
+            {QStringLiteral("main"), 0, 0, 3000 * ms},
+        };
+        QVector<UserRegion> r0;
+        for (const UserRegion &r : sink.userRegions) {
+            QVERIFY2(r.function != QStringLiteral("TRACE BUFFER FLUSH"), "artificial region reported");
+            if (r.rank == 0)
+                r0.append(r);
+        }
+        QCOMPARE(sink.userRegions.size(), 8); // same structure on both ranks
+        QCOMPARE(r0.size(), expected.size());
+        for (int i = 0; i < expected.size(); ++i) {
+            QCOMPARE(r0[i].function, expected[i].fn);
+            QCOMPARE(r0[i].depth, expected[i].depth);
+            QCOMPARE(r0[i].enterNs, expected[i].enter);
+            QCOMPARE(r0[i].leaveNs, expected[i].leave);
+        }
+    }
+
+    // User regions still open at the end are closed at the trace length.
+    void closesOpenUserRegionsAtEnd()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeTruncatedOtf2(tmp.filePath(QStringLiteral("cut")));
+        QVERIFY(!anchor.isEmpty());
+        RecordingSink sink;
+        TraceMeta meta;
+        QString error;
+        QVERIFY2(readOtf2(anchor, sink, &meta, &error), qPrintable(error));
+        const UserRegion *mainR0 = nullptr;
+        for (const UserRegion &r : sink.userRegions)
+            if (r.rank == 0 && r.function == QStringLiteral("main"))
+                mainR0 = &r;
+        QVERIFY(mainR0);
+        QCOMPARE(mainR0->depth, 0);
+        QCOMPARE(mainR0->enterNs, qint64(0));
+        QCOMPARE(mainR0->leaveNs, meta.traceLengthNs);
+        QCOMPARE(sink.userRegions.size(), 4);
     }
 
     void readsWithoutRealtime()

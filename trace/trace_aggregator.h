@@ -7,21 +7,27 @@
 #include <QVector>
 
 #include "trace_records.h"
+#include "trace_sink.h"
 
 namespace trace {
 
 // Streaming aggregator: turns neutral trace records into per-second bucket and detail
 // rows. Keeps only pending (unmatched) p2p records, incomplete collective instances and
-// per-second aggregates; individual events are not stored.
-class TraceAggregator
+// per-second aggregates; individual events are not stored. An optional listener sees every
+// match and completed collective instance as it happens, and the unmatched p2p records /
+// incomplete instances in finish(). User regions are ignored.
+class TraceAggregator : public TraceSink
 {
 public:
-    void addRank(int rank, const QString &node);
-    void addCall(const MpiCall &call);
-    void addSend(const P2PSend &send);
-    void addRecv(const P2PRecv &recv);
-    void addCollective(const Collective &coll);
+    void addRank(int rank, const QString &node) override;
+    void addCall(const MpiCall &call) override;
+    void addSend(const P2PSend &send) override;
+    void addRecv(const P2PRecv &recv) override;
+    void addCollective(const Collective &coll) override;
     TraceSummary finish(qint64 traceLengthNs);
+
+    // Not owned; may be null. Set before the first record.
+    void setListener(TraceListener *listener) { m_listener = listener; }
 
 private:
     struct Bucket {
@@ -47,13 +53,6 @@ private:
         qint64 recvBytes = 0;
     };
 
-    struct PendingSend {
-        qint64 enterNs;
-        qint64 leaveNs;
-    };
-    struct PendingRecv {
-        qint64 enterNs;
-    };
     struct MatchKey {
         int sender;
         int receiver;
@@ -66,25 +65,22 @@ private:
     };
     friend size_t qHash(const MatchKey &k, size_t seed);
     struct MatchQueues {
-        QQueue<PendingSend> sends;
-        QQueue<PendingRecv> recvs;
+        QQueue<P2PSend> sends;
+        QQueue<P2PRecv> recvs;
     };
 
-    struct Arrival {
-        int rank;
-        qint64 enterNs;
-    };
     struct PendingCollective {
         int expected = 0;
-        QVector<Arrival> arrived;
+        QVector<Collective> arrived;
     };
 
     static int secondOf(qint64 ns);
     Bucket &bucket(qint64 ns, int rank, bool collective);
     void addDetail(qint64 ns, const DetailKey &key, qint64 sendBytes, qint64 recvBytes);
-    void bookMatch(int sender, int receiver, const PendingSend &s, const PendingRecv &r);
+    void bookMatch(const P2PSend &s, const P2PRecv &r);
     void completeCollective(const PendingCollective &inst);
 
+    TraceListener *m_listener = nullptr;
     QMap<int, QString> m_rankNodes;
     QVector<QMap<BucketKey, Bucket>> m_buckets;
     QVector<QMap<DetailKey, DetailSums>> m_details;

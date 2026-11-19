@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QDateTime>
 #include <QMap>
 #include <QString>
 #include <QVector>
@@ -87,6 +88,42 @@ struct DetailRow {
     QByteArray collPartners;
     qint64 sendBytes;
     qint64 recvBytes;
+};
+
+// Archive-level information, known after the definitions (before the first event) except
+// traceLengthNs, which grows to the last event once all events are read.
+struct TraceMeta {
+    QString name;            // name of the directory containing the anchor file
+    QDateTime realtimeStart; // UTC wall clock of trace start; invalid if absent
+    qint64 traceLengthNs = 0;
+    quint64 eventCount = 0;  // sum of the event counts of all read locations
+    bool hasMetrics = false; // archive defines metrics that are recorded as METRIC events
+};
+
+// One non-MPI (user function) region of a rank, e.g. main / phase_a / send_to.
+// depth = number of open user regions above it on that location (program root = 0).
+struct UserRegion {
+    int rank;
+    QString function;
+    int depth;
+    qint64 enterNs;
+    qint64 leaveNs;
+};
+
+// A matched p2p message: lateSender is booked on the receiver, lateReceiver on the sender
+// (seconds, rules of the ring4 scenario).
+struct MatchedMessage {
+    P2PSend send;
+    P2PRecv recv;
+    double lateSender;
+    double lateReceiver;
+};
+
+// All participations of one collective instance; lateSender[i] belongs to members[i]
+// (seconds; max enter of the instance - own enter).
+struct CompletedCollective {
+    QVector<Collective> members;
+    QVector<double> lateSender;
 };
 
 struct TraceSummary {

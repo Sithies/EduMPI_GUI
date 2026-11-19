@@ -32,6 +32,7 @@ add_library(edumpi_trace STATIC
     trace_version.h
     trace_version.cpp
     trace_records.h
+    trace_sink.h
     trace_aggregator.h
     trace_aggregator.cpp
     otf2_trace_reader.h

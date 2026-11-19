@@ -23,9 +23,25 @@ enum StringId : OTF2_StringRef {
     S_Main, S_Send, S_Recv, S_Allreduce, S_Ssend,
     S_CommLocations, S_World, S_Sub,
     S_Isend, S_Irecv, S_Wait, S_Waitall,
+    S_PhaseA, S_PhaseB, S_SendTo, S_Flush,
+    S_PapiFpOps, S_BytesSent,
 };
-enum RegionId : OTF2_RegionRef { R_Main, R_Send, R_Recv, R_Allreduce, R_Ssend, R_Isend, R_Irecv, R_Wait, R_Waitall };
-enum class Scenario { Ring4, Truncated, Nonblocking };
+enum RegionId : OTF2_RegionRef {
+    R_Main, R_Send, R_Recv, R_Allreduce, R_Ssend, R_Isend, R_Irecv, R_Wait, R_Waitall,
+    R_PhaseA, R_PhaseB, R_SendTo, R_Flush,
+};
+enum class Scenario { Ring4, Truncated, Nonblocking, Phases, Ring4MetricClass, Ring4MetricMembers };
+
+// The phases scenario has 2 ranks and runs 3 s; all others 4 ranks and 2.5 s.
+constexpr uint64_t kPhasesLengthMs = 3000;
+int rankCount(Scenario s)
+{
+    return s == Scenario::Phases ? 2 : kRanks;
+}
+uint64_t lengthMs(Scenario s)
+{
+    return s == Scenario::Phases ? kPhasesLengthMs : kLengthMs;
+}
 enum GroupId : OTF2_GroupRef { G_Locations, G_World, G_Sub };
 enum CommId : OTF2_CommRef { C_World, C_Sub };
 enum NodeId : OTF2_SystemTreeNodeRef { N_Machine, N_NodeA, N_NodeB };
@@ -155,16 +171,40 @@ void writeNonblockingRank(RankWriter &w, int rank)
     }
 }
 
+// Both ranks (other = the other rank):
+//   main [0, 3000] > phase_a [100, 1500] > send_to [500, 600] > MPI_Send [500, 501] -> other,
+//   tag 1, 100 B; phase_a > MPI_Recv [700, 701] <- other, tag 1, 100 B;
+//   main > phase_b [1500, 2900] > MPI_Allreduce [1600, 1700] and the artificial
+//   "TRACE BUFFER FLUSH" [2000, 2010] (MEASUREMENT_SYSTEM).
+void writePhasesRank(RankWriter &w, int rank)
+{
+    const uint32_t other = uint32_t(1 - rank);
+    w.enter(100, R_PhaseA);
+    w.enter(500, R_SendTo);
+    w.send(R_Send, 500, 501, other, C_World, 1, 100);
+    w.leave(600, R_SendTo);
+    w.recv(700, 701, other, C_World, 1, 100);
+    w.leave(1500, R_PhaseA);
+    w.enter(1500, R_PhaseB);
+    w.allreduce(1600, 1700);
+    w.enter(2000, R_Flush);
+    w.leave(2010, R_Flush);
+    w.leave(2900, R_PhaseB);
+}
+
 bool writeEvents(OTF2_Archive *archive, Scenario scenario, std::array<uint64_t, kRanks> &counts)
 {
     bool ok = true;
-    for (int rank = 0; rank < kRanks; ++rank) {
+    for (int rank = 0; rank < rankCount(scenario); ++rank) {
         RankWriter w(archive, rank);
         const bool cutR0 = scenario == Scenario::Truncated && rank == 0;
         w.enter(0, R_Main);
-        if (scenario == Scenario::Nonblocking) {
-            writeNonblockingRank(w, rank);
-            w.leave(kLengthMs, R_Main);
+        if (scenario == Scenario::Nonblocking || scenario == Scenario::Phases) {
+            if (scenario == Scenario::Nonblocking)
+                writeNonblockingRank(w, rank);
+            else
+                writePhasesRank(w, rank);
+            w.leave(lengthMs(scenario), R_Main);
             ok = ok && w.ok();
             counts[rank] = w.events();
             ok = ok && OTF2_Archive_CloseEvtWriter(archive, w.handle()) == OTF2_SUCCESS;
@@ -206,20 +246,22 @@ bool writeEvents(OTF2_Archive *archive, Scenario scenario, std::array<uint64_t, 
     return ok;
 }
 
-bool writeLocalDefs(OTF2_Archive *archive)
+bool writeLocalDefs(OTF2_Archive *archive, Scenario scenario)
 {
     if (OTF2_Archive_OpenDefFiles(archive) != OTF2_SUCCESS)
         return false;
     bool ok = true;
-    for (int rank = 0; rank < kRanks; ++rank) {
+    for (int rank = 0; rank < rankCount(scenario); ++rank) {
         OTF2_DefWriter *dw = OTF2_Archive_GetDefWriter(archive, OTF2_LocationRef(rank));
         ok = ok && dw && OTF2_Archive_CloseDefWriter(archive, dw) == OTF2_SUCCESS;
     }
     return OTF2_Archive_CloseDefFiles(archive) == OTF2_SUCCESS && ok;
 }
 
-bool writeGlobalDefs(OTF2_Archive *archive, bool withRealtime, const std::array<uint64_t, kRanks> &counts)
+bool writeGlobalDefs(OTF2_Archive *archive, bool withRealtime, Scenario scenario,
+                     const std::array<uint64_t, kRanks> &counts)
 {
+    const int ranks = rankCount(scenario);
     OTF2_GlobalDefWriter *g = OTF2_Archive_GetGlobalDefWriter(archive);
     if (!g)
         return false;
@@ -229,7 +271,8 @@ bool writeGlobalDefs(OTF2_Archive *archive, bool withRealtime, const std::array<
     const uint64_t realtime = withRealtime
         ? uint64_t(QDateTime(QDate(2026, 1, 1), QTime(10, 0), QTimeZone::UTC).toMSecsSinceEpoch()) * 1'000'000
         : OTF2_UNDEFINED_TIMESTAMP;
-    check(OTF2_GlobalDefWriter_WriteClockProperties(g, kResolution, kOffset, kLengthMs * kTicksPerMs, realtime));
+    check(OTF2_GlobalDefWriter_WriteClockProperties(g, kResolution, kOffset, lengthMs(scenario) * kTicksPerMs,
+                                                    realtime));
 
     const char *strings[] = {
         "", "machine", "machine", "nodeA", "nodeB", "node",
@@ -237,6 +280,8 @@ bool writeGlobalDefs(OTF2_Archive *archive, bool withRealtime, const std::array<
         "main", "MPI_Send", "MPI_Recv", "MPI_Allreduce", "MPI_Ssend",
         "", "MPI_COMM_WORLD", "SUB",
         "MPI_Isend", "MPI_Irecv", "MPI_Wait", "MPI_Waitall",
+        "phase_a", "phase_b", "send_to", "TRACE BUFFER FLUSH",
+        "PAPI_FP_OPS", "bytes_sent",
     };
     for (OTF2_StringRef i = 0; i < sizeof(strings) / sizeof(strings[0]); ++i)
         check(OTF2_GlobalDefWriter_WriteString(g, i, strings[i]));
@@ -246,7 +291,7 @@ bool writeGlobalDefs(OTF2_Archive *archive, bool withRealtime, const std::array<
     check(OTF2_GlobalDefWriter_WriteSystemTreeNode(g, N_NodeA, S_NodeA, S_NodeClass, N_Machine));
     check(OTF2_GlobalDefWriter_WriteSystemTreeNode(g, N_NodeB, S_NodeB, S_NodeClass, N_Machine));
 
-    for (int rank = 0; rank < kRanks; ++rank) {
+    for (int rank = 0; rank < ranks; ++rank) {
         check(OTF2_GlobalDefWriter_WriteLocationGroup(g, OTF2_LocationGroupRef(rank), S_Rank0 + rank,
                                                       OTF2_LOCATION_GROUP_TYPE_PROCESS,
                                                       rank < 2 ? N_NodeA : N_NodeB,
@@ -269,14 +314,40 @@ bool writeGlobalDefs(OTF2_Archive *archive, bool withRealtime, const std::array<
     region(R_Irecv, S_Irecv, OTF2_REGION_ROLE_POINT2POINT, OTF2_PARADIGM_MPI);
     region(R_Wait, S_Wait, OTF2_REGION_ROLE_POINT2POINT, OTF2_PARADIGM_MPI);
     region(R_Waitall, S_Waitall, OTF2_REGION_ROLE_POINT2POINT, OTF2_PARADIGM_MPI);
+    if (scenario == Scenario::Ring4MetricClass || scenario == Scenario::Ring4MetricMembers) {
+        // Like Score-P: per-process byte counters are always defined as members; only a
+        // synchronous PAPI class produces METRIC events (no events written here).
+        check(OTF2_GlobalDefWriter_WriteMetricMember(g, 0, S_BytesSent, S_BytesSent, OTF2_METRIC_TYPE_OTHER,
+                                                     OTF2_METRIC_ABSOLUTE_POINT, OTF2_TYPE_UINT64,
+                                                     OTF2_BASE_DECIMAL, 0, S_Empty));
+        if (scenario == Scenario::Ring4MetricClass) {
+            check(OTF2_GlobalDefWriter_WriteMetricMember(g, 1, S_PapiFpOps, S_PapiFpOps, OTF2_METRIC_TYPE_PAPI,
+                                                         OTF2_METRIC_ACCUMULATED_START, OTF2_TYPE_UINT64,
+                                                         OTF2_BASE_DECIMAL, 0, S_Empty));
+            const OTF2_MetricMemberRef members[] = {1};
+            check(OTF2_GlobalDefWriter_WriteMetricClass(g, 0, 1, members, OTF2_METRIC_SYNCHRONOUS_STRICT,
+                                                        OTF2_RECORDER_KIND_CPU));
+        }
+    }
+    if (scenario == Scenario::Phases) {
+        region(R_PhaseA, S_PhaseA, OTF2_REGION_ROLE_FUNCTION, OTF2_PARADIGM_COMPILER);
+        region(R_PhaseB, S_PhaseB, OTF2_REGION_ROLE_FUNCTION, OTF2_PARADIGM_COMPILER);
+        region(R_SendTo, S_SendTo, OTF2_REGION_ROLE_FUNCTION, OTF2_PARADIGM_COMPILER);
+        region(R_Flush, S_Flush, OTF2_REGION_ROLE_ARTIFICIAL, OTF2_PARADIGM_MEASUREMENT_SYSTEM);
+    }
 
     const uint64_t locations[] = {0, 1, 2, 3};
     const uint64_t world[] = {0, 1, 2, 3};
     const uint64_t sub[] = {2, 3};
     check(OTF2_GlobalDefWriter_WriteGroup(g, G_Locations, S_CommLocations, OTF2_GROUP_TYPE_COMM_LOCATIONS,
-                                          OTF2_PARADIGM_MPI, OTF2_GROUP_FLAG_NONE, 4, locations));
+                                          OTF2_PARADIGM_MPI, OTF2_GROUP_FLAG_NONE, uint32_t(ranks), locations));
     check(OTF2_GlobalDefWriter_WriteGroup(g, G_World, S_Empty, OTF2_GROUP_TYPE_COMM_GROUP,
-                                          OTF2_PARADIGM_MPI, OTF2_GROUP_FLAG_NONE, 4, world));
+                                          OTF2_PARADIGM_MPI, OTF2_GROUP_FLAG_NONE, uint32_t(ranks), world));
+    if (scenario == Scenario::Phases) {
+        check(OTF2_GlobalDefWriter_WriteComm(g, C_World, S_World, G_World, OTF2_UNDEFINED_COMM,
+                                             OTF2_COMM_FLAG_NONE));
+        return ok;
+    }
     check(OTF2_GlobalDefWriter_WriteGroup(g, G_Sub, S_Empty, OTF2_GROUP_TYPE_COMM_GROUP,
                                           OTF2_PARADIGM_MPI, OTF2_GROUP_FLAG_NONE, 2, sub));
     check(OTF2_GlobalDefWriter_WriteComm(g, C_World, S_World, G_World, OTF2_UNDEFINED_COMM,
@@ -303,8 +374,8 @@ QString writeArchive(const QString &dir, bool withRealtime, Scenario scenario)
     std::array<uint64_t, kRanks> counts{};
     ok = ok && writeEvents(archive, scenario, counts);
     ok = ok && OTF2_Archive_CloseEvtFiles(archive) == OTF2_SUCCESS;
-    ok = ok && writeLocalDefs(archive);
-    ok = ok && writeGlobalDefs(archive, withRealtime, counts);
+    ok = ok && writeLocalDefs(archive, scenario);
+    ok = ok && writeGlobalDefs(archive, withRealtime, scenario, counts);
     ok = (OTF2_Archive_Close(archive) == OTF2_SUCCESS) && ok;
     return ok ? QDir(dir).filePath(QStringLiteral("traces.otf2")) : QString();
 }
@@ -324,4 +395,14 @@ QString writeTruncatedOtf2(const QString &dir)
 QString writeNonblockingOtf2(const QString &dir)
 {
     return writeArchive(dir, true, Scenario::Nonblocking);
+}
+
+QString writePhasesOtf2(const QString &dir)
+{
+    return writeArchive(dir, true, Scenario::Phases);
+}
+
+QString writeMetricsOtf2(const QString &dir, bool withClass)
+{
+    return writeArchive(dir, true, withClass ? Scenario::Ring4MetricClass : Scenario::Ring4MetricMembers);
 }

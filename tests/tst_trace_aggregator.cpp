@@ -3,7 +3,38 @@
 #include "ring4_scenario.h"
 #include "trace_aggregator.h"
 
+#include <cmath>
+
 using namespace trace;
+
+namespace {
+constexpr qint64 kMs = 1'000'000;
+
+struct RecordingListener : TraceListener {
+    QVector<MatchedMessage> matched;
+    QVector<P2PSend> unmatchedSends;
+    QVector<P2PRecv> unmatchedRecvs;
+    QVector<CompletedCollective> collectives;
+    void onMatched(const MatchedMessage &m) override { matched.append(m); }
+    void onUnmatchedSend(const P2PSend &s) override { unmatchedSends.append(s); }
+    void onUnmatchedRecv(const P2PRecv &r) override { unmatchedRecvs.append(r); }
+    void onCollective(const CompletedCollective &c) override { collectives.append(c); }
+};
+
+const MatchedMessage *findMatch(const QVector<MatchedMessage> &all, int from, int to, quint32 tag)
+{
+    for (const MatchedMessage &m : all)
+        if (m.send.rank == from && m.send.peer == to && m.recv.rank == to && m.recv.peer == from
+            && m.send.tag == tag && m.recv.tag == tag)
+            return &m;
+    return nullptr;
+}
+
+bool fuzzy(double a, double b)
+{
+    return std::abs(a - b) < 1e-6;
+}
+} // namespace
 
 class TstTraceAggregator : public QObject
 {
@@ -14,6 +45,72 @@ private slots:
         TraceAggregator a;
         feedRing4(a);
         verifyRing4(a.finish(2'500'000'000));
+    }
+
+    void listenerSeesRing4Matches()
+    {
+        TraceAggregator a;
+        RecordingListener l;
+        a.setListener(&l);
+        feedRing4(a);
+        const TraceSummary s = a.finish(2'500'000'000);
+        verifyRing4(s); // numbers unchanged with a listener
+
+        QCOMPARE(l.matched.size(), 6);
+        const MatchedMessage *r3r0 = findMatch(l.matched, 3, 0, 7);
+        QVERIFY(r3r0);
+        QVERIFY2(fuzzy(r3r0->lateSender, 0.299), qPrintable(QString::number(r3r0->lateSender)));
+        QCOMPARE(r3r0->lateReceiver, 0.0);
+        QCOMPARE(r3r0->send.enterNs, 400 * kMs);
+        QCOMPARE(r3r0->send.leaveNs, 401 * kMs);
+        QCOMPARE(r3r0->recv.enterNs, 101 * kMs);
+        QCOMPARE(r3r0->recv.leaveNs, 402 * kMs);
+        QCOMPARE(r3r0->send.bytes, quint64(1000));
+        QCOMPARE(r3r0->recv.function, QStringLiteral("MPI_Recv"));
+
+        const MatchedMessage *r1r2 = findMatch(l.matched, 1, 2, 9);
+        QVERIFY(r1r2);
+        QVERIFY2(fuzzy(r1r2->lateReceiver, 0.300), qPrintable(QString::number(r1r2->lateReceiver)));
+        QCOMPARE(r1r2->lateSender, 0.0);
+        QCOMPARE(r1r2->send.function, QStringLiteral("MPI_Ssend"));
+
+        QCOMPARE(l.unmatchedSends.size(), 1);
+        QCOMPARE(l.unmatchedSends[0].rank, 3);
+        QCOMPARE(l.unmatchedSends[0].peer, 0);
+        QCOMPARE(l.unmatchedSends[0].tag, quint32(11));
+        QCOMPARE(l.unmatchedSends[0].bytes, quint64(100));
+        QCOMPARE(l.unmatchedRecvs.size(), 0);
+
+        QCOMPARE(l.collectives.size(), 1);
+        const CompletedCollective &c = l.collectives[0];
+        QCOMPARE(c.members.size(), 4);
+        QCOMPARE(c.lateSender.size(), 4);
+        QVector<double> byRank(4, -1.0);
+        for (int i = 0; i < c.members.size(); ++i) {
+            QCOMPARE(c.members[i].function, QStringLiteral("MPI_Allreduce"));
+            byRank[c.members[i].rank] = c.lateSender[i];
+        }
+        const double expected[] = {0.2, 0.2, 0.0, 0.2};
+        for (int r = 0; r < 4; ++r)
+            QVERIFY2(fuzzy(byRank[r], expected[r]), qPrintable(QStringLiteral("rank %1: %2").arg(r).arg(byRank[r])));
+    }
+
+    // Instances still incomplete at finish() are reported with the members that arrived;
+    // unmatched receives are reported too.
+    void listenerSeesIncompleteAtFinish()
+    {
+        TraceAggregator a;
+        RecordingListener l;
+        a.setListener(&l);
+        a.addRecv({2, 3, 1, 4, 300, QStringLiteral("MPI_Recv"), 10 * kMs, 20 * kMs});
+        a.addCollective({0, 1, {0, 1}, QStringLiteral("MPI_Barrier"), 30 * kMs, 40 * kMs, 0, 0});
+        QCOMPARE(l.collectives.size(), 0);
+        a.finish(1'000'000'000);
+        QCOMPARE(l.unmatchedRecvs.size(), 1);
+        QCOMPARE(l.unmatchedRecvs[0].bytes, quint64(300));
+        QCOMPARE(l.collectives.size(), 1);
+        QCOMPARE(l.collectives[0].members.size(), 1);
+        QCOMPARE(l.collectives[0].lateSender, QVector<double>{0.0});
     }
 
     void matchesRecvBeforeSend()

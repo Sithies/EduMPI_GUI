@@ -127,6 +127,7 @@ struct RawGroup {
 };
 struct RawRegion {
     OTF2_StringRef name;
+    OTF2_RegionRole role;
     OTF2_Paradigm paradigm;
 };
 
@@ -142,6 +143,10 @@ struct GlobalDefs {
     QHash<OTF2_GroupRef, RawGroup> groups;
     QHash<OTF2_CommRef, OTF2_GroupRef> comms;
     QHash<OTF2_RegionRef, RawRegion> regions;
+    // Synchronous metric classes (e.g. PAPI counters, written as METRIC events at every
+    // Enter / Leave) or metric instances (asynchronous recorders) exist. Metric members alone
+    // (Score-P always defines bytes_sent etc.) produce no events.
+    bool hasMetrics = false;
 };
 
 OTF2_CallbackCode onClock(void *ud, uint64_t resolution, uint64_t offset, uint64_t length, uint64_t realtime)
@@ -202,10 +207,26 @@ OTF2_CallbackCode onComm(void *ud, OTF2_CommRef self, OTF2_StringRef, OTF2_Group
 }
 
 OTF2_CallbackCode onRegion(void *ud, OTF2_RegionRef self, OTF2_StringRef name, OTF2_StringRef,
-                           OTF2_StringRef, OTF2_RegionRole, OTF2_Paradigm paradigm, OTF2_RegionFlag,
+                           OTF2_StringRef, OTF2_RegionRole role, OTF2_Paradigm paradigm, OTF2_RegionFlag,
                            OTF2_StringRef, uint32_t, uint32_t)
 {
-    static_cast<GlobalDefs *>(ud)->regions.insert(self, {name, paradigm});
+    static_cast<GlobalDefs *>(ud)->regions.insert(self, {name, role, paradigm});
+    return OTF2_CALLBACK_SUCCESS;
+}
+
+OTF2_CallbackCode onMetricClass(void *ud, OTF2_MetricRef, uint8_t numberOfMetrics, const OTF2_MetricMemberRef *,
+                                OTF2_MetricOccurrence occurrence, OTF2_RecorderKind)
+{
+    if (numberOfMetrics > 0
+        && (occurrence == OTF2_METRIC_SYNCHRONOUS_STRICT || occurrence == OTF2_METRIC_SYNCHRONOUS))
+        static_cast<GlobalDefs *>(ud)->hasMetrics = true;
+    return OTF2_CALLBACK_SUCCESS;
+}
+
+OTF2_CallbackCode onMetricInstance(void *ud, OTF2_MetricRef, OTF2_MetricRef, OTF2_LocationRef,
+                                   OTF2_MetricScope, uint64_t)
+{
+    static_cast<GlobalDefs *>(ud)->hasMetrics = true;
     return OTF2_CALLBACK_SUCCESS;
 }
 
@@ -226,6 +247,8 @@ bool readGlobalDefs(OTF2_Reader *reader, GlobalDefs &defs, QString *error)
     OTF2_GlobalDefReaderCallbacks_SetGroupCallback(cb, &onGroup);
     OTF2_GlobalDefReaderCallbacks_SetCommCallback(cb, &onComm);
     OTF2_GlobalDefReaderCallbacks_SetRegionCallback(cb, &onRegion);
+    OTF2_GlobalDefReaderCallbacks_SetMetricClassCallback(cb, &onMetricClass);
+    OTF2_GlobalDefReaderCallbacks_SetMetricInstanceCallback(cb, &onMetricInstance);
     const OTF2_ErrorCode regRc = OTF2_Reader_RegisterGlobalDefCallbacks(reader, gdr, cb, &defs);
     OTF2_GlobalDefReaderCallbacks_Delete(cb);
 
@@ -247,6 +270,7 @@ bool readGlobalDefs(OTF2_Reader *reader, GlobalDefs &defs, QString *error)
 struct RegionInfo {
     QString name;
     bool mpi = false;
+    bool user = false; // user function: non-MPI, not artificial / measurement system
     CallKind kind = CallKind::OtherMpi;
 };
 
@@ -266,9 +290,16 @@ struct OpenRegion {
     Collective collective{};
 };
 
+// One open user region of a location.
+struct OpenUserRegion {
+    OTF2_RegionRef region;
+    qint64 enterNs;
+};
+
 struct LocationState {
     int rank = -1;
     QVector<OpenRegion> stack;
+    QVector<OpenUserRegion> userStack;
 };
 
 QString nodeNameOf(const GlobalDefs &d, OTF2_SystemTreeNodeRef parent)
@@ -322,6 +353,12 @@ QHash<OTF2_RegionRef, RegionInfo> resolveRegions(const GlobalDefs &d)
         info.mpi = it->paradigm == OTF2_PARADIGM_MPI;
         if (info.mpi)
             info.kind = classifyMpiFunction(info.name); // once per region definition
+        // Score-P 10 marks "TRACE BUFFER FLUSH" / "MEASUREMENT OFF" etc. as ARTIFICIAL
+        // (paradigm MEASUREMENT_SYSTEM or USER). Names starting with MPI_ are never user
+        // functions, whatever paradigm an old writer gave them.
+        info.user = !info.mpi && it->role != OTF2_REGION_ROLE_ARTIFICIAL
+                 && it->paradigm != OTF2_PARADIGM_MEASUREMENT_SYSTEM
+                 && !info.name.startsWith(QLatin1String("MPI_"));
         regions.insert(it.key(), info);
     }
     return regions;
@@ -364,8 +401,8 @@ QHash<OTF2_CommRef, CommInfo> resolveComms(const GlobalDefs &d)
 class EventTranslator
 {
 public:
-    EventTranslator(TraceAggregator &agg, const GlobalDefs &d, const std::atomic_bool *cancel)
-        : m_agg(agg)
+    EventTranslator(TraceSink &sink, const GlobalDefs &d, const std::atomic_bool *cancel)
+        : m_sink(sink)
         , m_cancel(cancel)
         , m_resolution(d.resolution)
         , m_offset(d.offset)
@@ -403,13 +440,32 @@ public:
 
     void enter(LocationState &st, OTF2_RegionRef region, qint64 ns)
     {
-        if (isMpi(region))
+        const RegionInfo *info = regionInfo(region);
+        if (!info)
+            return;
+        if (info->mpi)
             st.stack.append({region, ns, {}, {}, false, {}});
+        else if (info->user)
+            st.userStack.append({region, ns});
     }
 
     void leave(LocationState &st, OTF2_RegionRef region, qint64 ns)
     {
-        if (!isMpi(region))
+        const RegionInfo *info = regionInfo(region);
+        if (!info)
+            return;
+        if (info->user) {
+            for (int i = int(st.userStack.size()) - 1; i >= 0; --i) {
+                if (st.userStack[i].region != region)
+                    continue;
+                // Unmatched user regions above it (malformed trace) are closed here as well.
+                while (st.userStack.size() > i)
+                    emitUserRegion(st, ns);
+                return;
+            }
+            return;
+        }
+        if (!info->mpi)
             return;
         for (int i = int(st.stack.size()) - 1; i >= 0; --i) {
             if (st.stack[i].region != region)
@@ -430,7 +486,7 @@ public:
         P2PSend s{st.rank, peer, comm, tag, bytes, {}, ns, ns};
         if (st.stack.isEmpty()) {
             s.function = QString::fromLatin1(fallbackFn);
-            m_agg.addSend(s);
+            m_sink.addSend(s);
         } else {
             st.stack.last().sends.append(s);
         }
@@ -452,7 +508,7 @@ public:
         if (st.stack.isEmpty()) {
             if (!fixedFn)
                 r.function = QString::fromLatin1(fallbackFn);
-            m_agg.addRecv(r);
+            m_sink.addRecv(r);
         } else {
             st.stack.last().recvs.append(r);
         }
@@ -475,18 +531,28 @@ public:
     // Regions still open at the end of the trace are closed at endNs.
     void closeAll(qint64 endNs)
     {
-        for (LocationState &st : m_locations)
+        for (LocationState &st : m_locations) {
             while (!st.stack.isEmpty()) {
                 const OpenRegion r = st.stack.takeLast();
                 emitRegion(st, r, std::max(endNs, r.enterNs));
             }
+            while (!st.userStack.isEmpty())
+                emitUserRegion(st, std::max(endNs, st.userStack.last().enterNs));
+        }
     }
 
 private:
-    bool isMpi(OTF2_RegionRef region) const
+    const RegionInfo *regionInfo(OTF2_RegionRef region) const
     {
         const auto it = m_regions.constFind(region);
-        return it != m_regions.cend() && it->mpi;
+        return it == m_regions.cend() ? nullptr : &it.value();
+    }
+
+    // Pops the innermost open user region; its depth is the number of user regions below it.
+    void emitUserRegion(LocationState &st, qint64 leaveNs)
+    {
+        const OpenUserRegion u = st.userStack.takeLast();
+        m_sink.addUserRegion({st.rank, m_regions[u.region].name, int(st.userStack.size()), u.enterNs, leaveNs});
     }
 
     int worldRank(OTF2_CommRef comm, uint32_t local, int self) const
@@ -504,19 +570,19 @@ private:
     void emitRegion(const LocationState &st, const OpenRegion &r, qint64 leaveNs)
     {
         const RegionInfo &info = m_regions[r.region];
-        m_agg.addCall({st.rank, info.kind, info.name, r.enterNs, leaveNs});
+        m_sink.addCall({st.rank, info.kind, info.name, r.enterNs, leaveNs});
         for (P2PSend s : r.sends) {
             s.function = info.name;
             s.enterNs = r.enterNs;
             s.leaveNs = leaveNs;
-            m_agg.addSend(s);
+            m_sink.addSend(s);
         }
         for (P2PRecv rv : r.recvs) {
             if (rv.function.isEmpty())
                 rv.function = info.name;
             rv.enterNs = r.enterNs;
             rv.leaveNs = leaveNs;
-            m_agg.addRecv(rv);
+            m_sink.addRecv(rv);
         }
         // Collective records only for collective operations; handle creation etc. in
         // MPI_Init / MPI_Comm_* also carries MpiCollectiveEnd but is not communication.
@@ -525,11 +591,11 @@ private:
             c.function = info.name;
             c.enterNs = r.enterNs;
             c.leaveNs = leaveNs;
-            m_agg.addCollective(c);
+            m_sink.addCollective(c);
         }
     }
 
-    TraceAggregator &m_agg;
+    TraceSink &m_sink;
     const std::atomic_bool *m_cancel;
     uint64_t m_resolution;
     uint64_t m_offset;
@@ -693,7 +759,7 @@ bool fail(QString *error, const QString &msg)
 
 } // namespace
 
-bool readOtf2(const QString &anchorFile, TraceAggregator &agg, TraceMeta *meta, QString *error,
+bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QString *error,
               const std::atomic_bool *cancel)
 {
     const QFileInfo anchor(anchorFile);
@@ -720,16 +786,26 @@ bool readOtf2(const QString &anchorFile, TraceAggregator &agg, TraceMeta *meta, 
     if (ranks.isEmpty())
         return fail(error, QStringLiteral("No MPI processes found in %1").arg(anchorFile));
     for (auto it = ranks.cbegin(); it != ranks.cend(); ++it)
-        agg.addRank(it.value(), nodeNameOf(defs, defs.locationGroups.value(it.key()).parent));
+        sink.addRank(it.value(), nodeNameOf(defs, defs.locationGroups.value(it.key()).parent));
 
-    EventTranslator tr(agg, defs, cancel);
+    EventTranslator tr(sink, defs, cancel);
     QList<OTF2_LocationRef> selected;
+    TraceMeta m;
     for (auto it = defs.locations.cbegin(); it != defs.locations.cend(); ++it) {
         if (it->type != OTF2_LOCATION_TYPE_CPU_THREAD || it->events == 0 || !ranks.contains(it->group))
             continue;
         selected.append(it.key());
         tr.addLocation(it.key(), ranks.value(it->group));
+        m.eventCount += it->events;
     }
+
+    m.name = anchor.absoluteDir().dirName();
+    m.traceLengthNs = tr.durationNs(defs.length); // declared length; extended to the last event below
+    m.hasMetrics = defs.hasMetrics;
+    m.realtimeStart = defs.realtime == OTF2_UNDEFINED_TIMESTAMP
+        ? QDateTime()
+        : QDateTime::fromMSecsSinceEpoch(qint64(defs.realtime / 1'000'000), QTimeZone::UTC);
+    sink.begin(m);
 
     if (!selected.isEmpty()) {
         if (!prepareLocations(reader.get(), selected, &err))
@@ -741,16 +817,11 @@ bool readOtf2(const QString &anchorFile, TraceAggregator &agg, TraceMeta *meta, 
             return fail(error, QStringLiteral("Cannot read OTF2 events: %1").arg(Otf2ErrorCapture::message(rc)));
     }
 
-    const qint64 lengthNs = std::max(tr.durationNs(defs.length), tr.maxEventNs());
-    tr.closeAll(lengthNs);
+    m.traceLengthNs = std::max(m.traceLengthNs, tr.maxEventNs());
+    tr.closeAll(m.traceLengthNs);
 
-    if (meta) {
-        meta->name = anchor.absoluteDir().dirName();
-        meta->traceLengthNs = lengthNs;
-        meta->realtimeStart = defs.realtime == OTF2_UNDEFINED_TIMESTAMP
-            ? QDateTime()
-            : QDateTime::fromMSecsSinceEpoch(qint64(defs.realtime / 1'000'000), QTimeZone::UTC);
-    }
+    if (meta)
+        *meta = m;
     return true;
 }
 
