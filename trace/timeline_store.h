@@ -87,7 +87,22 @@ struct RankRow {
     QVector<qint32> messages;     // indices of messages sent or received, sorted by sendNs
     QVector<UserSpan> userSpans;  // sorted by (startNs, depth)
     quint8 maxDepth = 0;
+    // Per depth (0..maxDepth) the indices into userSpans of that depth, in start order (spans of
+    // one depth do not overlap, except at the capped depth kMaxUserDepth). The coarse lists hold
+    // only spans lasting at least coarseSpanNs(traceLengthNs) (the pyramid-only overview rule) and
+    // serve zoomed-out phase bands. Built by buildSpanIndex (TimelineBuilder::finish()).
+    QVector<QVector<qint32>> spansByDepth;
+    QVector<QVector<qint32>> spansByDepthCoarse;
 };
+
+// Shortest user span kept for overview zoom: a level-1 pyramid bin (trace length / 4096).
+constexpr qint64 coarseSpanNs(qint64 traceLengthNs)
+{
+    return traceLengthNs > 0 ? traceLengthNs / 4096 : 0;
+}
+
+// (Re)builds row.spansByDepth / spansByDepthCoarse from row.userSpans (sorted by (start, depth)).
+void buildSpanIndex(RankRow &row, qint64 traceLengthNs);
 
 // Overview of the whole run: level k has 1024 * 4^k bins; data[level][rowIndex] holds
 // bins * kCategoryCount values (bin-major), each the fraction of the bin's time spent in that

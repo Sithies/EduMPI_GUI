@@ -456,6 +456,7 @@ std::shared_ptr<TimelineStore> TimelineBuilder::finish()
         std::sort(row.userSpans.begin(), row.userSpans.end(), [](const UserSpan &a, const UserSpan &b) {
             return a.startNs != b.startNs ? a.startNs < b.startNs : a.depth < b.depth;
         });
+        buildSpanIndex(row, store->traceLengthNs);
     }
 
     for (int i = 0; i < store->messages.size(); ++i) {

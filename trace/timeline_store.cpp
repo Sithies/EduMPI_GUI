@@ -44,6 +44,12 @@ quint64 TimelineStore::bytesUsed() const
     quint64 b = vectorBytes(messages) + vectorBytes(collectives);
     for (const RankRow &r : rows)
         b += vectorBytes(r.activities) + vectorBytes(r.links) + vectorBytes(r.messages) + vectorBytes(r.userSpans);
+    for (const RankRow &r : rows) {
+        for (const QVector<qint32> &d : r.spansByDepth)
+            b += vectorBytes(d);
+        for (const QVector<qint32> &d : r.spansByDepthCoarse)
+            b += vectorBytes(d);
+    }
     // Member lists are implicitly shared between entries of the same communicator.
     QSet<const int *> memberLists;
     for (const CollectiveEntry &c : collectives) {
@@ -190,10 +196,39 @@ quint64 pyramidBytes(int ranks, int levels)
     return quint64(qMax(0, ranks)) * bins * kCategoryCount * sizeof(quint16);
 }
 
+void buildSpanIndex(RankRow &row, qint64 traceLengthNs)
+{
+    const int depths = row.userSpans.isEmpty() ? 0 : row.maxDepth + 1;
+    const qint64 minCoarse = coarseSpanNs(traceLengthNs);
+    QVector<int> fine(depths, 0);
+    QVector<int> coarse(depths, 0);
+    for (const UserSpan &u : row.userSpans) {
+        if (u.depth >= depths)
+            continue;
+        ++fine[u.depth];
+        if (u.endNs - u.startNs >= minCoarse)
+            ++coarse[u.depth];
+    }
+    row.spansByDepth = QVector<QVector<qint32>>(depths);
+    row.spansByDepthCoarse = QVector<QVector<qint32>>(depths);
+    for (int d = 0; d < depths; ++d) {
+        row.spansByDepth[d].reserve(fine[d]);
+        row.spansByDepthCoarse[d].reserve(coarse[d]);
+    }
+    for (qsizetype i = 0; i < row.userSpans.size(); ++i) {
+        const UserSpan &u = row.userSpans[i];
+        if (u.depth >= depths)
+            continue;
+        row.spansByDepth[u.depth].append(qint32(i));
+        if (u.endNs - u.startNs >= minCoarse)
+            row.spansByDepthCoarse[u.depth].append(qint32(i));
+    }
+}
+
 quint64 estimateTimelineBytes(quint64 eventCount, bool hasMetrics, int ranks, int pyramidLevels)
 {
     const quint64 e = hasMetrics ? quint64(double(eventCount) * 0.6) : eventCount;
-    return e / 2 * sizeof(Activity) + e / 4 * (sizeof(Message) + 8) + e / 8 * sizeof(UserSpan)
+    return e / 2 * sizeof(Activity) + e / 4 * (sizeof(Message) + 8) + e / 8 * (sizeof(UserSpan) + 2 * sizeof(qint32))
          + pyramidBytes(ranks, pyramidLevels);
 }
 
