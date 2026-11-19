@@ -1,7 +1,9 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#include <algorithm>
 #include <limits>
+#include <tuple>
 
 #include "otf2_fixture.h"
 #include "otf2_trace_reader.h"
@@ -71,6 +73,111 @@ quint16 pyramidValue(const TimelineStore &s, int level, int rank, qint64 ns, Cat
     const int bins = p.binsPerLevel[level];
     const int bin = int(double(ns) * bins / double(p.traceLengthNs));
     return p.data[level][s.rowIndexOfRank(rank)][bin * kCategoryCount + int(c)];
+}
+
+struct BuiltWithSummary {
+    std::shared_ptr<TimelineStore> store;
+    TraceSummary summary;
+};
+
+BuiltWithSummary buildWithSummary(const QString &anchor)
+{
+    BuiltWithSummary b;
+    TraceAggregator agg;
+    TimelineBuilder builder(agg, 0, kAll, true, 1);
+    TraceMeta meta;
+    QString error;
+    if (!readOtf2(anchor, builder, &meta, &error)) {
+        qWarning("%s", qPrintable(error));
+        return b;
+    }
+    b.summary = agg.finish(meta.traceLengthNs);
+    b.store = builder.finish();
+    return b;
+}
+
+QVector<BucketRow> sortedRows(QVector<BucketRow> v)
+{
+    std::sort(v.begin(), v.end(), [](const BucketRow &a, const BucketRow &b) {
+        return std::tie(a.rank, a.commType) < std::tie(b.rank, b.commType);
+    });
+    return v;
+}
+
+QVector<DetailRow> sortedDetails(QVector<DetailRow> v)
+{
+    std::sort(v.begin(), v.end(), [](const DetailRow &a, const DetailRow &b) {
+        return std::tie(a.commType, a.function, a.rank, a.partner, a.collPartners)
+             < std::tie(b.commType, b.function, b.rank, b.partner, b.collPartners);
+    });
+    return v;
+}
+
+bool sameAggregate(const QString &what, const QVector<BucketRow> &wantRows, const QVector<DetailRow> &wantDetails,
+                   const WindowAggregate &w)
+{
+    const QVector<BucketRow> want = sortedRows(wantRows);
+    const QVector<BucketRow> got = sortedRows(w.rows);
+    if (want.size() != got.size()) {
+        qWarning("%s: %d rows, want %d", qPrintable(what), int(got.size()), int(want.size()));
+        return false;
+    }
+    for (int i = 0; i < want.size(); ++i) {
+        const BucketRow &x = want[i];
+        const BucketRow &y = got[i];
+        if (x.rank != y.rank || x.commType != y.commType || x.node != y.node || x.sendBytes != y.sendBytes
+            || x.recvBytes != y.recvBytes || qAbs(x.lateSender - y.lateSender) > 1e-6
+            || qAbs(x.lateReceiver - y.lateReceiver) > 1e-6 || qAbs(x.timeDiff - y.timeDiff) > 1e-6) {
+            qWarning("%s row %d (rank %d %s) differs", qPrintable(what), i, x.rank, qPrintable(x.commType));
+            return false;
+        }
+    }
+    const QVector<DetailRow> wd = sortedDetails(wantDetails);
+    const QVector<DetailRow> gd = sortedDetails(w.details);
+    if (wd.size() != gd.size()) {
+        qWarning("%s: %d details, want %d", qPrintable(what), int(gd.size()), int(wd.size()));
+        return false;
+    }
+    for (int i = 0; i < wd.size(); ++i) {
+        const DetailRow &x = wd[i];
+        const DetailRow &y = gd[i];
+        if (x.commType != y.commType || x.function != y.function || x.rank != y.rank || x.partner != y.partner
+            || x.collPartners != y.collPartners || x.sendBytes != y.sendBytes || x.recvBytes != y.recvBytes) {
+            qWarning("%s detail %d (%s rank %d %s) differs", qPrintable(what), i, qPrintable(x.function), x.rank,
+                     qPrintable(x.commType));
+            return false;
+        }
+    }
+    return true;
+}
+
+// Compares the store's aggregate of every whole second with the stage-1 rows/details.
+bool aggregateEqualsStage1(const BuiltWithSummary &b)
+{
+    for (int sec = 0; sec < b.summary.seconds; ++sec) {
+        const WindowAggregate w = b.store->aggregate(qint64(sec) * 1'000'000'000, qint64(sec + 1) * 1'000'000'000);
+        if (!sameAggregate(QStringLiteral("second %1").arg(sec), b.summary.rows[sec], b.summary.details[sec], w))
+            return false;
+    }
+    return true;
+}
+
+// Feeds hand-made records through a TimelineBuilder (declared length 2 s, ranks 0 and 1).
+template<typename Feed>
+BuiltWithSummary buildSynthetic(Feed feed)
+{
+    BuiltWithSummary b;
+    TraceAggregator agg;
+    TimelineBuilder builder(agg, 0, kAll, true, 1);
+    builder.addRank(0, QStringLiteral("n"));
+    builder.addRank(1, QStringLiteral("n"));
+    TraceMeta meta;
+    meta.traceLengthNs = 2'000'000'000;
+    builder.begin(meta);
+    feed(builder);
+    b.summary = agg.finish(meta.traceLengthNs);
+    b.store = builder.finish();
+    return b;
 }
 
 } // namespace
@@ -471,6 +578,119 @@ private slots:
         }
         QCOMPARE(atCap, 25);
         QCOMPARE(r.userSpans.first().depth, quint8(0));
+    }
+
+    void aggregateMatchesSeconds()
+    {
+        QTemporaryDir tmp;
+        const BuiltWithSummary b = buildWithSummary(writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))));
+        QVERIFY(b.store);
+        QCOMPARE(b.summary.seconds, 3);
+        QVERIFY(aggregateEqualsStage1(b));
+    }
+
+    void aggregateMatchesSecondsWaitall()
+    {
+        QTemporaryDir tmp;
+        const BuiltWithSummary b = buildWithSummary(writeWaitallOtf2(tmp.filePath(QStringLiteral("wa"))));
+        QVERIFY(b.store);
+        QVERIFY(aggregateEqualsStage1(b));
+        // Per-message rule: R1's Waitall [150, 300] completes two receives, both late.
+        double late = 0;
+        for (const BucketRow &r : b.store->aggregate(0, 1'000'000'000).rows)
+            if (r.rank == 1)
+                late += r.lateSender;
+        QVERIFY(late > 0.1 + 1e-9);
+    }
+
+    void aggregateMatchesSecondsNonblocking()
+    {
+        QTemporaryDir tmp;
+        const BuiltWithSummary b = buildWithSummary(writeNonblockingOtf2(tmp.filePath(QStringLiteral("nb"))));
+        QVERIFY(b.store);
+        QVERIFY(aggregateEqualsStage1(b));
+    }
+
+    void aggregateSubSecond()
+    {
+        QTemporaryDir tmp;
+        const BuiltWithSummary b = buildWithSummary(writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))));
+        QVERIFY(b.store);
+        const QVector<BucketRow> rows = sortedRows(b.store->aggregate(0, 300 * kMs).rows);
+        const BucketRow *r0 = nullptr;
+        const BucketRow *r3 = nullptr;
+        for (const BucketRow &r : rows) {
+            if (r.rank == 0 && r.commType == QLatin1String("p2p"))
+                r0 = &r;
+            if (r.rank == 3 && r.commType == QLatin1String("p2p"))
+                r3 = &r;
+        }
+        QVERIFY(r0 && r3);
+        QCOMPARE(r0->sendBytes, qint64(1000));
+        QCOMPARE(r0->recvBytes, qint64(1000));
+        QVERIFY(qAbs(r0->lateSender - 0.299) < 1e-6);
+        QCOMPARE(r3->sendBytes, qint64(0));
+        QCOMPARE(r3->recvBytes, qint64(1000));
+    }
+
+    void aggregateOutsideLoadedWindowIsEmpty()
+    {
+        QTemporaryDir tmp;
+        const Built b = build(writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))), 1000 * kMs, 1300 * kMs);
+        QVERIFY(b.store);
+        QVERIFY(b.store->aggregate(0, 500 * kMs).rows.isEmpty());
+        QVERIFY(!b.store->aggregate(1000 * kMs, 1300 * kMs).rows.isEmpty());
+    }
+
+    void aggregateUnmatchedReceive()
+    {
+        const BuiltWithSummary b = buildSynthetic([](TimelineBuilder &t) {
+            t.addCall({0, CallKind::P2P, QStringLiteral("MPI_Send"), 10 * kMs, 20 * kMs});
+            t.addSend({0, 1, 1, 3, 400, QStringLiteral("MPI_Send"), 10 * kMs, 20 * kMs});
+            t.addCall({1, CallKind::P2P, QStringLiteral("MPI_Recv"), 1500 * kMs, 1600 * kMs});
+            t.addRecv({1, 0, 1, 4, 300, QStringLiteral("MPI_Recv"), 1500 * kMs, 1600 * kMs});
+        });
+        QVERIFY(b.store);
+        QCOMPARE(b.store->unmatchedMessages, 2);
+        bool found = false;
+        for (const Message &m : b.store->messages)
+            found = found || (m.sendNs < 0 && m.receiver == 1 && m.sender == 0 && m.bytes == 300);
+        QVERIFY(found);
+        QVERIFY(aggregateEqualsStage1(b));
+    }
+
+    void aggregateSelfSendrecv()
+    {
+        const BuiltWithSummary b = buildSynthetic([](TimelineBuilder &t) {
+            t.addCall({0, CallKind::P2P, QStringLiteral("MPI_Sendrecv"), 10 * kMs, 20 * kMs});
+            t.addSend({0, 0, 1, 5, 100, QStringLiteral("MPI_Sendrecv"), 10 * kMs, 20 * kMs});
+            t.addRecv({0, 0, 1, 5, 100, QStringLiteral("MPI_Sendrecv"), 10 * kMs, 20 * kMs});
+        });
+        QVERIFY(b.store);
+        QVERIFY(aggregateEqualsStage1(b));
+        const WindowAggregate w = b.store->aggregate(0, 1'000'000'000);
+        QCOMPARE(w.rows.size(), 1);
+        QCOMPARE(w.rows[0].sendBytes, qint64(100));
+        QCOMPARE(w.rows[0].recvBytes, qint64(100));
+    }
+
+    void windowedAggregateEqualsCompleteStore()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeRing4Otf2(tmp.filePath(QStringLiteral("r4")));
+        const Built full = build(anchor);
+        QVERIFY(full.store);
+        // R0's MPI_Recv [101, 402] enters inside [0, 300 ms], its send (R3) enters at 400 ms.
+        const qint64 windows[][2] = {{0, 300 * kMs}, {0, 120 * kMs}, {100 * kMs, 300 * kMs}, {50 * kMs, 450 * kMs}};
+        for (const auto &w : windows) {
+            const Built part = build(anchor, w[0], w[1]);
+            QVERIFY(part.store);
+            const WindowAggregate want = full.store->aggregate(w[0], w[1]);
+            QVERIFY(!want.rows.isEmpty());
+            QVERIFY2(sameAggregate(QStringLiteral("window %1-%2").arg(w[0]).arg(w[1]), want.rows, want.details,
+                                   part.store->aggregate(w[0], w[1])),
+                     "windowed store differs from complete store");
+        }
     }
 
     void estimateIsUpperBound()

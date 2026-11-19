@@ -69,7 +69,7 @@ private:
     int findActivity(int row, qint64 startNs, qint64 endNs) const;
     void addToPyramid(int row, qint64 start, qint64 end, Category cat, bool subtract);
     void patchWait(int row, const P2PRecv &recv, qint64 lateNs);
-    void addMessage(const P2PSend &send, const P2PRecv *recv, double lateSender, double lateReceiver);
+    void addMessage(const P2PSend *send, const P2PRecv *recv, double lateSender, double lateReceiver);
 
     TraceAggregator &m_agg;
     std::shared_ptr<TimelineStore> m_store;

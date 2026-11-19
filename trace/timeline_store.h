@@ -52,7 +52,8 @@ struct UserSpan {
 constexpr int kMaxUserDepth = 15;
 
 // sendNs = enter of the send call, recvNs = leave of the call completing the receive.
-// Unmatched sends: receiver = -1, recvNs = -1 (unmatched receives are not stored).
+// Unmatched sends: receiver = -1, recvNs = -1. Unmatched receives (needed for stage-1 byte
+// equality): sendNs = -1, sender = the expected sender; not to be drawn as arrows (skip sendNs < 0).
 struct Message {
     int sender;
     int receiver;
@@ -63,6 +64,9 @@ struct Message {
     quint64 comm;
     double lateSender;   // seconds
     double lateReceiver; // seconds
+    quint16 sendFunction; // function names the stage-1 detail rows use for each side
+    quint16 recvFunction; // (e.g. "MPI_Irecv" although a MPI_Wait completes it); = sendFunction if unmatched
+    int destination;      // the send's intended receiver (kept for unmatched sends, receiver = -1)
 };
 
 // One rank's participation in a collective instance.
@@ -95,6 +99,12 @@ struct Pyramid {
     QVector<QVector<QVector<quint16>>> data;
 };
 
+// Result of TimelineStore::aggregate: same row layout as the stage-1 TraceAggregator.
+struct WindowAggregate {
+    QVector<BucketRow> rows;
+    QVector<DetailRow> details;
+};
+
 class TimelineStore
 {
 public:
@@ -112,6 +122,13 @@ public:
 
     quint64 bytesUsed() const; // payload bytes (O(ranks) bookkeeping excluded)
     int rowIndexOfRank(int rank) const; // -1 if unknown
+
+    // Stage-1 rules (TraceAggregator) for any window: a call counts if its enter lies in
+    // [fromNs, toNs); send bytes / late receiver come from the send call, receive bytes / late
+    // sender from the receive call (summed per message), collectives from `collectives`,
+    // time_diff = full duration of counted calls. Precondition: complete or the window lies
+    // within [this->fromNs, this->toNs]; otherwise returns an empty result.
+    WindowAggregate aggregate(qint64 fromNs, qint64 toNs) const;
 };
 
 // Bytes of a pyramid with the given number of rank rows and levels.

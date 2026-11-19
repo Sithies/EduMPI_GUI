@@ -1,6 +1,10 @@
 #include "timeline_store.h"
 
+#include <QMap>
 #include <QSet>
+
+#include <algorithm>
+#include <tuple>
 
 namespace trace {
 
@@ -71,6 +75,111 @@ int TimelineStore::rowIndexOfRank(int rank) const
             hi = mid;
     }
     return lo < rows.size() && rows[lo].rank == rank ? lo : -1;
+}
+
+namespace {
+QByteArray partnerMask(const QVector<int> &members, int self)
+{
+    int maxRank = -1;
+    for (int m : members)
+        maxRank = std::max(maxRank, m);
+    QByteArray mask((maxRank + 8) / 8, '\0');
+    for (int m : members) {
+        if (m == self || m < 0)
+            continue;
+        mask[m / 8] = char(uchar(mask[m / 8]) | (1u << (m % 8)));
+    }
+    return mask;
+}
+
+struct Sums {
+    qint64 sendBytes = 0;
+    qint64 recvBytes = 0;
+    double lateSender = 0;
+    double lateReceiver = 0;
+    double timeDiff = 0;
+};
+struct DetailKey {
+    bool collective;
+    QString function;
+    int rank;
+    int partner;
+    QByteArray collPartners;
+    bool operator<(const DetailKey &o) const
+    {
+        return std::tie(collective, rank, function, partner, collPartners)
+             < std::tie(o.collective, o.rank, o.function, o.partner, o.collPartners);
+    }
+};
+} // namespace
+
+WindowAggregate TimelineStore::aggregate(qint64 from, qint64 to) const
+{
+    WindowAggregate out;
+    if (!complete && !(from >= fromNs && to <= toNs))
+        return out;
+
+    QMap<QPair<int, bool>, Sums> buckets; // (rank, collective), as in stage 1
+    QMap<DetailKey, QPair<qint64, qint64>> details;
+
+    for (const RankRow &r : rows) {
+        auto first = std::lower_bound(r.activities.cbegin(), r.activities.cend(), from,
+                                      [](const Activity &a, qint64 t) { return a.startNs < t; });
+        for (auto it = first; it != r.activities.cend() && it->startNs < to; ++it) {
+            const Activity &a = *it;
+            if (a.category == Category::OtherMpi || a.category == Category::Compute)
+                continue;
+            const bool coll = a.category == Category::Collective;
+            Sums &b = buckets[{r.rank, coll}];
+            b.timeDiff += double(a.endNs - a.startNs) / 1e9;
+            for (int i = 0; i < a.linkCount; ++i) {
+                const qint32 link = r.links[a.firstLink + i];
+                // A message to self inside one call (MPI_Sendrecv) is linked twice: handle once.
+                if (!coll && std::find(r.links.cbegin() + a.firstLink, r.links.cbegin() + a.firstLink + i, link)
+                        != r.links.cbegin() + a.firstLink + i)
+                    continue;
+                if (coll) {
+                    const CollectiveEntry &c = collectives[link];
+                    b.sendBytes += qint64(c.bytesSent);
+                    b.recvBytes += qint64(c.bytesRecv);
+                    b.lateSender += c.lateSender;
+                    auto &d = details[{true, functions.value(a.function), r.rank, -1,
+                                       partnerMask(c.members, r.rank)}];
+                    d.first += qint64(c.bytesSent);
+                    d.second += qint64(c.bytesRecv);
+                    continue;
+                }
+                const Message &m = messages[link];
+                if (m.sender == r.rank && m.sendNs >= 0 && m.sendNs == a.startNs) {
+                    b.sendBytes += qint64(m.bytes);
+                    b.lateReceiver += m.lateReceiver;
+                    details[{false, functions.value(m.sendFunction), r.rank, m.destination, {}}].first
+                        += qint64(m.bytes);
+                }
+                if (m.receiver == r.rank && m.recvNs == a.endNs) {
+                    b.recvBytes += qint64(m.bytes);
+                    b.lateSender += m.lateSender;
+                    details[{false, functions.value(m.recvFunction), r.rank, m.sender, {}}].second
+                        += qint64(m.bytes);
+                }
+            }
+        }
+    }
+
+    for (auto it = buckets.cbegin(); it != buckets.cend(); ++it) {
+        const int rank = it.key().first;
+        const int row = rowIndexOfRank(rank);
+        const Sums &b = it.value();
+        out.rows.append({row >= 0 ? rows[row].node : QString(), rank,
+                         it.key().second ? QStringLiteral("collective") : QStringLiteral("p2p"),
+                         b.sendBytes, b.recvBytes, b.lateSender, b.lateReceiver, b.timeDiff});
+    }
+    for (auto it = details.cbegin(); it != details.cend(); ++it) {
+        const DetailKey &k = it.key();
+        out.details.append({k.collective ? QStringLiteral("collective") : QStringLiteral("p2p"), k.function,
+                            k.rank, k.partner, k.collPartners, it.value().first, it.value().second});
+    }
+    return out;
 }
 
 quint64 pyramidBytes(int ranks, int levels)

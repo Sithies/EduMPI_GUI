@@ -306,22 +306,43 @@ void TimelineBuilder::patchWait(int row, const P2PRecv &recv, qint64 lateNs)
         addToPyramid(row, recv.enterNs + oldWait, recv.enterNs + wait, cat, true);
 }
 
-void TimelineBuilder::addMessage(const P2PSend &send, const P2PRecv *recv, double lateSender, double lateReceiver)
+void TimelineBuilder::addMessage(const P2PSend *send, const P2PRecv *recv, double lateSender, double lateReceiver)
 {
     if (!m_keep)
         return;
-    const qint64 sendNs = send.enterNs;
+    // Kept if the message's span overlaps the window; a receive counts from its enter (the
+    // receive call is aggregated by its enter), the arrow ends at its leave.
+    const qint64 sendNs = send ? send->enterNs : -1;
     const qint64 recvNs = recv ? recv->leaveNs : -1;
-    const qint64 lo = recv ? std::min(sendNs, recvNs) : sendNs;
-    const qint64 hi = recv ? std::max(sendNs, recvNs) : sendNs;
+    qint64 lo = send ? send->enterNs : recv->enterNs;
+    qint64 hi = lo;
+    if (recv) {
+        lo = std::min(lo, recv->enterNs);
+        hi = std::max(hi, recv->leaveNs);
+    }
     if (!overlapsWindow(lo, hi))
         return;
     const int idx = int(m_store->messages.size());
-    m_store->messages.append({send.rank, recv ? recv->rank : -1, sendNs, recvNs, send.bytes, send.tag, send.comm,
-                              lateSender, lateReceiver});
-    const int sRow = rowIndex(send.rank);
-    if (sRow >= 0)
-        m_rowState[sRow].links.append({send.enterNs, idx});
+    const P2PSend &ref = send ? *send : P2PSend{};
+    Message m{};
+    m.sender = send ? send->rank : recv->peer;
+    m.receiver = recv ? recv->rank : -1;
+    m.sendNs = sendNs;
+    m.recvNs = recvNs;
+    m.bytes = send ? send->bytes : recv->bytes;
+    m.tag = send ? send->tag : recv->tag;
+    m.comm = send ? send->comm : recv->comm;
+    m.lateSender = lateSender;
+    m.lateReceiver = lateReceiver;
+    m.sendFunction = send ? functionIndex(ref.function) : functionIndex(recv->function);
+    m.recvFunction = recv ? functionIndex(recv->function) : m.sendFunction;
+    m.destination = send ? send->peer : recv->rank;
+    m_store->messages.append(m);
+    if (send) {
+        const int sRow = rowIndex(send->rank);
+        if (sRow >= 0)
+            m_rowState[sRow].links.append({send->enterNs, idx});
+    }
     if (recv) {
         const int rRow = rowIndex(recv->rank);
         if (rRow >= 0)
@@ -334,19 +355,19 @@ void TimelineBuilder::onMatched(const MatchedMessage &match)
     const int rRow = rowIndex(match.recv.rank);
     if (rRow >= 0)
         patchWait(rRow, match.recv, std::max<qint64>(0, match.send.enterNs - match.recv.enterNs));
-    addMessage(match.send, &match.recv, match.lateSender, match.lateReceiver);
+    addMessage(&match.send, &match.recv, match.lateSender, match.lateReceiver);
 }
 
 void TimelineBuilder::onUnmatchedSend(const P2PSend &send)
 {
     ++m_store->unmatchedMessages;
-    addMessage(send, nullptr, 0.0, 0.0);
+    addMessage(&send, nullptr, 0.0, 0.0);
 }
 
 void TimelineBuilder::onUnmatchedRecv(const P2PRecv &recv)
 {
-    Q_UNUSED(recv);
     ++m_store->unmatchedMessages;
+    addMessage(nullptr, &recv, 0.0, 0.0);
 }
 
 void TimelineBuilder::onCollective(const CompletedCollective &coll)
@@ -439,7 +460,7 @@ std::shared_ptr<TimelineStore> TimelineBuilder::finish()
 
     for (int i = 0; i < store->messages.size(); ++i) {
         const Message &m = store->messages[i];
-        const int s = store->rowIndexOfRank(m.sender);
+        const int s = m.sendNs < 0 ? -1 : store->rowIndexOfRank(m.sender); // unmatched receive: no send side
         if (s >= 0)
             store->rows[s].messages.append(i);
         if (m.receiver >= 0 && m.receiver != m.sender) {
