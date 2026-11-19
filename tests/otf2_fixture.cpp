@@ -7,6 +7,7 @@
 #include <otf2/otf2.h>
 
 #include <array>
+#include <vector>
 
 namespace {
 
@@ -442,4 +443,104 @@ QString writePhasesOtf2(const QString &dir)
 QString writeMetricsOtf2(const QString &dir, bool withClass)
 {
     return writeArchive(dir, true, withClass ? Scenario::Ring4MetricClass : Scenario::Ring4MetricMembers);
+}
+
+QString writeManyMessagesOtf2(const QString &dir, int ranks, int messagesPerRank)
+{
+    if (ranks < 2 || messagesPerRank < 1 || !QDir().mkpath(dir))
+        return {};
+    constexpr uint64_t kStepNs = 100'000;
+    constexpr uint64_t kCallNs = 10'000;
+    const uint64_t lengthNs = uint64_t(messagesPerRank) * kStepNs + 1'000'000;
+    auto t = [](uint64_t ns) { return OTF2_TimeStamp(kOffset + ns); };
+
+    const QByteArray path = QDir(dir).absolutePath().toUtf8();
+    OTF2_Archive *archive = OTF2_Archive_Open(path.constData(), "traces", OTF2_FILEMODE_WRITE,
+                                              1024 * 1024, 4 * 1024 * 1024, OTF2_SUBSTRATE_POSIX,
+                                              OTF2_COMPRESSION_NONE);
+    if (!archive)
+        return {};
+    bool ok = OTF2_Archive_SetFlushCallbacks(archive, &gFlushCallbacks, nullptr) == OTF2_SUCCESS
+           && OTF2_Archive_SetSerialCollectiveCallbacks(archive) == OTF2_SUCCESS
+           && OTF2_Archive_OpenEvtFiles(archive) == OTF2_SUCCESS;
+    auto check = [&ok](OTF2_ErrorCode rc) { ok = ok && rc == OTF2_SUCCESS; };
+
+    enum : OTF2_RegionRef { kMain, kSend, kRecv };
+    std::vector<uint64_t> counts(size_t(ranks), 0);
+    for (int r = 0; ok && r < ranks; ++r) {
+        OTF2_EvtWriter *w = OTF2_Archive_GetEvtWriter(archive, OTF2_LocationRef(r));
+        if (!w) {
+            ok = false;
+            break;
+        }
+        uint64_t &n = counts[size_t(r)];
+        auto ev = [&](OTF2_ErrorCode rc) { check(rc); ++n; };
+        const uint32_t next = uint32_t((r + 1) % ranks);
+        const uint32_t prev = uint32_t((r + ranks - 1) % ranks);
+        ev(OTF2_EvtWriter_Enter(w, nullptr, t(0), kMain));
+        for (int i = 0; ok && i < messagesPerRank; ++i) {
+            const uint64_t s = uint64_t(i) * kStepNs;
+            ev(OTF2_EvtWriter_Enter(w, nullptr, t(s), kSend));
+            ev(OTF2_EvtWriter_MpiSend(w, nullptr, t(s), next, 0, 0, 64));
+            ev(OTF2_EvtWriter_Leave(w, nullptr, t(s + kCallNs), kSend));
+            ev(OTF2_EvtWriter_Enter(w, nullptr, t(s + 2 * kCallNs), kRecv));
+            ev(OTF2_EvtWriter_MpiRecv(w, nullptr, t(s + 3 * kCallNs), prev, 0, 0, 64));
+            ev(OTF2_EvtWriter_Leave(w, nullptr, t(s + 3 * kCallNs), kRecv));
+        }
+        ev(OTF2_EvtWriter_Leave(w, nullptr, t(lengthNs), kMain));
+        check(OTF2_Archive_CloseEvtWriter(archive, w));
+    }
+    ok = ok && OTF2_Archive_CloseEvtFiles(archive) == OTF2_SUCCESS;
+
+    if (ok && OTF2_Archive_OpenDefFiles(archive) == OTF2_SUCCESS) {
+        for (int r = 0; r < ranks; ++r) {
+            OTF2_DefWriter *dw = OTF2_Archive_GetDefWriter(archive, OTF2_LocationRef(r));
+            ok = ok && dw && OTF2_Archive_CloseDefWriter(archive, dw) == OTF2_SUCCESS;
+        }
+        ok = OTF2_Archive_CloseDefFiles(archive) == OTF2_SUCCESS && ok;
+    } else {
+        ok = false;
+    }
+
+    OTF2_GlobalDefWriter *g = ok ? OTF2_Archive_GetGlobalDefWriter(archive) : nullptr;
+    if (g) {
+        // Strings: 0 "", 1 machine, 2 node, 3 nodeA, 4 nodeB, 5 thread, 6 main, 7 MPI_Send,
+        // 8 MPI_Recv, 9 MPI_COMM_WORLD, 10.. "Rank r".
+        QList<QByteArray> strings{"", "machine", "node", "nodeA", "nodeB", "Master thread",
+                                  "main", "MPI_Send", "MPI_Recv", "MPI_COMM_WORLD"};
+        for (int r = 0; r < ranks; ++r)
+            strings.append(QByteArray("Rank ") + QByteArray::number(r));
+        check(OTF2_GlobalDefWriter_WriteClockProperties(g, kResolution, kOffset, lengthNs,
+                                                        OTF2_UNDEFINED_TIMESTAMP));
+        for (int i = 0; i < strings.size(); ++i)
+            check(OTF2_GlobalDefWriter_WriteString(g, OTF2_StringRef(i), strings[i].constData()));
+        check(OTF2_GlobalDefWriter_WriteSystemTreeNode(g, 0, 1, 1, OTF2_UNDEFINED_SYSTEM_TREE_NODE));
+        check(OTF2_GlobalDefWriter_WriteSystemTreeNode(g, 1, 3, 2, 0));
+        check(OTF2_GlobalDefWriter_WriteSystemTreeNode(g, 2, 4, 2, 0));
+        for (int r = 0; r < ranks; ++r) {
+            check(OTF2_GlobalDefWriter_WriteLocationGroup(g, OTF2_LocationGroupRef(r), OTF2_StringRef(10 + r),
+                                                          OTF2_LOCATION_GROUP_TYPE_PROCESS,
+                                                          r < ranks / 2 ? 1 : 2, OTF2_UNDEFINED_LOCATION_GROUP));
+            check(OTF2_GlobalDefWriter_WriteLocation(g, OTF2_LocationRef(r), 5, OTF2_LOCATION_TYPE_CPU_THREAD,
+                                                     counts[size_t(r)], OTF2_LocationGroupRef(r)));
+        }
+        check(OTF2_GlobalDefWriter_WriteRegion(g, kMain, 6, 6, 0, OTF2_REGION_ROLE_FUNCTION, OTF2_PARADIGM_USER,
+                                               OTF2_REGION_FLAG_NONE, 0, 0, 0));
+        check(OTF2_GlobalDefWriter_WriteRegion(g, kSend, 7, 7, 0, OTF2_REGION_ROLE_POINT2POINT,
+                                               OTF2_PARADIGM_MPI, OTF2_REGION_FLAG_NONE, 0, 0, 0));
+        check(OTF2_GlobalDefWriter_WriteRegion(g, kRecv, 8, 8, 0, OTF2_REGION_ROLE_POINT2POINT,
+                                               OTF2_PARADIGM_MPI, OTF2_REGION_FLAG_NONE, 0, 0, 0));
+        std::vector<uint64_t> members(static_cast<size_t>(ranks));
+        for (int r = 0; r < ranks; ++r)
+            members[size_t(r)] = uint64_t(r);
+        check(OTF2_GlobalDefWriter_WriteGroup(g, 0, 0, OTF2_GROUP_TYPE_COMM_LOCATIONS, OTF2_PARADIGM_MPI,
+                                              OTF2_GROUP_FLAG_NONE, uint32_t(ranks), members.data()));
+        check(OTF2_GlobalDefWriter_WriteGroup(g, 1, 0, OTF2_GROUP_TYPE_COMM_GROUP, OTF2_PARADIGM_MPI,
+                                              OTF2_GROUP_FLAG_NONE, uint32_t(ranks), members.data()));
+        check(OTF2_GlobalDefWriter_WriteComm(g, 0, 9, 1, OTF2_UNDEFINED_COMM, OTF2_COMM_FLAG_NONE));
+    } else {
+        ok = false;
+    }
+    ok = (OTF2_Archive_Close(archive) == OTF2_SUCCESS) && ok;
+    return ok ? QDir(dir).filePath(QStringLiteral("traces.otf2")) : QString();
 }

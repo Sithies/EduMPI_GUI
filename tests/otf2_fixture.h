@@ -35,3 +35,9 @@ QString writePhasesOtf2(const QString &dir);
 // ring4 plus metric definitions: a "bytes_sent" metric member (type OTHER) and, with
 // withClass, a PAPI member in a SYNCHRONOUS_STRICT metric class (as Score-P writes with PAPI).
 QString writeMetricsOtf2(const QString &dir, bool withClass);
+
+// Synthetic large trace: `ranks` ranks (first half on nodeA, rest on nodeB), WORLD = all ranks,
+// main [0, length] on every rank, length = messagesPerRank * 100 us + 1 ms. Message i of rank r:
+// MPI_Send [i * 100 us, +10 us] to (r + 1) % ranks (tag 0, 64 B) and MPI_Recv [i * 100 us + 20 us,
+// +10 us] from (r - 1) % ranks. About 6 * messagesPerRank events per rank.
+QString writeManyMessagesOtf2(const QString &dir, int ranks, int messagesPerRank);

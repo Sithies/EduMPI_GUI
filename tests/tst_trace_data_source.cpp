@@ -1,7 +1,10 @@
 #include <QtTest>
 
 #include "otf2_fixture.h"
+#include "timeline_snapshot.h"
 #include "trace_data_source.h"
+
+#include <QThread>
 
 using Matrix = QVector<QVector<long>>;
 
@@ -11,6 +14,14 @@ class TstTraceDataSource : public QObject
 
     QTemporaryDir m_tmp;
     QString m_anchor;
+    QString m_many; // 8 ranks x 20000 messages, ~2 s
+
+    static constexpr qint64 kMs = 1'000'000;
+
+    static std::shared_ptr<const trace::TimelineStore> lastStore(const QSignalSpy &spy)
+    {
+        return spy.last().at(0).value<trace::TimelineSnapshot>().store;
+    }
 
     static const DataColumn *findRow(const QList<DataColumn> &list, int rank, const QString &type)
     {
@@ -43,7 +54,11 @@ private slots:
         QVERIFY(m_tmp.isValid());
         m_anchor = writeRing4Otf2(m_tmp.path());
         QVERIFY(!m_anchor.isEmpty());
+        m_many = writeManyMessagesOtf2(m_tmp.filePath(QStringLiteral("many")), 8, 20000);
+        QVERIFY(!m_many.isEmpty());
     }
+
+    void cleanup() { qunsetenv("EDUMPI_TRACE_BUDGET_MB"); }
 
     void connectsAndClears()
     {
@@ -386,6 +401,214 @@ private slots:
         src.threadbuildClusterComponents();
         QCOMPARE(failed.count(), 1);
         QCOMPARE(ready.count(), 0);
+    }
+    // ---- Stage 2: memory budget, detail requests, window queries -------------------------
+
+    void fullModeDeliversCompleteStore()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "256");
+        Trace_Data_Source src(m_anchor);
+        QStringList order;
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        connect(&src, &Trace_Data_Source::timelineReady, this, [&] { order << "timeline"; });
+        connect(&src, &Trace_Data_Source::clusterComponentsReady, this, [&] { order << "components"; });
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        QCOMPARE(order, (QStringList{"timeline", "components"}));
+        const auto store = lastStore(timeline);
+        QVERIFY(store);
+        QVERIFY(store->complete);
+        QCOMPARE(store->rows.size(), 4);
+        QVERIFY(store->pyramid.levels >= 1);
+        // Full mode ignores detail requests.
+        src.requestDetail(100 * kMs, 200 * kMs);
+        QCOMPARE(timeline.count(), 1);
+    }
+
+    void smallBudgetSwitchesToWindowedMode()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        Trace_Data_Source src(m_many);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        QCOMPARE(timeline.count(), 1);
+        const auto store = lastStore(timeline);
+        QVERIFY(store);
+        QVERIFY(!store->complete);
+        QCOMPARE(store->rows.size(), 8);
+        QVERIFY(store->pyramid.levels >= 1);
+        QVERIFY(trace::pyramidBytes(8, store->pyramid.levels) <= 512 * 1024);
+        QVERIFY2(store->bytesUsed() <= 1024 * 1024, qPrintable(QString::number(store->bytesUsed())));
+        for (const trace::RankRow &r : store->rows)
+            QVERIFY(r.activities.isEmpty());
+        // The overview carries the detail-window cap.
+        const qint64 cap = timeline.last().at(0).value<trace::TimelineSnapshot>().maxDetailWindowNs;
+        QVERIFY(cap > 0);
+        QVERIFY(cap < store->traceLengthNs);
+    }
+
+    // A stopped source still answers a detail request (null store), so that the model's
+    // loadingDetail does not stay true.
+    void detailRequestAfterStopIsAnswered()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        Trace_Data_Source src(m_many);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        src.set_thread_running(false);
+        src.requestDetail(1000 * kMs, 1001 * kMs);
+        QCOMPARE(timeline.count(), 2);
+        const trace::TimelineSnapshot snap = timeline.last().at(0).value<trace::TimelineSnapshot>();
+        QVERIFY(!snap.store);
+        QCOMPARE(snap.requestFromNs, 1000 * kMs);
+        QCOMPARE(snap.requestToNs, 1001 * kMs);
+    }
+
+    void detailRequestLoadsOnlyWindow()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        Trace_Data_Source src(m_many);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        const qint64 a = 1000 * kMs;
+        const qint64 b = a + kMs;
+        src.requestDetail(a, b);
+        QCOMPARE(timeline.count(), 2);
+        const trace::TimelineSnapshot snap = timeline.last().at(0).value<trace::TimelineSnapshot>();
+        QCOMPARE(snap.requestFromNs, a);
+        QCOMPARE(snap.requestToNs, b);
+        const auto store = snap.store;
+        QVERIFY(store);
+        QVERIFY(!store->complete);
+        QVERIFY(store->fromNs <= a);
+        QVERIFY(store->toNs >= b);
+        QVERIFY(store->toNs - store->fromNs < 100 * kMs); // a window, not the whole run
+        int activities = 0;
+        for (const trace::RankRow &r : store->rows) {
+            for (const trace::Activity &act : r.activities) {
+                QVERIFY(act.endNs >= store->fromNs && act.startNs <= store->toNs);
+                ++activities;
+            }
+        }
+        QVERIFY(activities > 0);
+        QVERIFY(store->bytesUsed() <= 256 * 1024);
+
+        // The loaded window answers window queries exactly.
+        QSignalSpy shown(&src, &Trace_Data_Source::traceWindowShown);
+        QSignalSpy data(&src, &Trace_Data_Source::updateDataReady);
+        src.showTraceWindow(a, b);
+        QCOMPARE(shown.count(), 1);
+        QCOMPARE(shown.last().at(2).toBool(), true);
+        QCOMPARE(lastList(data).size(), 8);
+    }
+
+    // Requests from another thread while the source works on its own thread: only the latest
+    // one is answered last.
+    void latestDetailRequestWins()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        QThread worker;
+        auto *src = new Trace_Data_Source(m_many);
+        src->moveToThread(&worker);
+        QSignalSpy timeline(src, &Trace_Data_Source::timelineReady);
+        QSignalSpy ready(src, &Trace_Data_Source::clusterComponentsReady);
+        worker.start();
+        QMetaObject::invokeMethod(src, &Trace_Data_Source::threadbuildClusterComponents, Qt::QueuedConnection);
+        QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 20000);
+        src->requestDetail(500 * kMs, 501 * kMs);
+        src->requestDetail(600 * kMs, 601 * kMs);
+        src->requestDetail(1500 * kMs, 1501 * kMs);
+        QTRY_VERIFY_WITH_TIMEOUT(timeline.count() >= 2
+                                     && timeline.last().at(0).value<trace::TimelineSnapshot>().requestFromNs
+                                            == 1500 * kMs,
+                                 20000);
+        QTest::qWait(300);
+        const trace::TimelineSnapshot snap = timeline.last().at(0).value<trace::TimelineSnapshot>();
+        QCOMPARE(snap.requestFromNs, 1500 * kMs);
+        QVERIFY(snap.store && snap.store->fromNs <= 1500 * kMs && snap.store->toNs >= 1501 * kMs);
+        src->set_thread_running(false);
+        worker.quit();
+        worker.wait();
+        delete src;
+    }
+
+    void showTraceWindowExact()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "256");
+        Trace_Data_Source src(m_anchor);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        QSignalSpy data(&src, &Trace_Data_Source::updateDataReady);
+        QSignalSpy pSend(&src, &Trace_Data_Source::setCommMatrixP2PSend);
+        QSignalSpy shown(&src, &Trace_Data_Source::traceWindowShown);
+        src.showTraceWindow(0, 300 * kMs);
+        QCOMPARE(shown.count(), 1);
+        QCOMPARE(shown.last().at(0).toLongLong(), 0);
+        QCOMPARE(shown.last().at(1).toLongLong(), 300 * kMs);
+        QCOMPARE(shown.last().at(2).toBool(), true);
+
+        const QList<DataColumn> list = lastList(data);
+        const DataColumn *r0 = findRow(list, 0, "p2p");
+        const DataColumn *r3 = findRow(list, 3, "p2p");
+        QVERIFY(r0 && r3);
+        QCOMPARE(r0->proc_name, QStringLiteral("nodeA"));
+        QCOMPARE(r0->send_datasize, 1000L);
+        QCOMPARE(r0->recv_datasize, 1000L);
+        QVERIFY(qAbs(r0->late_sender - 0.299f) < 1e-5f);
+        QCOMPARE(r3->send_datasize, 0L);
+        QCOMPARE(r3->recv_datasize, 1000L);
+        // R3's send at 400 ms is outside the window.
+        Matrix expectedSend(4, QVector<long>(4, 0));
+        expectedSend[0][1] = expectedSend[1][2] = expectedSend[2][3] = 1000;
+        QCOMPARE(lastMatrix(pSend), expectedSend);
+    }
+
+    void showTraceWindowFallsBackToSeconds()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        Trace_Data_Source src(m_many);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        QSignalSpy data(&src, &Trace_Data_Source::updateDataReady);
+        QSignalSpy shown(&src, &Trace_Data_Source::traceWindowShown);
+        QSignalSpy total(&src, &Trace_Data_Source::setCommMatrixTotalSend);
+
+        src.showTraceWindow(250 * kMs, 1500 * kMs); // nothing loaded in detail
+        QCOMPARE(shown.count(), 1);
+        QCOMPARE(shown.last().at(0).toLongLong(), 0);
+        QCOMPARE(shown.last().at(1).toLongLong(), 2000 * kMs);
+        QCOMPARE(shown.last().at(2).toBool(), false);
+        const QList<DataColumn> windowRows = lastList(data);
+        const Matrix windowTotal = lastMatrix(total);
+
+        // Same rows as the stage-1 query of seconds 0..1.
+        const QDateTime start = src.startTimestamp();
+        src.showDataFromTimePeriod(start, start.addSecs(1));
+        const QList<DataColumn> secondRows = lastList(data);
+        QCOMPARE(windowRows.size(), secondRows.size());
+        QCOMPARE(windowRows.size(), 8);
+        for (int i = 0; i < windowRows.size(); ++i) {
+            QCOMPARE(windowRows[i].proc_rank, secondRows[i].proc_rank);
+            QCOMPARE(windowRows[i].send_datasize, secondRows[i].send_datasize);
+            QCOMPARE(windowRows[i].recv_datasize, secondRows[i].recv_datasize);
+        }
+        QCOMPARE(windowTotal, lastMatrix(total));
+
+        // A detail window elsewhere does not make the query exact either.
+        src.requestDetail(1800 * kMs, 1801 * kMs);
+        src.showTraceWindow(250 * kMs, 260 * kMs);
+        QCOMPARE(shown.last().at(2).toBool(), false);
+        QCOMPARE(shown.last().at(0).toLongLong(), 0);
+        QCOMPARE(shown.last().at(1).toLongLong(), 1000 * kMs);
     }
 };
 

@@ -56,6 +56,10 @@ class Cluster_Architecture : public QObject
 
     Q_PROPERTY(QVector<QVector<long>> total_send_volume_matrix READ total_send_volume_matrix WRITE set_total_send_volume_matrix NOTIFY total_send_volume_matrix_changed)
 
+    // TraceTimelineModel of the running trace source (nullptr without trace support or
+    // without a trace source). Typed QObject* so that QML does not depend on trace types.
+    Q_PROPERTY(QObject* timeline READ timeline NOTIFY timelineChanged)
+
     QThread database_thread;
 
 public:
@@ -106,6 +110,10 @@ public:
     // of the database. Returns false when built without EDUMPI_TRACE or while a source
     // thread is already running.
     Q_INVOKABLE bool startTraceSource(const QString &tracePathOrUrl);
+    QObject *timeline() const;
+    // Shows [fromSeconds, toSeconds] (relative to the trace start) in 3D/2D/Matrix; answered
+    // by traceWindowShown with the window actually shown (exact = false: whole seconds).
+    Q_INVOKABLE void showTraceWindow(double fromSeconds, double toSeconds);
     Q_INVOKABLE void set_slurm_id(int id);
     Q_INVOKABLE void set_proc_num(int proc);
     Q_INVOKABLE void set_time_display(int dis);
@@ -168,6 +176,8 @@ signals:
     //Signals of the trace data source (startTraceSource)
     void traceLoadFailed(QString message);
     void traceInfoReady(QString name, int ranks, double durationSeconds, int unmatched);
+    void timelineChanged();
+    void traceWindowShown(double fromSeconds, double toSeconds, bool exact);
 
     void p2p_send_volume_matrix_changed();
     void p2p_recv_volume_matrix_changed();
@@ -204,6 +214,8 @@ private:
     QObject *m_traceSource = nullptr;
     // Set when we cancel the trace source ourselves; suppresses the resulting loadFailed.
     bool m_traceCancelled = false;
+    // TraceTimelineModel (GUI thread) fed by the trace source; owned by this.
+    QObject *m_timeline = nullptr;
 
     // Connects a data source (Database_Thread or Trace_Data_Source, which share signal and
     // slot names) with this instance.

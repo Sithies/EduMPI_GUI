@@ -2,6 +2,7 @@
 
 #include "cluster_architecture.h"
 #include "otf2_fixture.h"
+#include "trace_timeline_model.h"
 
 // Cluster_Architecture fed by Trace_Data_Source via startTraceSource (ring4 fixture).
 class TstTraceClusterArchitecture : public QObject
@@ -139,6 +140,165 @@ private slots:
         QTRY_COMPARE(failed.count(), 1);
         QVERIFY(!failed.first().at(0).toString().isEmpty());
         QCOMPARE(built.count(), 0);
+    }
+    void timelinePropertyAfterLoad()
+    {
+        Cluster_Architecture ca;
+        QSignalSpy built(&ca, &Cluster_Architecture::componentsBuilt);
+        QSignalSpy timelineChanged(&ca, &Cluster_Architecture::timelineChanged);
+        QVERIFY(ca.startTraceSource(m_anchor));
+        QTRY_COMPARE(built.count(), 1);
+        QObject *timeline = ca.property("timeline").value<QObject *>();
+        QVERIFY(timeline);
+        QVERIFY(!timelineChanged.isEmpty());
+        QCOMPARE(timeline->property("rankCount").toInt(), 4);
+        QCOMPARE(timeline->property("traceLengthNs").toLongLong(), 2500LL * 1000 * 1000);
+        QCOMPARE(timeline->property("windowed").toBool(), false);
+        auto *model = qobject_cast<TraceTimelineModel *>(timeline);
+        QVERIFY(model);
+        QVERIFY(model->overview());
+        QCOMPARE(model->detail(), model->overview()); // full mode: the complete store
+
+        // Window queries reach the source and come back in seconds.
+        QSignalSpy shown(&ca, &Cluster_Architecture::traceWindowShown);
+        ca.showTraceWindow(0.0, 0.3);
+        QTRY_COMPARE(shown.count(), 1);
+        QCOMPARE(shown.first().at(0).toDouble(), 0.0);
+        QCOMPARE(shown.first().at(1).toDouble(), 0.3);
+        QCOMPARE(shown.first().at(2).toBool(), true);
+
+        ca.resetCluster_Architecture();
+        QVERIFY(!ca.property("timeline").value<QObject *>());
+    }
+
+    void timelineDetailRequestsAreDebounced()
+    {
+        QTemporaryDir tmp;
+        QVERIFY(tmp.isValid());
+        const QString many = writeManyMessagesOtf2(tmp.path(), 8, 20000);
+        QVERIFY(!many.isEmpty());
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        Cluster_Architecture ca;
+        QSignalSpy built(&ca, &Cluster_Architecture::componentsBuilt);
+        QVERIFY(ca.startTraceSource(many));
+        QTRY_COMPARE_WITH_TIMEOUT(built.count(), 1, 20000);
+        qunsetenv("EDUMPI_TRACE_BUDGET_MB");
+        auto *model = qobject_cast<TraceTimelineModel *>(ca.timeline());
+        QVERIFY(model);
+        QVERIFY(model->windowed());
+        QVERIFY(model->overview());
+        QVERIFY(!model->detail());
+
+        QSignalSpy forwarded(model, &TraceTimelineModel::detailRequested);
+        const qint64 ms = 1000 * 1000;
+        model->requestDetail(100 * ms, 101 * ms);
+        model->requestDetail(200 * ms, 201 * ms);
+        model->requestDetail(300 * ms, 301 * ms);
+        QCOMPARE(forwarded.count(), 0); // debounced
+        QTRY_COMPARE(forwarded.count(), 1);
+        QCOMPARE(forwarded.first().at(0).toLongLong(), 300 * ms);
+        QVERIFY(model->loadingDetail());
+        QTRY_VERIFY_WITH_TIMEOUT(!model->loadingDetail(), 20000);
+        const auto detail = model->detail();
+        QVERIFY(detail);
+        QVERIFY(detail->fromNs <= 300 * ms && detail->toNs >= 301 * ms);
+
+        // Moving away from the loaded window: no matching detail until the new one arrives.
+        model->requestDetail(1500 * ms, 1501 * ms);
+        QVERIFY(!model->detail());
+        QTRY_VERIFY_WITH_TIMEOUT(model->detail() && model->detail()->fromNs <= 1500 * ms, 20000);
+    }
+    // Model in windowed mode with a synthetic overview (10 s run, detail cap 1 s).
+    static void setUpWindowedModel(TraceTimelineModel &model)
+    {
+        auto store = std::make_shared<trace::TimelineStore>();
+        store->traceLengthNs = 10'000'000'000;
+        store->toNs = store->traceLengthNs;
+        store->complete = false;
+        trace::TimelineSnapshot snap;
+        snap.store = store;
+        snap.maxDetailWindowNs = 1'000'000'000;
+        model.addSnapshot(snap);
+    }
+
+    void modelIgnoresRequestsWiderThanCap()
+    {
+        TraceTimelineModel model;
+        setUpWindowedModel(model);
+        QVERIFY(model.windowed());
+        QCOMPARE(model.maxDetailWindowNs(), 1'000'000'000LL);
+        QCOMPARE(model.property("maxDetailWindowNs").toLongLong(), 1'000'000'000LL);
+        QSignalSpy forwarded(&model, &TraceTimelineModel::detailRequested);
+        const qint64 ms = 1000 * 1000;
+        QVERIFY(!model.requestDetail(0, 2000 * ms));
+        QTest::qWait(TraceTimelineModel::kDebounceMs + 150);
+        QCOMPARE(forwarded.count(), 0);
+        QVERIFY(!model.loadingDetail());
+        QVERIFY(model.requestDetail(0, 500 * ms));
+        QTRY_COMPARE(forwarded.count(), 1);
+    }
+
+    void modelDoesNotReforwardUnansweredRange()
+    {
+        TraceTimelineModel model;
+        setUpWindowedModel(model);
+        QSignalSpy forwarded(&model, &TraceTimelineModel::detailRequested);
+        const qint64 ms = 1000 * 1000;
+        const auto wait = [] { QTest::qWait(TraceTimelineModel::kDebounceMs + 150); };
+
+        // Failed read (null store).
+        QVERIFY(model.requestDetail(1000 * ms, 1500 * ms));
+        QTRY_COMPARE(forwarded.count(), 1);
+        model.addSnapshot({nullptr, 1000 * ms, 1500 * ms});
+        QVERIFY(!model.loadingDetail());
+        model.requestDetail(1000 * ms, 1500 * ms); // identical
+        wait();
+        QCOMPARE(forwarded.count(), 1);
+        model.requestDetail(1100 * ms, 1400 * ms); // contained
+        wait();
+        QCOMPARE(forwarded.count(), 1);
+
+        // Answer that does not cover the request.
+        model.requestDetail(3000 * ms, 3500 * ms);
+        QTRY_COMPARE(forwarded.count(), 2);
+        auto narrow = std::make_shared<trace::TimelineStore>();
+        narrow->fromNs = 3200 * ms;
+        narrow->toNs = 3300 * ms;
+        model.addSnapshot({narrow, 3000 * ms, 3500 * ms});
+        QVERIFY(!model.loadingDetail());
+        QVERIFY(!model.detail());
+        model.requestDetail(3000 * ms, 3500 * ms);
+        wait();
+        QCOMPARE(forwarded.count(), 2);
+
+        // A different range is forwarded again.
+        model.requestDetail(5000 * ms, 5500 * ms);
+        QTRY_COMPARE(forwarded.count(), 3);
+    }
+
+    // set_end_time(-1) stops the source but keeps the model: a later detail request must not
+    // leave loadingDetail stuck at true.
+    void loadingDetailClearsAfterCancel()
+    {
+        QTemporaryDir tmp;
+        QVERIFY(tmp.isValid());
+        const QString many = writeManyMessagesOtf2(tmp.path(), 8, 20000);
+        QVERIFY(!many.isEmpty());
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        Cluster_Architecture ca;
+        QSignalSpy built(&ca, &Cluster_Architecture::componentsBuilt);
+        QVERIFY(ca.startTraceSource(many));
+        QTRY_COMPARE_WITH_TIMEOUT(built.count(), 1, 20000);
+        qunsetenv("EDUMPI_TRACE_BUDGET_MB");
+        auto *model = qobject_cast<TraceTimelineModel *>(ca.timeline());
+        QVERIFY(model && model->windowed());
+        ca.set_end_time(-1);
+        const qint64 ms = 1000 * 1000;
+        QSignalSpy forwarded(model, &TraceTimelineModel::detailRequested);
+        QVERIFY(model->requestDetail(700 * ms, 701 * ms));
+        QTRY_COMPARE(forwarded.count(), 1);
+        QTRY_VERIFY_WITH_TIMEOUT(!model->loadingDetail(), 5000);
+        QVERIFY(!model->detail());
     }
 };
 

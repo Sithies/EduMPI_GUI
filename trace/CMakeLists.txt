@@ -44,6 +44,11 @@ add_library(edumpi_trace STATIC
     ${PROJECT_SOURCE_DIR}/data_column.h
     trace_data_source.h
     trace_data_source.cpp
+    memory_budget.h
+    memory_budget.cpp
+    timeline_snapshot.h
+    trace_timeline_model.h
+    trace_timeline_model.cpp
 )
 
 # PROJECT_SOURCE_DIR: shared app headers without heavy dependencies (data_column.h).

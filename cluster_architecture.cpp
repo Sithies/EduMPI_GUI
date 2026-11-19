@@ -3,7 +3,10 @@
 
 #ifdef EDUMPI_TRACE
 #include "trace_data_source.h"
+#include "trace_timeline_model.h"
 #endif
+
+#include <cmath>
 
 Cluster_Architecture::Cluster_Architecture(QObject *parent) : QObject(parent) {
 
@@ -121,6 +124,22 @@ bool Cluster_Architecture::startTraceSource(const QString &tracePathOrUrl){
             [this](QString, int ranks, double, int) { set_proc_num(ranks); });
     connect(src, &Trace_Data_Source::traceInfoReady, this, &Cluster_Architecture::traceInfoReady);
 
+    // Timeline: snapshots reach the model through this object, so stopTraceSource's purge of
+    // queued deliveries to this also drops queued snapshots. Detail requests go straight to
+    // the (thread-safe) requestDetail so that a newer one can cancel a read in progress.
+    auto *model = new TraceTimelineModel(this);
+    m_timeline = model;
+    connect(src, &Trace_Data_Source::timelineReady, this, [this](const trace::TimelineSnapshot &snapshot) {
+        if (auto *m = qobject_cast<TraceTimelineModel *>(m_timeline))
+            m->addSnapshot(snapshot);
+    });
+    connect(model, &TraceTimelineModel::detailRequested, src, &Trace_Data_Source::requestDetail,
+            Qt::DirectConnection);
+    connect(src, &Trace_Data_Source::traceWindowShown, this, [this](qint64 fromNs, qint64 toNs, bool exact) {
+        emit traceWindowShown(double(fromNs) / 1e9, double(toNs) / 1e9, exact);
+    });
+    emit timelineChanged();
+
     m_traceCancelled = false;
     m_live_run = false;
     m_option = 0;
@@ -135,10 +154,41 @@ bool Cluster_Architecture::startTraceSource(const QString &tracePathOrUrl){
 #endif
 }
 
+QObject *Cluster_Architecture::timeline() const{
+    return m_timeline;
+}
+
+void Cluster_Architecture::showTraceWindow(double fromSeconds, double toSeconds){
+#ifdef EDUMPI_TRACE
+    auto *src = static_cast<Trace_Data_Source *>(m_traceSource);
+    if (!src || !std::isfinite(fromSeconds) || !std::isfinite(toSeconds)) {
+        return;
+    }
+    auto toNs = [](double s) {
+        return qint64(std::llround(std::clamp(s, -1e9, 1e9) * 1e9));
+    };
+    const qint64 fromNs = toNs(fromSeconds);
+    const qint64 toNsValue = toNs(toSeconds);
+    QMetaObject::invokeMethod(src, [src, fromNs, toNsValue] { src->showTraceWindow(fromNs, toNsValue); },
+                              Qt::QueuedConnection);
+#else
+    Q_UNUSED(fromSeconds);
+    Q_UNUSED(toSeconds);
+#endif
+}
+
 void Cluster_Architecture::stopTraceSource(){
 #ifdef EDUMPI_TRACE
     if (!m_traceSource) {
         return;
+    }
+    // Detach the model first: no further detail requests reach the source being stopped.
+    if (m_timeline) {
+        QObject *model = m_timeline;
+        model->disconnect();
+        m_timeline = nullptr;
+        emit timelineChanged();
+        model->deleteLater();
     }
     // Cancels a load in progress (atomic flag, safe across threads).
     m_traceCancelled = true;
@@ -150,9 +200,10 @@ void Cluster_Architecture::stopTraceSource(){
     m_traceSource = nullptr;
     // The worker has stopped, so nothing new can arrive from the old source; drop its
     // deliveries that are already queued in this thread (clusterComponentsReady,
-    // updateDataReady, setTimestamp, loadFailed, traceInfoReady, detail lists, matrices,
-    // dbCleared) so they cannot leak into the next session. Only Trace_Data_Source posts
-    // queued calls to these receivers while a trace session is active.
+    // updateDataReady, setTimestamp, loadFailed, traceInfoReady, timelineReady,
+    // traceWindowShown, detail lists, matrices, dbCleared) so they cannot leak into the next
+    // session. Only Trace_Data_Source posts queued calls to these receivers while a trace
+    // session is active.
     QCoreApplication::removePostedEvents(this, QEvent::MetaCall);
     QCoreApplication::removePostedEvents(&m_detailed_p2p, QEvent::MetaCall);
     QCoreApplication::removePostedEvents(&m_detailed_coll, QEvent::MetaCall);
