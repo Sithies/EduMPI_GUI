@@ -155,6 +155,10 @@ endif()
 if(EDUMPI_TRACE)
     target_link_libraries(appGUI_Cluster PRIVATE edumpi_trace)
     target_compile_definitions(appGUI_Cluster PRIVATE EDUMPI_TRACE=1)
+    # Trace timeline QML types (QML_ELEMENT, module GUI_Cluster); absent without trace support.
+    target_sources(appGUI_Cluster PRIVATE
+        trace_timeline_item.h trace_timeline_item.cpp
+        trace_overview_item.h trace_overview_item.cpp)
 endif()
 
 install(TARGETS appGUI_Cluster

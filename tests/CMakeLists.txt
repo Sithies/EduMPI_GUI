@@ -34,3 +34,12 @@ edumpi_add_trace_test(cluster_architecture
 find_package(Qt6 REQUIRED COMPONENTS Gui Sql Qml Concurrent)
 target_link_libraries(tst_trace_cluster_architecture PRIVATE Qt6::Gui Qt6::Sql Qt6::Qml Qt6::Concurrent)
 target_compile_definitions(tst_trace_cluster_architecture PRIVATE EDUMPI_TRACE=1)
+
+# Timeline / overview QQuickPaintedItems rendered into a QImage (no QML engine needed).
+edumpi_add_trace_test(timeline_item
+    otf2_fixture.h otf2_fixture.cpp
+    ${PROJECT_SOURCE_DIR}/trace_timeline_item.h ${PROJECT_SOURCE_DIR}/trace_timeline_item.cpp
+    ${PROJECT_SOURCE_DIR}/trace_overview_item.h ${PROJECT_SOURCE_DIR}/trace_overview_item.cpp)
+find_package(Qt6 REQUIRED COMPONENTS Quick)
+target_link_libraries(tst_trace_timeline_item PRIVATE Qt6::Gui Qt6::Quick)
+set_tests_properties(trace_timeline_item PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
