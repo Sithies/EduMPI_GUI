@@ -6,11 +6,31 @@ import QtQuick.Dialogs
 Rectangle {
     id: option_views
     width: 250
-    height: 300
-    implicitHeight: 300
+    height: traceMode ? 330 : 300
+    implicitHeight: traceMode ? 330 : 300
     color: "#383936"
 
     property StackView view;
+    // Trace window (Sidebar_Trace): adds the "Trace Timeline" view. Default keeps the
+    // behaviour of the main window and the DB analysis window.
+    property bool traceMode: false
+    readonly property bool timelineAvailable: traceMode && nodesList !== null && nodesList.timeline !== null
+
+    // Trace window only: follows views selected elsewhere (Trace Options "Show window in
+    // 3D/2D/Matrix" sets selected_screen = "Cores3D").
+    readonly property string traceScreen: traceMode ? selected_screen : ""
+    onTraceScreenChanged: {
+        if(!traceMode)
+            return
+        if(traceScreen === "Cores3D")
+            three_d_check.checked = true
+        else if(traceScreen === "Cores2D")
+            two_d_check.checked = true
+        else if(traceScreen === "CoresMatrix")
+            cm_check.checked = true
+        else if(traceScreen === "TraceTimeline" && timelineAvailable)
+            trace_timeline_check.checked = true
+    }
 
     Rectangle {
         id: rectangle
@@ -110,6 +130,28 @@ Rectangle {
                         //two_d_check.checked = false
                     }
                     //cm_check.checked = !two_d_check.checked && !three_d_check.checked
+                }
+            }
+
+
+            CheckBox {
+                id: trace_timeline_check
+                ButtonGroup.group: checkboxgroup
+                visible: option_views.timelineAvailable
+                HoverHandler {
+                    cursorShape: Qt.PointingHandCursor
+                }
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignRight
+                Layout.rightMargin: 40
+                checked: false
+                text: qsTr("Trace Timeline")
+                onCheckStateChanged: {
+                    if(checked){
+                        selected_screen = "TraceTimeline"
+                        // Loaded only in trace builds with a timeline (TraceTimelineItem).
+                        view.replace("/TraceTimeline.qml", {listNodes : nodesList, traceState : traceState})
+                    }
                 }
             }
 

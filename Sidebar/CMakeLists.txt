@@ -11,6 +11,8 @@ qt_add_qml_module(sidebar
         MPI_Application_Start.qml
         Trace_Load.qml
         Sidebar_Run_Analysis.qml
+        Sidebar_Trace.qml
+        Trace_Options.qml
         Options.qml
         Options_Bar.qml
         Options_Views.qml

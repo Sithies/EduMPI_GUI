@@ -74,6 +74,9 @@ public:
     // Moves the window by dx pixels (positive = later), clamped to the trace.
     Q_INVOKABLE void panBy(qreal dx);
     Q_INVOKABLE void showFullRun();
+    // Sets both ends at once (no inverted intermediate range), clamped like zoomAt / panBy:
+    // span to [10 µs, trace length], window into [0, trace length].
+    Q_INVOKABLE void setView(qint64 start, qint64 end);
     // Label area: toggles selectedRank; phase band / bar: emits barClicked with the activity
     // (or computation gap) under the point; elsewhere nothing.
     Q_INVOKABLE void clickAt(qreal x, qreal y);
@@ -114,7 +117,6 @@ private:
     void updateDerived();      // arrows (capped) and partner ranks of the selected rank
     qint64 traceLength() const;
     double plotWidth() const;
-    void setView(qint64 start, qint64 end);
     const RowLayout *rowAtY(qreal y) const;
 
     QPointer<TraceTimelineModel> m_model;

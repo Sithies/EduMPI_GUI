@@ -4,6 +4,7 @@
 #ifdef EDUMPI_TRACE
 #include "trace_data_source.h"
 #include "trace_timeline_model.h"
+#include "memory_budget.h"
 #endif
 
 #include <cmath>
@@ -174,6 +175,22 @@ void Cluster_Architecture::showTraceWindow(double fromSeconds, double toSeconds)
 #else
     Q_UNUSED(fromSeconds);
     Q_UNUSED(toSeconds);
+#endif
+}
+
+int Cluster_Architecture::traceMemoryBudgetMB() const{
+#ifdef EDUMPI_TRACE
+    return trace::memoryBudgetSettingMB();
+#else
+    return 0;
+#endif
+}
+
+void Cluster_Architecture::setTraceMemoryBudgetMB(int mb){
+#ifdef EDUMPI_TRACE
+    trace::setMemoryBudgetSettingMB(mb);
+#else
+    Q_UNUSED(mb);
 #endif
 }
 

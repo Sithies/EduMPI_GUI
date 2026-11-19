@@ -114,6 +114,10 @@ public:
     // Shows [fromSeconds, toSeconds] (relative to the trace start) in 3D/2D/Matrix; answered
     // by traceWindowShown with the window actually shown (exact = false: whole seconds).
     Q_INVOKABLE void showTraceWindow(double fromSeconds, double toSeconds);
+    // Trace memory budget setting in MB (0 = automatic), applied by the next trace load.
+    // Without trace support: 0 / no-op.
+    Q_INVOKABLE int traceMemoryBudgetMB() const;
+    Q_INVOKABLE void setTraceMemoryBudgetMB(int mb);
     Q_INVOKABLE void set_slurm_id(int id);
     Q_INVOKABLE void set_proc_num(int proc);
     Q_INVOKABLE void set_time_display(int dis);

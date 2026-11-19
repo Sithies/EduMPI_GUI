@@ -16,6 +16,11 @@ quint64 availableMemoryBytes();
 // ("EduMPI", "EduMPI_GUI") key trace/memoryBudgetMB; 0 / missing = availableMemoryBytes() / 2.
 quint64 memoryBudgetBytes();
 
+// The user setting behind memoryBudgetBytes(): QSettings ("EduMPI", "EduMPI_GUI") key
+// trace/memoryBudgetMB in MB, 0 = automatic. Negative values are stored as 0.
+int memoryBudgetSettingMB();
+void setMemoryBudgetSettingMB(int mb);
+
 // Pyramid levels tried first (finest dropped while the pyramid exceeds budget / 2).
 constexpr int kDefaultPyramidLevels = 4;
 

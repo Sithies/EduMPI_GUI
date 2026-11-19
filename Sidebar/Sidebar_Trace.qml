@@ -1,0 +1,211 @@
+import QtQuick
+import QtQuick.Layouts 6.3
+import QtQuick.Controls 6.3
+import QtQuick.Dialogs
+
+// Sidebar of the trace window: copy of Sidebar_Run_Analysis.qml with the trace views
+// (Options_Views in traceMode) and the "Trace Options" section. The DB analysis window keeps
+// Sidebar_Run_Analysis.qml.
+//Source: based on https://forum.qt.io/topic/66565/qml-expandable-menu-with-subitems
+//Icons from: https://fontawesome.com/
+
+Item {
+    id: item_sidebar_trace
+    width: 270
+    height: parent.height
+    //implicitHeight: height
+    property Item rootScreen: parent
+
+    Rectangle {
+        id: rectangle
+        //anchors.fill: parent
+        //x: 0
+        //y: 0
+        width: parent.width
+        height: parent.height
+        anchors.fill: parent
+        color: "#383936"
+
+        ListModel {
+            id: sidebarModel
+            ListElement { name: "Views"; icon: "qrc:/icons/view.png"; aVisible: true; aSource: "Options_Views.qml"}
+            ListElement { name: "Trace Options"; icon: "qrc:/icons/slider.png"; aVisible: false; aSource: "Trace_Options.qml" }
+            ListElement { name: "Runtime Options"; icon: "qrc:/icons/slider.png"; aVisible: false; aSource: "Options.qml" }
+            ListElement { name: "Screenshot"; icon: "qrc:/icons/camera.png"; aVisible: false; aSource: "Screenshot.qml" }
+        }
+
+        Component {
+            id: sections
+
+            Rectangle {
+                id: sectionsRect
+                width: parent.width
+                color: "transparent"
+                height: 30
+
+                property bool isExpanded: ListView.view.expandedSection === section
+
+                onIsExpandedChanged: {
+                    for(var i=0; i<sidebarModel.count; i++){
+                        var item = sidebarModel.get(i);
+                        if(section === item.name)
+                            item.aVisible = sectionsRect.isExpanded;
+                    }
+                }
+
+                RowLayout {
+                    anchors.fill: parent
+                    spacing: 1
+
+                    Button{
+                        id: iconSection
+                        height: parent.height
+                        Layout.alignment: Qt.AlignLeft
+                        Layout.leftMargin: 5
+                        //anchors.rightMargin: 5
+                        icon.color: sectionsRect.isExpanded ? "#00FF00" : "white"
+                        background: Rectangle{
+                            color: "transparent"
+                            border.width: 0
+                        }
+                        Component.onCompleted: {
+                            for(var i=0; i<sidebarModel.count; i++){
+                                var item = sidebarModel.get(i);
+                                if(section === item.name)
+                                    iconSection.icon.source = item.icon
+                            }
+                        }
+                    }
+
+                    Text {
+                        id: sectionsText
+                        text: section
+                        height: parent.height
+                        //verticalAlignment: Text.AlignVCenter
+                        color: sectionsRect.isExpanded ? "#00FF00" : "white"
+                        //anchors.centerIn: parent
+                    }
+
+                    Button{
+                        id: iconUpDown
+                        height: parent.height
+                        Layout.alignment: Qt.AlignRight
+                        Layout.rightMargin: 10
+                        //anchors.rightMargin: 10
+                        icon.source: sectionsRect.isExpanded ? "qrc:/icons/up.png" : "qrc:/icons/down.png"
+                        icon.color: sectionsRect.isExpanded ? "#00FF00" : "white"
+                        background: Rectangle{
+                            color: "transparent"
+                            border.width: 0
+                        }
+                    }
+                }
+
+                MouseArea{
+                    anchors.fill: parent
+                    onClicked: {
+                        sectionsRect.isExpanded = !sectionsRect.isExpanded;
+                        /*if(sectionHeaderRect.isExpanded){
+                            iconUpDown.icon.source = "qrc:/icons/up.png"
+                        } else{
+                            iconUpDown.icon.source = "qrc:/icons/down.png"
+                        }*/
+                    }
+                }
+            }
+        }
+
+
+        ListView {
+            id: listing
+            width: parent.width
+            height: rectangle.height
+            model: sidebarModel
+            delegate: listdelegate
+
+            property string expandedSection: sidebarModel.get(0).name
+
+            section.property: "name"
+            section.criteria: ViewSection.FullString
+            section.delegate: sections
+            boundsBehavior: Flickable.StopAtBounds
+
+            ScrollBar.vertical: ScrollBar { // Scrollbar hinzufügen
+                anchors.right: parent.right
+                policy: ScrollBar.AlwaysOn
+
+                contentItem: Rectangle {
+                    implicitWidth: 5
+                    color: "#444444" // Hintergrundfarbe der Scrollbar
+                    radius: 6
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+
+                    Rectangle {
+                        width: parent.width
+                        height: Math.max(50, (listing.height / listing.contentHeight) * parent.height)  // Höhe des Scrollbar-Griffs
+                        color: "#555555" // Farbe des Scrollbar-Griffs
+                        radius: 6
+                        y: (listing.contentY / listing.contentHeight) * (listing.height)
+                        anchors.horizontalCenter: parent.horizontalCenter
+                    }
+                }
+            }
+        }
+
+        Component {
+
+            id: listdelegate
+
+
+            Loader {
+                id: menuItem
+                source: aSource
+                //color: ListView.isCurrentItem ? "lightblue" : "white"
+                visible: aVisible
+                property int menuItemHeight
+
+                /*onHeightChanged:{
+                    console.log("changed height!")
+                }*/
+
+                onLoaded:{
+                    // Trace Options grows with the details of the clicked bar; Views with the
+                    // Trace Timeline entry.
+                    menuItem.item.implicitHeightChanged.connect(function(){
+                        if(menuItem.visible)
+                            menuItem.height = menuItem.item.implicitHeight
+                    })
+                    if(aSource == "Options_Views.qml"){
+                        menuItem.item.view = ascreen
+                        menuItem.item.traceMode = true
+                    }
+                    if(aSource == "Screenshot.qml"){
+                        menuItem.item.main_item = rootScreen
+                    }
+                    /*console.log("Test: " +item.implicitHeight)
+                    menuItemHeight = item.height
+
+                    item.heightChanged.connect(function(){
+                        console.log("testiiii");
+                    });*/
+                }
+
+                Behavior on height {
+                    NumberAnimation { duration: 200 }
+                }
+
+                onVisibleChanged: {
+                    if(visible){
+                        height = item.implicitHeight
+                        //console.log("Height: " + height)
+                        //console.log(expandContentLoader.item.height)
+                    }
+                    else{
+                        height = 0;
+                    }
+                }
+            }
+        }
+    }
+}

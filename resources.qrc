@@ -19,6 +19,8 @@
         <file>Table_Userid_Selection.qml</file>
         <file>MPI_Run_Analysis.qml</file>
         <file>Trace_Analysis.qml</file>
+        <file>TraceTimeline.qml</file>
+        <file>TraceOverviewBar.qml</file>
         <file>Application_Start_OpenMP.qml</file>
         <file>Detailed_Information_Bar.qml</file>
         <file>icons/play.png</file>
@@ -46,6 +48,8 @@
         <file>Sidebar/Sidebar.qml</file>
         <file>Sidebar/Sidebar_Item.qml</file>
         <file>Sidebar/Sidebar_Run_Analysis.qml</file>
+        <file>Sidebar/Sidebar_Trace.qml</file>
+        <file>Sidebar/Trace_Options.qml</file>
         <file>Sidebar/Options_Bar.qml</file>
         <file>Sidebar/Options.qml</file>
         <file>Sidebar/Options_Views.qml</file>

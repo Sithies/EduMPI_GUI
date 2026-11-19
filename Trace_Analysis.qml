@@ -6,8 +6,8 @@ import Sidebar 1.0
 import "."
 
 // Trace window: same layout and window properties as MPI_Run_Analysis.qml (Bottom_Bar,
-// Sidebar_Run_Analysis and the views read them by name), fed from an OTF2 trace instead
-// of the database.
+// the sidebar and the views read them by name), fed from an OTF2 trace instead of the
+// database. Sidebar_Trace adds the Trace Timeline view and the Trace Options.
 Window {
     id: run_analysis_win
     width: 1440
@@ -35,6 +35,28 @@ Window {
     property string tracePath: ""
     property real traceDuration: 0
     property string traceHeader: qsTr("Trace: loading %1").arg(tracePath)
+    // "Window: … s" after "Show window in 3D/2D/Matrix"; cleared when the bottom bar moves.
+    property string traceWindowNote: ""
+
+    // State of the Trace Timeline view shared by TraceTimeline.qml, TraceOverviewBar.qml and
+    // Sidebar/Trace_Options.qml (plain QML, no trace-only types).
+    property QtObject traceState: QtObject {
+        property real viewStartNs: 0
+        property real viewEndNs: 0
+        property int selectedRank: -1
+        property bool showArrows: true
+        property bool allArrows: false
+        property bool highlightWait: true
+        property bool showPhases: true
+        property string phaseLevel: "outer"
+        property var lastBar: null
+        property string name: ""
+        property int ranks: 0
+        property real durationSeconds: 0
+        property int unmatched: 0
+        // Overview bar moved the window: the timeline sets both ends at once.
+        signal viewRequested(real startNs, real endNs)
+    }
 
     property bool p2p: true
     property bool collective: true
@@ -102,10 +124,18 @@ Window {
             onComponentsBuilt: {
                 busyindicator.running = false
                 busyindicator.visible = false
-                ascreen.push("Cores3D.qml", {listNodes: nodesList})
+                if(run_analysis_win.selected_screen === "TraceTimeline"){
+                    ascreen.push("/TraceTimeline.qml", {listNodes: nodesList, traceState: run_analysis_win.traceState})
+                } else {
+                    ascreen.push("Cores3D.qml", {listNodes: nodesList})
+                }
             }
             onTraceInfoReady: (name, ranks, durationSeconds, unmatched)=>{
                           run_analysis_win.traceDuration = durationSeconds
+                          run_analysis_win.traceState.name = name
+                          run_analysis_win.traceState.ranks = ranks
+                          run_analysis_win.traceState.durationSeconds = durationSeconds
+                          run_analysis_win.traceState.unmatched = unmatched
                           var header = qsTr("Trace: %1 · %2 ranks · %3 s").arg(name).arg(ranks).arg(durationSeconds.toFixed(1))
                           if(unmatched > 0){
                               header += qsTr(" · %1 unmatched messages").arg(unmatched)
@@ -118,6 +148,13 @@ Window {
                           run_analysis_win.endTime = timestamp + Math.ceil(run_analysis_win.traceDuration);
                           run_analysis_win.enable_timeline = true;
                           nodesList.showConditionAt(0,0)
+                      }
+            onTraceWindowShown: (fromSeconds, toSeconds, exact)=>{
+                          var note = qsTr("Window: %1 – %2 s").arg(fromSeconds.toFixed(3)).arg(toSeconds.toFixed(3))
+                          if(!exact){
+                              note += qsTr(" (whole seconds)")
+                          }
+                          run_analysis_win.traceWindowNote = note
                       }
             onTraceLoadFailed: (message)=>{
                           run_analysis_win.showError(message)
@@ -134,7 +171,8 @@ Window {
             }
             color: "#4d4d4d"
             Text {
-                text: run_analysis_win.traceHeader
+                text: run_analysis_win.traceWindowNote === "" ? run_analysis_win.traceHeader
+                      : run_analysis_win.traceHeader + " · " + run_analysis_win.traceWindowNote
                 verticalAlignment: Text.AlignVCenter
                 leftPadding: 5
                 width: parent.width
@@ -170,7 +208,7 @@ Window {
             running: true
         }
 
-        Sidebar_Run_Analysis{
+        Sidebar_Trace{
             id: options_analysis
             anchors.right: parent.right
             height: parent.height - bottom_main.height
@@ -180,6 +218,36 @@ Window {
             id: bottom_main
             live: false
             anchors.bottom: parent.bottom
+            // Replaced by the overview while the Trace Timeline view is shown (kept alive, so
+            // switching back restores it unchanged).
+            visible: run_analysis_win.selected_screen !== "TraceTimeline"
+        }
+        Connections {
+            target: bottom_main
+            // The user moved the seconds window: the header's "Window: …" no longer applies.
+            function onTimestampAChanged(){ run_analysis_win.traceWindowNote = "" }
+            function onTimestampBChanged(){ run_analysis_win.traceWindowNote = "" }
+        }
+        // TraceOverviewItem exists only in trace builds: loaded from a separate file and only
+        // when the window has a timeline.
+        Loader {
+            id: trace_overview_loader
+            x: bottom_main.x
+            y: bottom_main.y
+            width: bottom_main.width
+            height: bottom_main.height
+            active: run_analysis_win.selected_screen === "TraceTimeline"
+                    && nodesList !== null && nodesList.timeline !== null
+            visible: active
+            source: "/TraceOverviewBar.qml"
+            onLoaded: {
+                item.model = Qt.binding(function(){ return nodesList ? nodesList.timeline : null })
+                item.viewStartNs = Qt.binding(function(){ return run_analysis_win.traceState.viewStartNs })
+                item.viewEndNs = Qt.binding(function(){ return run_analysis_win.traceState.viewEndNs })
+                item.windowMoved.connect(function(startNs, endNs){
+                    run_analysis_win.traceState.viewRequested(startNs, endNs)
+                })
+            }
         }
     }
 

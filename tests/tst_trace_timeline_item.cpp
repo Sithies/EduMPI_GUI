@@ -249,6 +249,26 @@ private slots:
         QCOMPARE(item.viewEndNs(), model.traceLengthNs());
     }
 
+    void setViewSetsBothEndsClamped()
+    {
+        TraceTimelineModel model;
+        TraceTimelineItem item;
+        setupRing4(model, item);
+        QSignalSpy spy(&item, &TraceTimelineItem::viewChanged);
+        item.setView(1000 * kMs, 1250 * kMs);
+        QCOMPARE(spy.count(), 1); // one change, no intermediate range
+        QCOMPARE(item.viewStartNs(), 1000 * kMs);
+        QCOMPARE(item.viewEndNs(), 1250 * kMs);
+        item.setView(-500 * kMs, -400 * kMs); // before the trace: moved in, span kept
+        QCOMPARE(item.viewStartNs(), qint64(0));
+        QCOMPARE(item.viewEndNs(), 100 * kMs);
+        item.setView(2000 * kMs, 2000 * kMs); // empty: minimum window
+        QCOMPARE(item.viewEndNs() - item.viewStartNs(), qint64(10'000));
+        item.setView(5 * kMs, 1000 * 1000 * kMs); // longer than the trace: full run
+        QCOMPARE(item.viewStartNs(), qint64(0));
+        QCOMPARE(item.viewEndNs(), model.traceLengthNs());
+    }
+
     void clickLabelSelectsRank()
     {
         TraceTimelineModel model;

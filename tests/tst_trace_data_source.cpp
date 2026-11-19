@@ -1,9 +1,12 @@
 #include <QtTest>
 
+#include "memory_budget.h"
 #include "otf2_fixture.h"
 #include "timeline_snapshot.h"
 #include "trace_data_source.h"
 
+#include <QScopeGuard>
+#include <QSettings>
 #include <QThread>
 
 using Matrix = QVector<QVector<long>>;
@@ -59,6 +62,28 @@ private slots:
     }
 
     void cleanup() { qunsetenv("EDUMPI_TRACE_BUDGET_MB"); }
+
+    // The UI's "Memory budget" field: QSettings ("EduMPI", "EduMPI_GUI") trace/memoryBudgetMB,
+    // read by memoryBudgetBytes(). Restores the user's own setting afterwards.
+    void memoryBudgetSettingRoundTrips()
+    {
+        QSettings settings(QStringLiteral("EduMPI"), QStringLiteral("EduMPI_GUI"));
+        const QString key = QStringLiteral("trace/memoryBudgetMB");
+        const QVariant saved = settings.value(key);
+        auto restore = qScopeGuard([&] {
+            QSettings s(QStringLiteral("EduMPI"), QStringLiteral("EduMPI_GUI"));
+            if (saved.isValid())
+                s.setValue(key, saved);
+            else
+                s.remove(key);
+        });
+        trace::setMemoryBudgetSettingMB(64);
+        QCOMPARE(trace::memoryBudgetSettingMB(), 64);
+        QCOMPARE(trace::memoryBudgetBytes(), quint64(64) * 1024 * 1024);
+        trace::setMemoryBudgetSettingMB(-5);
+        QCOMPARE(trace::memoryBudgetSettingMB(), 0);
+        QVERIFY(trace::memoryBudgetBytes() >= 1); // automatic
+    }
 
     void connectsAndClears()
     {

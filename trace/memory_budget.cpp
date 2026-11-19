@@ -67,6 +67,20 @@ quint64 memoryBudgetBytes()
     return std::max<quint64>(availableMemoryBytes() / 2, 1);
 }
 
+int memoryBudgetSettingMB()
+{
+    const QSettings settings(QStringLiteral("EduMPI"), QStringLiteral("EduMPI_GUI"));
+    bool ok = false;
+    const int mb = settings.value(QStringLiteral("trace/memoryBudgetMB"), 0).toInt(&ok);
+    return ok && mb > 0 ? mb : 0;
+}
+
+void setMemoryBudgetSettingMB(int mb)
+{
+    QSettings settings(QStringLiteral("EduMPI"), QStringLiteral("EduMPI_GUI"));
+    settings.setValue(QStringLiteral("trace/memoryBudgetMB"), std::max(0, mb));
+}
+
 TimelineLoadPlan planTimelineLoad(const TraceMeta &meta, int ranks, quint64 budget)
 {
     TimelineLoadPlan plan;
