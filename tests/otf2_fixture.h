@@ -20,6 +20,11 @@ QString writeTruncatedOtf2(const QString &dir);
 // in MPI_Waitall [300, 301] ms; R0 sends 300 B (Isend at 101 ms), R1 400 B (Isend at 200 ms).
 QString writeNonblockingOtf2(const QString &dir);
 
+// Like the nonblocking fixture, but R1's MPI_Waitall [150, 300] ms completes two Irecvs from R0
+// (tag 2, 300 B, Isend at 200 ms; tag 3, 50 B, Isend at 250 ms), i.e. late-sender waits of 50 and
+// 100 ms; R0 completes both Isends in MPI_Waitall [260, 261] ms. Ranks 2, 3 only run main.
+QString writeWaitallOtf2(const QString &dir);
+
 // 2 ranks (both on nodeA), WORLD = {0, 1}, trace length 3 s, user (COMPILER) regions:
 // main [0, 3 s] > phase_a [0.1, 1.5 s] > send_to [0.5, 0.6 s] > MPI_Send [0.5, 0.501 s] to the
 // other rank (tag 1, 100 B, received in MPI_Recv [0.7, 0.701 s] inside phase_a), and

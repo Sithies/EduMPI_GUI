@@ -1,0 +1,498 @@
+#include <QTemporaryDir>
+#include <QtTest>
+
+#include <limits>
+
+#include "otf2_fixture.h"
+#include "otf2_trace_reader.h"
+#include "timeline_builder.h"
+#include "trace_aggregator.h"
+
+using namespace trace;
+
+namespace {
+
+constexpr qint64 kMs = 1'000'000;
+constexpr qint64 kAll = std::numeric_limits<qint64>::max();
+
+struct Built {
+    std::shared_ptr<TimelineStore> store;
+    TraceMeta meta;
+};
+
+Built build(const QString &anchor, qint64 from = 0, qint64 to = kAll, bool keep = true, int levels = 4)
+{
+    Built b;
+    TraceAggregator agg;
+    TimelineBuilder builder(agg, from, to, keep, levels);
+    QString error;
+    if (!readOtf2(anchor, builder, &b.meta, &error)) {
+        qWarning("%s", qPrintable(error));
+        return b;
+    }
+    agg.finish(b.meta.traceLengthNs);
+    b.store = builder.finish();
+    return b;
+}
+
+const RankRow &row(const TimelineStore &s, int rank)
+{
+    return s.rows[s.rowIndexOfRank(rank)];
+}
+
+const Activity *findActivity(const TimelineStore &s, int rank, const QString &fn, qint64 startNs)
+{
+    for (const Activity &a : row(s, rank).activities)
+        if (s.functions.value(a.function) == fn && a.startNs == startNs)
+            return &a;
+    return nullptr;
+}
+
+QVector<int> linksOf(const TimelineStore &s, int rank, const Activity &a)
+{
+    const RankRow &r = row(s, rank);
+    QVector<int> out;
+    for (int i = 0; i < a.linkCount; ++i)
+        out.append(r.links[a.firstLink + i]);
+    return out;
+}
+
+const Message *findMessage(const TimelineStore &s, int sender, int receiver, quint32 tag)
+{
+    for (const Message &m : s.messages)
+        if (m.sender == sender && m.receiver == receiver && m.tag == tag)
+            return &m;
+    return nullptr;
+}
+
+quint16 pyramidValue(const TimelineStore &s, int level, int rank, qint64 ns, Category c)
+{
+    const Pyramid &p = s.pyramid;
+    const int bins = p.binsPerLevel[level];
+    const int bin = int(double(ns) * bins / double(p.traceLengthNs));
+    return p.data[level][s.rowIndexOfRank(rank)][bin * kCategoryCount + int(c)];
+}
+
+} // namespace
+
+class TestTimelineBuilder : public QObject
+{
+    Q_OBJECT
+
+private slots:
+    void categorizeByName()
+    {
+        QCOMPARE(categorize(QStringLiteral("MPI_Send"), CallKind::P2P), Category::Send);
+        QCOMPARE(categorize(QStringLiteral("MPI_Isend"), CallKind::P2P), Category::Send);
+        QCOMPARE(categorize(QStringLiteral("MPI_SSEND"), CallKind::P2P), Category::Send);
+        QCOMPARE(categorize(QStringLiteral("MPI_Sendrecv"), CallKind::P2P), Category::Recv);
+        QCOMPARE(categorize(QStringLiteral("MPI_Recv"), CallKind::P2P), Category::Recv);
+        QCOMPARE(categorize(QStringLiteral("MPI_Waitall"), CallKind::P2P), Category::Recv);
+        QCOMPARE(categorize(QStringLiteral("MPI_Testany"), CallKind::P2P), Category::Recv);
+        QCOMPARE(categorize(QStringLiteral("MPI_Probe"), CallKind::P2P), Category::Recv);
+        QCOMPARE(categorize(QStringLiteral("MPI_Allreduce"), CallKind::Collective), Category::Collective);
+        QCOMPARE(categorize(QStringLiteral("MPI_Comm_rank"), CallKind::OtherMpi), Category::OtherMpi);
+    }
+
+    void ring4Activities()
+    {
+        QTemporaryDir tmp;
+        const Built b = build(writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))));
+        QVERIFY(b.store);
+        const TimelineStore &s = *b.store;
+        QCOMPARE(s.rows.size(), 4);
+        QVERIFY(s.complete);
+        QCOMPARE(s.traceLengthNs, 2500 * kMs);
+        QCOMPARE(row(s, 0).node, QStringLiteral("nodeA"));
+        QCOMPARE(row(s, 3).node, QStringLiteral("nodeB"));
+
+        const Activity *send = findActivity(s, 0, QStringLiteral("MPI_Send"), 100 * kMs);
+        QVERIFY(send);
+        QCOMPARE(send->endNs, 101 * kMs);
+        QCOMPARE(send->category, Category::Send);
+        const Activity *recv = findActivity(s, 0, QStringLiteral("MPI_Recv"), 101 * kMs);
+        QVERIFY(recv);
+        QCOMPARE(recv->endNs, 402 * kMs);
+        QCOMPARE(recv->category, Category::Recv);
+        QCOMPARE(recv->waitNs, qint64(299'000'000));
+        QCOMPARE(send->waitNs, qint64(0));
+
+        const Activity *ar = findActivity(s, 2, QStringLiteral("MPI_Allreduce"), 1200 * kMs);
+        QVERIFY(ar);
+        QCOMPARE(ar->endNs, 1201 * kMs);
+        QCOMPARE(ar->category, Category::Collective);
+        QCOMPARE(ar->linkCount, quint16(1));
+        const CollectiveEntry &ce = s.collectives[linksOf(s, 2, *ar).first()];
+        QCOMPARE(ce.rank, 2);
+        QCOMPARE(ce.members, (QVector<int>{0, 1, 2, 3}));
+        QCOMPARE(ce.bytesSent, quint64(64));
+        QCOMPARE(ce.lateSender, 0.0);
+        const Activity *ar0 = findActivity(s, 0, QStringLiteral("MPI_Allreduce"), 1000 * kMs);
+        QVERIFY(ar0);
+        QVERIFY(qAbs(s.collectives[linksOf(s, 0, *ar0).first()].lateSender - 0.200) < 1e-9);
+
+        for (const RankRow &r : s.rows) {
+            for (int i = 0; i < r.activities.size(); ++i) {
+                QVERIFY(s.functions.value(r.activities[i].function) != QLatin1String("main"));
+                if (i > 0)
+                    QVERIFY(r.activities[i - 1].startNs <= r.activities[i].startNs);
+            }
+        }
+        QCOMPARE(row(s, 0).activities.size(), 3);
+        QCOMPARE(row(s, 2).activities.size(), 5);
+    }
+
+    void ring4Messages()
+    {
+        QTemporaryDir tmp;
+        const Built b = build(writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))));
+        QVERIFY(b.store);
+        const TimelineStore &s = *b.store;
+        QCOMPARE(s.messages.size(), 7);
+        int matched = 0;
+        for (const Message &m : s.messages)
+            matched += m.receiver >= 0 ? 1 : 0;
+        QCOMPARE(matched, 6);
+        QCOMPARE(s.unmatchedMessages, 1);
+
+        const Message *lost = findMessage(s, 3, -1, 11);
+        QVERIFY(lost);
+        QCOMPARE(lost->recvNs, qint64(-1));
+        QCOMPARE(lost->sendNs, 2400 * kMs);
+        QCOMPARE(lost->bytes, quint64(100));
+
+        const Message *m30 = findMessage(s, 3, 0, 7);
+        QVERIFY(m30);
+        QCOMPARE(m30->sendNs, 400 * kMs);
+        QCOMPARE(m30->recvNs, 402 * kMs);
+        QCOMPARE(m30->bytes, quint64(1000));
+        QVERIFY(qAbs(m30->lateSender - 0.299) < 1e-9);
+
+        const Message *sub = findMessage(s, 3, 2, 5);
+        QVERIFY(sub);
+        QCOMPARE(sub->bytes, quint64(200));
+        const Message *ssend = findMessage(s, 1, 2, 9);
+        QVERIFY(ssend);
+        QVERIFY(qAbs(ssend->lateReceiver - 0.300) < 1e-9);
+
+        // Messages sorted by sendNs; rows list their messages sorted by sendNs.
+        for (int i = 1; i < s.messages.size(); ++i)
+            QVERIFY(s.messages[i - 1].sendNs <= s.messages[i].sendNs);
+        const RankRow &r2 = row(s, 2);
+        QVector<const Message *> received2;
+        for (int i = 0; i < r2.messages.size(); ++i) {
+            const Message &m = s.messages[r2.messages[i]];
+            QVERIFY(m.sender == 2 || m.receiver == 2);
+            if (i > 0)
+                QVERIFY(s.messages[r2.messages[i - 1]].sendNs <= m.sendNs);
+            if (m.receiver == 2 && m.recvNs >= 2000 * kMs)
+                received2.append(&m);
+        }
+        QCOMPARE(r2.messages.size(), 4);
+        QCOMPARE(received2.size(), 2);
+        QVERIFY(received2.contains(sub));
+        QVERIFY(received2.contains(ssend));
+        // The unmatched send is listed on the sender only.
+        QVERIFY(row(s, 3).messages.contains(int(lost - s.messages.constData())));
+        QVERIFY(!row(s, 0).messages.contains(int(lost - s.messages.constData())));
+
+        // Links: R0's MPI_Recv completes the message from R3, R3's MPI_Send started it.
+        const Activity *recv = findActivity(s, 0, QStringLiteral("MPI_Recv"), 101 * kMs);
+        QVERIFY(recv);
+        QCOMPARE(linksOf(s, 0, *recv), QVector<int>{int(m30 - s.messages.constData())});
+        const Activity *send = findActivity(s, 3, QStringLiteral("MPI_Send"), 400 * kMs);
+        QVERIFY(send);
+        QCOMPARE(linksOf(s, 3, *send), QVector<int>{int(m30 - s.messages.constData())});
+        const Activity *lostSend = findActivity(s, 3, QStringLiteral("MPI_Send"), 2400 * kMs);
+        QVERIFY(lostSend);
+        QCOMPARE(linksOf(s, 3, *lostSend), QVector<int>{int(lost - s.messages.constData())});
+    }
+
+    void ring4Pyramid()
+    {
+        QTemporaryDir tmp;
+        const Built b = build(writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))));
+        QVERIFY(b.store);
+        const TimelineStore &s = *b.store;
+        const Pyramid &p = s.pyramid;
+        QCOMPARE(p.levels, 4);
+        QCOMPARE(p.binsPerLevel, (QVector<int>{1024, 4096, 16384, 65536}));
+        QCOMPARE(p.traceLengthNs, 2500 * kMs);
+        QCOMPARE(p.data.size(), 4);
+        QCOMPARE(p.data[3].size(), 4);
+        QCOMPARE(p.data[3][0].size(), 65536 * kCategoryCount);
+
+        QVERIFY(qAbs(int(pyramidValue(s, 0, 0, 250 * kMs, Category::Wait)) - 65535) <= 655);
+        QVERIFY(pyramidValue(s, 0, 0, 250 * kMs, Category::Recv) <= 655);
+        QVERIFY(qAbs(int(pyramidValue(s, 0, 1, 250 * kMs, Category::Compute)) - 65535) <= 655);
+        // Bin containing 401 ms on R0: after the wait (ends at 400 ms), still in the receive.
+        QVERIFY(qAbs(int(pyramidValue(s, 3, 0, 401 * kMs, Category::Recv)) - 65535) <= 655);
+        // R2's MPI_Allreduce: collective at the finest level.
+        QVERIFY(qAbs(int(pyramidValue(s, 3, 2, 1200 * kMs + 500'000, Category::Collective)) - 65535) <= 655);
+    }
+
+    void pyramidWithoutActivities()
+    {
+        QTemporaryDir tmp;
+        const Built b = build(writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))), 0, kAll, false, 2);
+        QVERIFY(b.store);
+        const TimelineStore &s = *b.store;
+        QVERIFY(!s.complete);
+        QCOMPARE(s.pyramid.levels, 2);
+        for (const RankRow &r : s.rows) {
+            QVERIFY(r.activities.isEmpty());
+            QVERIFY(r.messages.isEmpty());
+        }
+        QVERIFY(s.messages.isEmpty());
+        QVERIFY(qAbs(int(pyramidValue(s, 0, 0, 250 * kMs, Category::Wait)) - 65535) <= 655);
+        QVERIFY(qAbs(int(pyramidValue(s, 1, 0, 250 * kMs, Category::Wait)) - 65535) <= 655);
+    }
+
+    void nonblockingWaitPatched()
+    {
+        QTemporaryDir tmp;
+        const Built b = build(writeNonblockingOtf2(tmp.filePath(QStringLiteral("nb"))));
+        QVERIFY(b.store);
+        const TimelineStore &s = *b.store;
+        const Activity *wait = findActivity(s, 0, QStringLiteral("MPI_Wait"), 110 * kMs);
+        QVERIFY(wait);
+        QCOMPARE(wait->endNs, 250 * kMs);
+        QCOMPARE(wait->category, Category::Recv);
+        QCOMPARE(wait->waitNs, qint64(90'000'000));
+        const QVector<int> l = linksOf(s, 0, *wait);
+        QCOMPARE(l.size(), 1);
+        const Message &m = s.messages[l.first()];
+        QCOMPARE(m.sender, 1);
+        QCOMPARE(m.receiver, 0);
+        QCOMPARE(m.bytes, quint64(400));
+        QCOMPARE(m.sendNs, 200 * kMs);
+        QCOMPARE(m.recvNs, 250 * kMs);
+        const Activity *isend = findActivity(s, 1, QStringLiteral("MPI_Isend"), 200 * kMs);
+        QVERIFY(isend);
+        QCOMPARE(linksOf(s, 1, *isend), l);
+    }
+
+    void windowKeepsOnlyOverlap()
+    {
+        QTemporaryDir tmp;
+        const Built b = build(writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))), 1000 * kMs, 1300 * kMs);
+        QVERIFY(b.store);
+        const TimelineStore &s = *b.store;
+        QVERIFY(!s.complete);
+        QCOMPARE(s.fromNs, 1000 * kMs);
+        QCOMPARE(s.toNs, 1300 * kMs);
+        QCOMPARE(s.pyramid.levels, 0);
+        QVERIFY(s.messages.isEmpty());
+        int count = 0;
+        for (const RankRow &r : s.rows) {
+            QVERIFY(r.messages.isEmpty());
+            for (const Activity &a : r.activities) {
+                QCOMPARE(s.functions.value(a.function), QStringLiteral("MPI_Allreduce"));
+                QCOMPARE(a.linkCount, quint16(1));
+                ++count;
+            }
+        }
+        QCOMPARE(count, 4);
+        QCOMPARE(s.collectives.size(), 4);
+        // main [0, 2500] overlaps the window.
+        QCOMPARE(row(s, 0).userSpans.size(), 1);
+    }
+
+    void waitallLinksAllReceives()
+    {
+        QTemporaryDir tmp;
+        const Built b = build(writeWaitallOtf2(tmp.filePath(QStringLiteral("wa"))));
+        QVERIFY(b.store);
+        const TimelineStore &s = *b.store;
+        const Activity *wa = findActivity(s, 1, QStringLiteral("MPI_Waitall"), 150 * kMs);
+        QVERIFY(wa);
+        QCOMPARE(wa->linkCount, quint16(2));
+        QSet<quint32> tags;
+        for (int i : linksOf(s, 1, *wa)) {
+            QCOMPARE(s.messages[i].receiver, 1);
+            QCOMPARE(s.messages[i].recvNs, 300 * kMs);
+            tags.insert(s.messages[i].tag);
+        }
+        QCOMPARE(tags, (QSet<quint32>{2, 3}));
+        QCOMPARE(wa->waitNs, qint64(100'000'000));
+        QVERIFY(wa->waitNs <= wa->endNs - wa->startNs);
+        // R0's MPI_Waitall only completes sends: no wait, no links.
+        const Activity *wa0 = findActivity(s, 0, QStringLiteral("MPI_Waitall"), 260 * kMs);
+        QVERIFY(wa0);
+        QCOMPARE(wa0->waitNs, qint64(0));
+        QCOMPARE(wa0->linkCount, quint16(0));
+    }
+
+    void waitIsCappedAtDuration()
+    {
+        TraceAggregator agg;
+        TimelineBuilder builder(agg, 0, kAll, true, 1);
+        builder.addRank(0, QStringLiteral("n"));
+        builder.addRank(1, QStringLiteral("n"));
+        TraceMeta meta;
+        meta.traceLengthNs = 1000;
+        builder.begin(meta);
+        // R1's MPI_Recv [100, 150] completes a message whose send entered at 400 (clock skew).
+        builder.addCall({1, CallKind::P2P, QStringLiteral("MPI_Recv"), 100, 150});
+        builder.addRecv({1, 0, 0, 1, 8, QStringLiteral("MPI_Recv"), 100, 150});
+        builder.addCall({0, CallKind::P2P, QStringLiteral("MPI_Send"), 400, 401});
+        builder.addSend({0, 1, 0, 1, 8, QStringLiteral("MPI_Send"), 400, 401});
+        agg.finish(1000);
+        const auto s = builder.finish();
+        const Activity *recv = findActivity(*s, 1, QStringLiteral("MPI_Recv"), 100);
+        QVERIFY(recv);
+        QCOMPARE(recv->waitNs, qint64(50));
+        QCOMPARE(recv->linkCount, quint16(1));
+    }
+
+    void userSpansFromPhases()
+    {
+        QTemporaryDir tmp;
+        const Built b = build(writePhasesOtf2(tmp.filePath(QStringLiteral("ph"))));
+        QVERIFY(b.store);
+        const TimelineStore &s = *b.store;
+        const RankRow &r0 = row(s, 0);
+        QCOMPARE(r0.maxDepth, quint8(2));
+        QStringList names;
+        for (int i = 0; i < r0.userSpans.size(); ++i) {
+            const UserSpan &u = r0.userSpans[i];
+            names << QStringLiteral("%1:%2").arg(s.functions.value(u.function)).arg(u.depth);
+            if (i > 0) {
+                const UserSpan &p = r0.userSpans[i - 1];
+                QVERIFY(p.startNs < u.startNs || (p.startNs == u.startNs && p.depth <= u.depth));
+            }
+        }
+        QCOMPARE(names, (QStringList{QStringLiteral("main:0"), QStringLiteral("phase_a:1"),
+                                     QStringLiteral("send_to:2"), QStringLiteral("phase_b:1")}));
+        QVERIFY(!s.functions.contains(QStringLiteral("TRACE BUFFER FLUSH")));
+        QCOMPARE(r0.userSpans[2].startNs, 500 * kMs);
+        QCOMPARE(r0.userSpans[2].endNs, 600 * kMs);
+    }
+
+    void overviewKeepsOnlyLongUserSpans()
+    {
+        // Pyramid-only mode: spans shorter than a level-1 bin (10 s / 4096 = 2.44 ms) are dropped.
+        TraceAggregator agg;
+        TimelineBuilder builder(agg, 0, kAll, false, 2);
+        builder.addRank(0, QStringLiteral("n"));
+        TraceMeta meta;
+        meta.traceLengthNs = 10'000 * kMs;
+        builder.begin(meta);
+        builder.addUserRegion({0, QStringLiteral("tiny"), 1, 1000 * kMs, 1000 * kMs + 100});
+        builder.addUserRegion({0, QStringLiteral("long"), 1, 2000 * kMs, 2010 * kMs});
+        builder.addUserRegion({0, QStringLiteral("main"), 0, 0, 10'000 * kMs});
+        agg.finish(meta.traceLengthNs);
+        const auto s = builder.finish();
+        const RankRow &r = row(*s, 0);
+        QStringList names;
+        for (const UserSpan &u : r.userSpans)
+            names << s->functions.value(u.function);
+        QCOMPARE(names, (QStringList{QStringLiteral("main"), QStringLiteral("long")}));
+        QCOMPARE(r.maxDepth, quint8(1));
+        QVERIFY(r.activities.isEmpty());
+    }
+
+    void overviewPhasesKeepsPhaseSpans()
+    {
+        QTemporaryDir tmp;
+        const Built b = build(writePhasesOtf2(tmp.filePath(QStringLiteral("ph"))), 0, kAll, false, 2);
+        QVERIFY(b.store);
+        QStringList names;
+        for (const UserSpan &u : row(*b.store, 0).userSpans)
+            names << b.store->functions.value(u.function);
+        // All phases spans (>= 100 ms) exceed the 0.73 ms level-1 bin of the 3 s trace.
+        QCOMPARE(names, (QStringList{QStringLiteral("main"), QStringLiteral("phase_a"),
+                                     QStringLiteral("send_to"), QStringLiteral("phase_b")}));
+    }
+
+    void overviewUserSpansAreBounded()
+    {
+        TraceAggregator agg;
+        TimelineBuilder builder(agg, 0, kAll, false, 2);
+        builder.addRank(0, QStringLiteral("n"));
+        TraceMeta meta;
+        meta.traceLengthNs = 10'000 * kMs;
+        builder.begin(meta);
+        for (qint64 i = 0; i < 100'000; ++i) // 1 µs regions every 100 µs
+            builder.addUserRegion({0, QStringLiteral("f"), 1, i * 100'000, i * 100'000 + 1000});
+        agg.finish(meta.traceLengthNs);
+        const auto s = builder.finish();
+        QVector<int> perDepth(kMaxUserDepth + 1, 0);
+        for (const UserSpan &u : row(*s, 0).userSpans)
+            ++perDepth[u.depth];
+        for (int n : perDepth)
+            QVERIFY(n <= 4096);
+    }
+
+    void functionTableIsBounded()
+    {
+        TraceAggregator agg;
+        TimelineBuilder builder(agg, 0, kAll, true, 0);
+        builder.addRank(0, QStringLiteral("n"));
+        TraceMeta meta;
+        meta.traceLengthNs = 100'000'000;
+        builder.begin(meta);
+        for (int i = 0; i < 70'000; ++i)
+            builder.addUserRegion({0, QStringLiteral("fn_%1").arg(i), 0, qint64(i) * 1000, qint64(i) * 1000 + 500});
+        builder.addCall({0, CallKind::P2P, QStringLiteral("MPI_Send"), 99'000'000, 99'000'001});
+        agg.finish(meta.traceLengthNs);
+        const auto s = builder.finish();
+        QVERIFY(s->functions.size() <= 65536);
+        QCOMPARE(s->functions.last(), QStringLiteral("(other)"));
+        const RankRow &r = row(*s, 0);
+        QCOMPARE(r.userSpans.size(), 70'000);
+        for (const UserSpan &u : r.userSpans)
+            QVERIFY(u.function < s->functions.size());
+        for (const Activity &a : r.activities)
+            QVERIFY(a.function < s->functions.size());
+        QCOMPARE(s->functions.value(r.userSpans.first().function), QStringLiteral("fn_0"));
+        QCOMPARE(s->functions.value(r.userSpans.last().function), QStringLiteral("(other)"));
+    }
+
+    void deepNestingIsBounded()
+    {
+        TraceAggregator agg;
+        TimelineBuilder builder(agg, 0, kAll, true, 2);
+        builder.addRank(0, QStringLiteral("n"));
+        TraceMeta meta;
+        meta.traceLengthNs = 1000;
+        builder.begin(meta);
+        for (int d = 39; d >= 0; --d) // innermost leaves first
+            builder.addUserRegion({0, QStringLiteral("f%1").arg(d), d, qint64(d), qint64(1000 - d)});
+        agg.finish(1000);
+        const auto s = builder.finish();
+        const RankRow &r = row(*s, 0);
+        QCOMPARE(r.maxDepth, quint8(15));
+        QCOMPARE(r.userSpans.size(), 40);
+        int atCap = 0;
+        for (const UserSpan &u : r.userSpans) {
+            QVERIFY(u.depth <= 15);
+            atCap += u.depth == 15 ? 1 : 0;
+        }
+        QCOMPARE(atCap, 25);
+        QCOMPARE(r.userSpans.first().depth, quint8(0));
+    }
+
+    void estimateIsUpperBound()
+    {
+        QTemporaryDir tmp;
+        const QStringList anchors{writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))),
+                                  writeNonblockingOtf2(tmp.filePath(QStringLiteral("nb"))),
+                                  writeWaitallOtf2(tmp.filePath(QStringLiteral("wa"))),
+                                  writePhasesOtf2(tmp.filePath(QStringLiteral("ph")))};
+        for (const QString &a : anchors) {
+            const Built b = build(a);
+            QVERIFY(b.store);
+            QVERIFY(b.store->bytesUsed() >= pyramidBytes(int(b.store->rows.size()), 4));
+            const quint64 est = estimateTimelineBytes(b.meta.eventCount, b.meta.hasMetrics, 4, 4);
+            QVERIFY2(est >= b.store->bytesUsed(),
+                     qPrintable(QStringLiteral("%1: estimate %2 < used %3 (events %4)")
+                                    .arg(a).arg(est).arg(b.store->bytesUsed()).arg(b.meta.eventCount)));
+        }
+        QCOMPARE(pyramidBytes(1, 1), quint64(1024 * 6 * 2));
+        QCOMPARE(pyramidBytes(2, 2), quint64(2 * (1024 + 4096) * 6 * 2));
+    }
+};
+
+QTEST_GUILESS_MAIN(TestTimelineBuilder)
+#include "tst_trace_timeline_builder.moc"

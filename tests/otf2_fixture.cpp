@@ -30,7 +30,7 @@ enum RegionId : OTF2_RegionRef {
     R_Main, R_Send, R_Recv, R_Allreduce, R_Ssend, R_Isend, R_Irecv, R_Wait, R_Waitall,
     R_PhaseA, R_PhaseB, R_SendTo, R_Flush,
 };
-enum class Scenario { Ring4, Truncated, Nonblocking, Phases, Ring4MetricClass, Ring4MetricMembers };
+enum class Scenario { Ring4, Truncated, Nonblocking, Waitall, Phases, Ring4MetricClass, Ring4MetricMembers };
 
 // The phases scenario has 2 ranks and runs 3 s; all others 4 ranks and 2.5 s.
 constexpr uint64_t kPhasesLengthMs = 3000;
@@ -171,6 +171,35 @@ void writeNonblockingRank(RankWriter &w, int rank)
     }
 }
 
+// MPI_Waitall completing two receives (ranks 2, 3 only run main):
+//   R0: Isend(to 1, tag 2, 300 B) [200,201], Isend(to 1, tag 3, 50 B) [250,251],
+//       Waitall [260,261] completing both sends.
+//   R1: Irecv(from 0, tag 2) [100,101], Irecv(from 0, tag 3) [101,102],
+//       Waitall [150,300] completing both receives at 300 (late sender 50 ms and 100 ms).
+void writeWaitallRank(RankWriter &w, int rank)
+{
+    switch (rank) {
+    case 0:
+        w.isend(200, 1, 2, 300, 1);
+        w.isend(250, 1, 3, 50, 2);
+        w.enter(260, R_Waitall);
+        w.isendComplete(261, 1);
+        w.isendComplete(261, 2);
+        w.leave(261, R_Waitall);
+        break;
+    case 1:
+        w.irecv(100, 1);
+        w.irecv(101, 2);
+        w.enter(150, R_Waitall);
+        w.irecvComplete(300, 0, 2, 300, 1);
+        w.irecvComplete(300, 0, 3, 50, 2);
+        w.leave(300, R_Waitall);
+        break;
+    default:
+        break;
+    }
+}
+
 // Both ranks (other = the other rank):
 //   main [0, 3000] > phase_a [100, 1500] > send_to [500, 600] > MPI_Send [500, 501] -> other,
 //   tag 1, 100 B; phase_a > MPI_Recv [700, 701] <- other, tag 1, 100 B;
@@ -199,9 +228,12 @@ bool writeEvents(OTF2_Archive *archive, Scenario scenario, std::array<uint64_t, 
         RankWriter w(archive, rank);
         const bool cutR0 = scenario == Scenario::Truncated && rank == 0;
         w.enter(0, R_Main);
-        if (scenario == Scenario::Nonblocking || scenario == Scenario::Phases) {
+        if (scenario == Scenario::Nonblocking || scenario == Scenario::Waitall
+            || scenario == Scenario::Phases) {
             if (scenario == Scenario::Nonblocking)
                 writeNonblockingRank(w, rank);
+            else if (scenario == Scenario::Waitall)
+                writeWaitallRank(w, rank);
             else
                 writePhasesRank(w, rank);
             w.leave(lengthMs(scenario), R_Main);
@@ -395,6 +427,11 @@ QString writeTruncatedOtf2(const QString &dir)
 QString writeNonblockingOtf2(const QString &dir)
 {
     return writeArchive(dir, true, Scenario::Nonblocking);
+}
+
+QString writeWaitallOtf2(const QString &dir)
+{
+    return writeArchive(dir, true, Scenario::Waitall);
 }
 
 QString writePhasesOtf2(const QString &dir)

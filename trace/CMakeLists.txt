@@ -35,6 +35,10 @@ add_library(edumpi_trace STATIC
     trace_sink.h
     trace_aggregator.h
     trace_aggregator.cpp
+    timeline_store.h
+    timeline_store.cpp
+    timeline_builder.h
+    timeline_builder.cpp
     otf2_trace_reader.h
     otf2_trace_reader.cpp
     ${PROJECT_SOURCE_DIR}/data_column.h

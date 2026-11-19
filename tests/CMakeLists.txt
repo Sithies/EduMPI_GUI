@@ -17,6 +17,7 @@ edumpi_add_trace_test(otf2_reader
     otf2_fixture.h otf2_fixture.cpp
     ring4_scenario.h ring4_scenario.cpp)
 edumpi_add_trace_test(data_source otf2_fixture.h otf2_fixture.cpp)
+edumpi_add_trace_test(timeline_builder otf2_fixture.h otf2_fixture.cpp)
 
 # Cluster_Architecture fed by Trace_Data_Source: compiles the app classes it needs
 # (Cluster_Architecture pulls in Database_Thread for the DB path) into the test.
