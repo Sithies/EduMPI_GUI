@@ -3,14 +3,14 @@ import QtQuick.Controls
 import QtQuick.Layouts 6.3
 import QtQuick.Dialogs
 
-// Sidebar panel: select an OTF2 trace (file or Score-P experiment folder) and open it
-// in a separate Trace_Analysis window.
+// Sidebar panel: select an OTF2 trace (file or Score-P experiment folder), set the timeline's
+// memory budget and open the trace in a separate Trace_Analysis window.
 Rectangle {
 
     id: trace_load
     width: 250
-    height: 200
-    implicitHeight: 200
+    height: 290
+    implicitHeight: 290
     color: "#383936"
 
     Rectangle {
@@ -108,6 +108,23 @@ Rectangle {
                 onAccepted: tracePathField.text = selectedFolder
             }
 
+            // Memory budget for the timeline, read when the trace is loaded (QSettings, 0 = automatic).
+            Text {
+                text: qsTr("Memory budget (MB, 0 = automatic):")
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                color: "#999999"
+            }
+            TextField {
+                id: budget_field
+                Layout.fillWidth: true
+                validator: IntValidator { bottom: 0; top: 1048576 }
+                text: nodesList ? String(nodesList.traceMemoryBudgetMB()) : "0"
+                background: Rectangle {
+                    color: "#4d4d4d"
+                }
+            }
+
             Button {
                 id: trace_load_button
                 text: qsTr("Load")
@@ -121,7 +138,12 @@ Rectangle {
                     cursorShape: Qt.PointingHandCursor
                 }
 
-                onClicked: trace_load.openTrace(tracePathField.text.trim())
+                onClicked: {
+                    var mb = parseInt(budget_field.text)
+                    if (nodesList)
+                        nodesList.setTraceMemoryBudgetMB(isNaN(mb) || mb < 0 ? 0 : mb)
+                    trace_load.openTrace(tracePathField.text.trim())
+                }
             }
         }
     }

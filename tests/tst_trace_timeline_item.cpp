@@ -4,6 +4,11 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <QQmlComponent>
+#include <QQmlContext>
+#include <QQmlEngine>
+#include <QQuickWindow>
+#include <QPointingDevice>
 
 #include <limits>
 
@@ -303,6 +308,124 @@ private slots:
             QVERIFY2(d.contains(QLatin1String(key)), key);
         item.clickAt(kL + 200, 5); // axis: nothing
         QCOMPARE(spy.count(), 1);
+    }
+
+    // The real TraceTimeline.qml: a mouse wheel over the plot zooms around the pointer.
+    void wheelZoomsInTraceTimelineQml()
+    {
+        const QString qmlFile = QFINDTESTDATA("../TraceTimeline.qml");
+        QVERIFY2(!qmlFile.isEmpty(), "TraceTimeline.qml not found");
+        qmlRegisterType<TraceTimelineItem>("GUI_Cluster", 1, 0, "TraceTimelineItem");
+        TraceTimelineModel model;
+        model.addSnapshot({build(m_ring4)});
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("tlModel"), &model);
+        QQmlComponent c(&engine);
+        c.setData("import QtQuick\nTraceTimeline { width: 1000; height: 500; listNodes: ({timeline: tlModel}) }\n",
+                  QUrl::fromLocalFile(QFileInfo(qmlFile).absolutePath() + QStringLiteral("/__wheel_test.qml")));
+        std::unique_ptr<QObject> obj(c.create());
+        QVERIFY2(obj, qPrintable(c.errorString()));
+        QQuickWindow win;
+        win.resize(1000, 500);
+        auto *rootItem = qobject_cast<QQuickItem *>(obj.get());
+        QVERIFY(rootItem);
+        rootItem->setParentItem(win.contentItem());
+        win.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&win));
+        auto *item = rootItem->findChild<TraceTimelineItem *>();
+        QVERIFY(item);
+        QTRY_VERIFY(item->viewEndNs() > item->viewStartNs());
+        const qint64 span = item->viewEndNs() - item->viewStartNs();
+
+        const QPointF local(kL + 300, 60);
+        const QPointF scenePos = item->mapToScene(local);
+        QWheelEvent ev(scenePos, win.mapToGlobal(scenePos), QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier,
+                       Qt::NoScrollPhase, false);
+        QCoreApplication::sendEvent(&win, &ev);
+        QTRY_VERIFY2(item->viewEndNs() - item->viewStartNs() < span,
+                     qPrintable(QStringLiteral("span %1 -> %2").arg(span).arg(item->viewEndNs() - item->viewStartNs())));
+    }
+
+    // Trackpads (macOS) send wheel events from a TouchPad device: swiping up/down must zoom,
+    // swiping sideways must move in time (WheelHandler takes only mice unless told otherwise).
+    void trackpadZoomsAndPansInTraceTimelineQml()
+    {
+        const QString qmlFile = QFINDTESTDATA("../TraceTimeline.qml");
+        QVERIFY2(!qmlFile.isEmpty(), "TraceTimeline.qml not found");
+        qmlRegisterType<TraceTimelineItem>("GUI_Cluster", 1, 0, "TraceTimelineItem");
+        TraceTimelineModel model;
+        model.addSnapshot({build(m_ring4)});
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("tlModel"), &model);
+        QQmlComponent c(&engine);
+        c.setData("import QtQuick\nTraceTimeline { width: 1000; height: 500; listNodes: ({timeline: tlModel}) }\n",
+                  QUrl::fromLocalFile(QFileInfo(qmlFile).absolutePath() + QStringLiteral("/__wheel_test.qml")));
+        std::unique_ptr<QObject> obj(c.create());
+        QVERIFY2(obj, qPrintable(c.errorString()));
+        QQuickWindow win;
+        win.resize(1000, 500);
+        auto *rootItem = qobject_cast<QQuickItem *>(obj.get());
+        QVERIFY(rootItem);
+        rootItem->setParentItem(win.contentItem());
+        win.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&win));
+        auto *item = rootItem->findChild<TraceTimelineItem *>();
+        QVERIFY(item);
+        QTRY_VERIFY(item->viewEndNs() > item->viewStartNs());
+
+        QPointingDevice pad(QStringLiteral("test trackpad"), 4242, QInputDevice::DeviceType::TouchPad,
+                            QPointingDevice::PointerType::Finger,
+                            QInputDevice::Capability::Position | QInputDevice::Capability::Scroll, 2, 0);
+        const QPointF scenePos = item->mapToScene(QPointF(kL + 300, 60));
+        const auto swipe = [&](QPoint pixel, QPoint angle, Qt::ScrollPhase phase) {
+            QWheelEvent ev(scenePos, win.mapToGlobal(scenePos), pixel, angle, Qt::NoButton, Qt::NoModifier, phase,
+                           false, Qt::MouseEventNotSynthesized, &pad);
+            QCoreApplication::sendEvent(&win, &ev);
+        };
+        const qint64 span = item->viewEndNs() - item->viewStartNs();
+        swipe({}, {}, Qt::ScrollBegin);
+        for (int i = 0; i < 3; ++i)
+            swipe({0, 12}, {0, 24}, Qt::ScrollUpdate);
+        swipe({}, {}, Qt::ScrollEnd);
+        const qint64 zoomed = item->viewEndNs() - item->viewStartNs();
+        QVERIFY2(zoomed < span, qPrintable(QStringLiteral("span %1 -> %2").arg(span).arg(zoomed)));
+
+        const qint64 start = item->viewStartNs();
+        swipe({-40, 0}, {-80, 0}, Qt::ScrollUpdate); // fingers move left: later in time
+        QVERIFY2(item->viewStartNs() > start, qPrintable(QStringLiteral("start %1 -> %2").arg(start).arg(item->viewStartNs())));
+        QCOMPARE(item->viewEndNs() - item->viewStartNs(), zoomed); // moving keeps the zoom
+
+        // Mouse: Shift + wheel moves in time (macOS delivers it horizontal, Linux vertical) and
+        // keeps the zoom; Alt + wheel scrolls the rows.
+        rootItem->setHeight(120);
+        QTRY_VERIFY(item->contentHeight() > item->height());
+        QCOMPARE(item->contentY(), 0.0);
+        const QPointF rowsPos = item->mapToScene(QPointF(kL + 300, item->height() - 10));
+        const auto wheel = [&](QPoint angle, Qt::KeyboardModifiers mods) {
+            QWheelEvent ev(rowsPos, win.mapToGlobal(rowsPos), QPoint(), angle, Qt::NoButton, mods, Qt::NoScrollPhase,
+                           false);
+            QCoreApplication::sendEvent(&win, &ev);
+        };
+        item->setViewStartNs(500 * kMs); // room to move both ways
+        item->setViewEndNs(1000 * kMs);
+        const qint64 window = item->viewEndNs() - item->viewStartNs();
+        for (const QPoint angle : {QPoint(-120, 0), QPoint(0, -120)}) {
+            const qint64 before = item->viewStartNs();
+            wheel(angle, Qt::ShiftModifier); // wheel down: later in time
+            QVERIFY2(item->viewStartNs() > before,
+                     qPrintable(QStringLiteral("shift %1,%2: start %3 -> %4").arg(angle.x()).arg(angle.y())
+                                    .arg(before).arg(item->viewStartNs())));
+            QCOMPARE(item->viewEndNs() - item->viewStartNs(), window);
+            QCOMPARE(item->contentY(), 0.0);
+        }
+        const qint64 timeBeforeAlt = item->viewStartNs();
+        wheel(QPoint(0, -120), Qt::AltModifier);
+        const qreal afterAlt = item->contentY();
+        QVERIFY2(afterAlt > 0, qPrintable(QString::number(afterAlt)));
+        wheel(QPoint(-120, 0), Qt::AltModifier); // some platforms turn Alt + wheel horizontal
+        QVERIFY2(item->contentY() > afterAlt || item->contentY() == rootItem->property("maxContentY").toReal(),
+                 qPrintable(QString::number(item->contentY())));
+        QCOMPARE(item->viewStartNs(), timeBeforeAlt);
     }
 
     void dimsRowsWithoutMessagesToSelectedRank()

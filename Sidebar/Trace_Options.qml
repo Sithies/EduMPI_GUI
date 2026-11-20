@@ -3,8 +3,8 @@ import QtQuick.Controls
 import QtQuick.Layouts 6.3
 
 // Sidebar panel of the trace window (Sidebar_Trace): display options of the Trace Timeline
-// view, details of the last clicked bar, trace info, "Show window in 3D/2D/Matrix" and the
-// memory budget setting. Shares its state with TraceTimeline.qml through the window's
+// view, details of the last clicked bar, trace info and "Show window in 3D/2D/Matrix" (the
+// memory budget is set in Trace_Load.qml). Shares its state with TraceTimeline.qml through the window's
 // traceState object (Trace_Analysis.qml); uses no trace-only types.
 Rectangle {
     id: trace_options
@@ -177,33 +177,6 @@ Rectangle {
                       : qsTr("Open the Trace Timeline view to choose a window.")
             }
 
-            Text {
-                text: qsTr("Memory budget (MB, 0 = automatic):")
-                topPadding: 8
-                Layout.fillWidth: true
-                wrapMode: Text.Wrap
-                color: "#00FF00"
-            }
-            TextField {
-                id: budget_field
-                Layout.fillWidth: true
-                validator: IntValidator { bottom: 0; top: 1048576 }
-                text: nodesList ? String(nodesList.traceMemoryBudgetMB()) : "0"
-                onEditingFinished: {
-                    var mb = parseInt(text)
-                    if (isNaN(mb) || mb < 0)
-                        mb = 0
-                    nodesList.setTraceMemoryBudgetMB(mb)
-                    text = String(nodesList.traceMemoryBudgetMB())
-                }
-            }
-            Text {
-                Layout.fillWidth: true
-                wrapMode: Text.Wrap
-                color: "#999999"
-                font.pointSize: 10
-                text: qsTr("Applies to the next trace load.")
-            }
         }
     }
 }

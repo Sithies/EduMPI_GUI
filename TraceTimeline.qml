@@ -26,6 +26,11 @@ Rectangle {
     function clampContentY(y) {
         return Math.min(Math.max(0, y), maxContentY)
     }
+    // Alt + wheel (either direction): scroll the rows.
+    function scrollRows(delta) {
+        if (delta !== 0)
+            timeline.contentY = clampContentY(timeline.contentY - delta / 2)
+    }
 
     function syncState() {
         if (!traceState || !restored)
@@ -213,23 +218,59 @@ Rectangle {
                         trace_timeline_view.traceState.lastBar = details
                 }
 
-                // Wheel: zoom around the pointer; Shift + wheel: scroll the rows.
+                // Wheel / two-finger swipe up-down: zoom around the pointer; swipe sideways (or a
+                // tilt wheel) and Shift + wheel: move in time; Alt + wheel: scroll the rows.
+                // WheelHandler takes only mice and only one direction by default, so trackpads
+                // (macOS) and both directions are set explicitly. macOS turns Shift + mouse wheel
+                // into a horizontal wheel, Linux keeps it vertical: both move in time.
                 WheelHandler {
                     target: null
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                     acceptedModifiers: Qt.NoModifier
+                    orientation: Qt.Vertical
                     onWheel: (event) => {
-                        var delta = event.angleDelta.y !== 0 ? event.angleDelta.y : event.pixelDelta.y
-                        if (delta !== 0)
-                            timeline.zoomAt(event.x, Math.pow(0.85, delta / 120))
+                        if (Math.abs(event.angleDelta.y) >= Math.abs(event.angleDelta.x) && event.angleDelta.y !== 0)
+                            timeline.zoomAt(event.x, Math.pow(0.85, event.angleDelta.y / 120))
                     }
                 }
                 WheelHandler {
                     target: null
-                    acceptedModifiers: Qt.ShiftModifier
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                    acceptedModifiers: Qt.NoModifier
+                    orientation: Qt.Horizontal
                     onWheel: (event) => {
-                        var delta = event.angleDelta.y !== 0 ? event.angleDelta.y : event.angleDelta.x
-                        timeline.contentY = trace_timeline_view.clampContentY(timeline.contentY - delta / 2)
+                        var dx = event.angleDelta.x
+                        if (Math.abs(dx) > Math.abs(event.angleDelta.y))
+                            timeline.panBy(-(event.pixelDelta.x !== 0 ? event.pixelDelta.x : dx / 3))
                     }
+                }
+                WheelHandler {
+                    target: null
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                    acceptedModifiers: Qt.ShiftModifier
+                    orientation: Qt.Vertical
+                    onWheel: (event) => timeline.panBy(-event.angleDelta.y / 3)
+                }
+                WheelHandler {
+                    target: null
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                    acceptedModifiers: Qt.ShiftModifier
+                    orientation: Qt.Horizontal
+                    onWheel: (event) => timeline.panBy(-event.angleDelta.x / 3)
+                }
+                WheelHandler {
+                    target: null
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                    acceptedModifiers: Qt.AltModifier
+                    orientation: Qt.Vertical
+                    onWheel: (event) => trace_timeline_view.scrollRows(event.angleDelta.y)
+                }
+                WheelHandler {
+                    target: null
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                    acceptedModifiers: Qt.AltModifier
+                    orientation: Qt.Horizontal
+                    onWheel: (event) => trace_timeline_view.scrollRows(event.angleDelta.x)
                 }
                 // Drag: pan in time (horizontal) and scroll the rows (vertical).
                 DragHandler {
