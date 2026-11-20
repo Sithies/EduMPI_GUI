@@ -31,13 +31,16 @@ struct TimelineLoadPlan {
 
 // Levels: the most (<= kDefaultPyramidLevels, >= 1) with pyramidBytes(ranks, levels) <= budget / 2.
 // Full mode if estimateTimelineBytes(...) * 1.5 <= budget (headroom for vector growth and the
-// builder's pending links / member lists during the build).
+// builder's pending links / member lists during the build). The estimate is based on the
+// archive's total event count, so unlike a detail window it does not depend on how the events
+// are distributed over time; the full-mode build therefore has no runtime byte cap.
 TimelineLoadPlan planTimelineLoad(const TraceMeta &meta, int ranks, quint64 budget);
 
 // Longest detail window [ns] whose estimated share of the timeline (events evenly spread over
 // the run), with the same 1.5 headroom, stays within budget / 4: the overview (<= budget / 2),
 // the detail still shown and the one being built then fit into the budget together.
-// Returns the trace length if everything fits, at least 10 us.
+// Returns the trace length if everything fits, at least 10 us. A window denser than average is
+// stopped at runtime by the builder's byte cap (budget / 4, Trace_Data_Source::processDetailRequest).
 qint64 maxDetailWindowNs(const TraceMeta &meta, int ranks, quint64 budget);
 
 } // namespace trace

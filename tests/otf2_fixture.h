@@ -39,5 +39,6 @@ QString writeMetricsOtf2(const QString &dir, bool withClass);
 // Synthetic large trace: `ranks` ranks (first half on nodeA, rest on nodeB), WORLD = all ranks,
 // main [0, length] on every rank, length = messagesPerRank * 100 us + 1 ms. Message i of rank r:
 // MPI_Send [i * 100 us, +10 us] to (r + 1) % ranks (tag 0, 64 B) and MPI_Recv [i * 100 us + 20 us,
-// +10 us] from (r - 1) % ranks. About 6 * messagesPerRank events per rank.
-QString writeManyMessagesOtf2(const QString &dir, int ranks, int messagesPerRank);
+// +10 us] from (r - 1) % ranks. About 6 * messagesPerRank events per rank. idleNs > 0 appends
+// that much idle time (main only) after the messages: all events dense at the start of the run.
+QString writeManyMessagesOtf2(const QString &dir, int ranks, int messagesPerRank, quint64 idleNs = 0);

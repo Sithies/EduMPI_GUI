@@ -155,6 +155,8 @@ Rectangle {
                     cursorShape: Qt.PointingHandCursor
                 }
                 onClicked: {
+                    // A running playback would replace the window with its next second.
+                    bottom_main.pausePlayback()
                     nodesList.showTraceWindow(traceState.viewStartNs / 1e9, traceState.viewEndNs / 1e9)
                     selected_screen = "Cores3D"
                 }

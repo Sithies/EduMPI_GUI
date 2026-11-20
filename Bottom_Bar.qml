@@ -66,6 +66,14 @@ Item {
     }
 
 
+    // Pauses a running playback (as clicking the pause button would); no-op otherwise. Used by
+    // the trace window only (Trace_Analysis.qml, Trace_Options.qml).
+    function pausePlayback(){
+        if(timeline_timer.running && playbutton.icon.name === "pause"){
+            playbutton.clicked()
+        }
+    }
+
     onOptionsChanged: {
         if(bar_enable_timeline &&  playbutton.icon.name==="play"){
             nodesList.showConditionAt(timestampA, timestampB)

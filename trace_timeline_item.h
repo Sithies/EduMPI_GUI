@@ -16,7 +16,9 @@ class TraceTimelineModel;
 // Detail loading: only when the view range changes (zoom, pan, resize, view properties, model)
 // and only in windowed mode, when the model's detail does not cover the view and the view is at
 // most maxDetailWindowNs long, model.requestDetail(view) is called; until then (and for wider
-// views) the overview pyramid is drawn. model.changed() only repaints.
+// views) the overview pyramid is drawn. model.changed() only repaints. A hidden item (e.g. a
+// page a StackView keeps below the visible one) requests nothing; it checks once when it
+// becomes visible again (the model answers only its latest request).
 class TraceTimelineItem : public QQuickPaintedItem
 {
     Q_OBJECT
@@ -97,6 +99,7 @@ signals:
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
+    void itemChange(ItemChange change, const ItemChangeData &value) override;
 
 private:
     struct RowLayout {

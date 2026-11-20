@@ -124,10 +124,16 @@ Window {
             onComponentsBuilt: {
                 busyindicator.running = false
                 busyindicator.visible = false
-                if(run_analysis_win.selected_screen === "TraceTimeline"){
-                    ascreen.push("/TraceTimeline.qml", {listNodes: nodesList, traceState: run_analysis_win.traceState})
+                // A view the user picked while loading is already on the stack: replace it
+                // instead of pushing a second one (a hidden page would keep its connections).
+                var page = run_analysis_win.selected_screen === "TraceTimeline" ? "/TraceTimeline.qml" : "Cores3D.qml"
+                var props = run_analysis_win.selected_screen === "TraceTimeline"
+                        ? {listNodes: nodesList, traceState: run_analysis_win.traceState}
+                        : {listNodes: nodesList}
+                if(ascreen.depth > 0){
+                    ascreen.replace(page, props)
                 } else {
-                    ascreen.push("Cores3D.qml", {listNodes: nodesList})
+                    ascreen.push(page, props)
                 }
             }
             onTraceInfoReady: (name, ranks, durationSeconds, unmatched)=>{
@@ -222,11 +228,23 @@ Window {
             // switching back restores it unchanged).
             visible: run_analysis_win.selected_screen !== "TraceTimeline"
         }
+        // The bar (and its playback) is hidden in the Trace Timeline view: pause there, so it
+        // does not keep replacing the 3D/2D/Matrix data in the background.
         Connections {
-            target: bottom_main
-            // The user moved the seconds window: the header's "Window: …" no longer applies.
-            function onTimestampAChanged(){ run_analysis_win.traceWindowNote = "" }
-            function onTimestampBChanged(){ run_analysis_win.traceWindowNote = "" }
+            target: run_analysis_win
+            function onSelected_screenChanged(){
+                if(run_analysis_win.selected_screen === "TraceTimeline"){
+                    bottom_main.pausePlayback()
+                }
+            }
+        }
+        Connections {
+            target: nodesList
+            // Data of another period is requested (Bottom_Bar: playback tick, timeline click,
+            // step buttons, option change): the header's "Window: …" no longer applies.
+            // showTraceWindow (the only source of the note) emits neither signal.
+            function onSignalToUpdateData(){ run_analysis_win.traceWindowNote = "" }
+            function onSignalToShowTimestampData(){ run_analysis_win.traceWindowNote = "" }
         }
         // TraceOverviewItem exists only in trace builds: loaded from a separate file and only
         // when the window has a timeline.

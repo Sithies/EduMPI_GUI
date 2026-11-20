@@ -41,6 +41,26 @@ TimelineBuilder::~TimelineBuilder()
     m_agg.setListener(nullptr);
 }
 
+void TimelineBuilder::setByteCap(quint64 capBytes, std::atomic_bool *cancel)
+{
+    m_byteCap = capBytes;
+    m_capCancel = cancel;
+}
+
+bool TimelineBuilder::reserve(quint64 bytes)
+{
+    if (m_overBudget)
+        return false;
+    if (m_byteCap > 0 && m_keptBytes + bytes > m_byteCap) {
+        m_overBudget = true;
+        if (m_capCancel)
+            m_capCancel->store(true);
+        return false;
+    }
+    m_keptBytes += bytes;
+    return true;
+}
+
 // ---------------------------------------------------------------------------------------
 // Rows, functions, window
 
@@ -206,7 +226,7 @@ void TimelineBuilder::addCall(const MpiCall &call)
         return;
     const Category cat = categorize(call.function, call.kind);
     addToPyramid(row, start, end, cat, false);
-    if (!m_keep || !overlapsWindow(start, end))
+    if (!m_keep || !overlapsWindow(start, end) || !reserve(sizeof(Activity)))
         return;
     const Activity a{start, end, 0, 0, 0, functionIndex(call.function), cat};
     QVector<Activity> &acts = m_store->rows[row].activities;
@@ -250,6 +270,9 @@ void TimelineBuilder::addUserRegion(const UserRegion &region)
         return;
     const int row = rowIndex(region.rank);
     if (row < 0)
+        return;
+    // Span + its entries in the span indices (finish()).
+    if (m_keep && !reserve(sizeof(UserSpan) + 2 * sizeof(qint32)))
         return;
     RankRow &r = m_store->rows[row];
     const quint8 depth = quint8(std::clamp(region.depth, 0, kMaxUserDepth));
@@ -322,6 +345,9 @@ void TimelineBuilder::addMessage(const P2PSend *send, const P2PRecv *recv, doubl
     }
     if (!overlapsWindow(lo, hi))
         return;
+    // Message + per side a pending link (-> activity link) and a row message index.
+    if (!reserve(sizeof(Message) + 2 * (sizeof(PendingLink) + 2 * sizeof(qint32))))
+        return;
     const int idx = int(m_store->messages.size());
     const P2PSend &ref = send ? *send : P2PSend{};
     Message m{};
@@ -381,6 +407,8 @@ void TimelineBuilder::onCollective(const CompletedCollective &coll)
         const int row = rowIndex(c.rank);
         if (row < 0)
             continue;
+        if (!reserve(sizeof(CollectiveEntry) + sizeof(PendingLink) + sizeof(qint32)))
+            return;
         // Share one member list per communicator.
         QVector<int> &members = m_commMembers[c.comm];
         if (members.constData() != c.members.constData() && members != c.members)
@@ -407,7 +435,7 @@ std::shared_ptr<TimelineStore> TimelineBuilder::finish()
     const qint64 len = std::max<qint64>(0, m_maxNs);
     store->traceLengthNs = len;
     const bool fullRange = m_from <= 0 && m_to >= len;
-    store->complete = m_keep && fullRange;
+    store->complete = m_keep && fullRange && !m_overBudget;
     store->fromNs = fullRange ? 0 : std::clamp<qint64>(m_from, 0, len);
     store->toNs = fullRange ? len : std::clamp<qint64>(m_to, store->fromNs, len);
 

@@ -255,7 +255,7 @@ void TraceTimelineItem::viewRangeChanged()
 
 void TraceTimelineItem::maybeRequestDetail()
 {
-    if (!m_model || !m_model->windowed() || m_viewEnd <= m_viewStart)
+    if (!m_model || !m_model->windowed() || m_viewEnd <= m_viewStart || !isVisible())
         return;
     const qint64 max = m_model->maxDetailWindowNs();
     if (max > 0 && m_viewEnd - m_viewStart > max)
@@ -311,6 +311,18 @@ void TraceTimelineItem::geometryChange(const QRectF &newGeometry, const QRectF &
     QQuickPaintedItem::geometryChange(newGeometry, oldGeometry);
     if (newGeometry.size() != oldGeometry.size()) {
         maybeRequestDetail();
+        update();
+    }
+}
+
+void TraceTimelineItem::itemChange(ItemChange change, const ItemChangeData &value)
+{
+    QQuickPaintedItem::itemChange(change, value);
+    if (change == ItemVisibleHasChanged && value.boolValue) {
+        // While hidden another view may have been loaded: ask again for this one.
+        m_requested = false;
+        maybeRequestDetail();
+        updateDerived();
         update();
     }
 }

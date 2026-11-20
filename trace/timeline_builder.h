@@ -3,6 +3,7 @@
 #include <QHash>
 #include <QVector>
 
+#include <atomic>
 #include <memory>
 
 #include "timeline_store.h"
@@ -34,6 +35,15 @@ public:
     void addRecv(const P2PRecv &recv) override;
     void addCollective(const Collective &coll) override;
     void addUserRegion(const UserRegion &region) override;
+
+    // Byte cap for keepActivities builds (detail windows; 0 = none, the default). Each kept
+    // record is counted with its links / indices (sizeof-based, comparable to bytesUsed()); a
+    // record that would take the count past capBytes is dropped, overBudget() becomes true, no
+    // further record is kept and *cancel (if given) is set so that readOtf2 stops early. The
+    // store of an over-budget build is incomplete; callers discard it.
+    void setByteCap(quint64 capBytes, std::atomic_bool *cancel = nullptr);
+    bool overBudget() const { return m_overBudget; }
+    quint64 keptBytes() const { return m_keptBytes; }
 
     // Call once, after agg.finish().
     std::shared_ptr<TimelineStore> finish();
@@ -70,6 +80,8 @@ private:
     void addToPyramid(int row, qint64 start, qint64 end, Category cat, bool subtract);
     void patchWait(int row, const P2PRecv &recv, qint64 lateNs);
     void addMessage(const P2PSend *send, const P2PRecv *recv, double lateSender, double lateReceiver);
+    // Accounts bytes for a record about to be kept; false (and over budget) past the cap.
+    bool reserve(quint64 bytes);
 
     TraceAggregator &m_agg;
     std::shared_ptr<TimelineStore> m_store;
@@ -78,6 +90,10 @@ private:
     bool m_keep;
     int m_levels;
     bool m_pyramidOn = false;
+    quint64 m_byteCap = 0;
+    std::atomic_bool *m_capCancel = nullptr;
+    quint64 m_keptBytes = 0;
+    bool m_overBudget = false;
     qint64 m_minOverviewSpanNs = 0; // declared length / 4096 (level-1 bin width)
     QVector<double> m_binsPerNs; // per level
     qint64 m_maxNs = 0;

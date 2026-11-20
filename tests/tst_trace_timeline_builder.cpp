@@ -2,6 +2,7 @@
 #include <QtTest>
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <tuple>
 
@@ -690,6 +691,46 @@ private slots:
             QVERIFY2(sameAggregate(QStringLiteral("window %1-%2").arg(w[0]).arg(w[1]), want.rows, want.details,
                                    part.store->aggregate(w[0], w[1])),
                      "windowed store differs from complete store");
+        }
+    }
+
+    // With a byte cap (detail windows), the builder stops keeping once the appended records
+    // would exceed it, reports overBudget() and trips the cancel flag so the read stops early.
+    void byteCapStopsBuildAndCancelsRead()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeManyMessagesOtf2(tmp.filePath(QStringLiteral("many")), 4, 5000);
+        QVERIFY(!anchor.isEmpty());
+        const quint64 cap = 64 * 1024;
+        {
+            TraceAggregator agg;
+            TimelineBuilder builder(agg, 0, kAll, true, 0);
+            std::atomic_bool cancel{false};
+            builder.setByteCap(cap, &cancel);
+            TraceMeta meta;
+            QString error;
+            QVERIFY(!readOtf2(anchor, builder, &meta, &error, &cancel)); // stopped early
+            QVERIFY(cancel.load());
+            QVERIFY(builder.overBudget());
+            QVERIFY(builder.keptBytes() <= cap);
+            const auto store = builder.finish();
+            QVERIFY(store);
+            QVERIFY(!store->complete);
+        }
+        {
+            // Without a cap (or below it) nothing changes.
+            TraceAggregator agg;
+            TimelineBuilder builder(agg, 0, kAll, true, 0);
+            std::atomic_bool cancel{false};
+            builder.setByteCap(256 * 1024 * 1024, &cancel);
+            TraceMeta meta;
+            QString error;
+            QVERIFY(readOtf2(anchor, builder, &meta, &error, &cancel));
+            QVERIFY(!cancel.load());
+            QVERIFY(!builder.overBudget());
+            QVERIFY(builder.keptBytes() > cap);
+            agg.finish(meta.traceLengthNs);
+            QVERIFY(builder.finish()->complete);
         }
     }
 

@@ -437,22 +437,57 @@ void Trace_Data_Source::processDetailRequest()
     wFrom = std::clamp<qint64>(wFrom, 0, len);
     wTo = std::clamp<qint64>(wTo, wFrom, len);
 
-    TraceAggregator agg;
-    TimelineBuilder builder(agg, wFrom, wTo, true, 0);
-    TraceMeta meta;
-    QString error;
-    const bool ok = readOtf2(m_anchor, builder, &meta, &error, &m_detailCancel);
-    if (gen != m_detailGen.load())
-        return; // superseded: the newer request is answered instead
-    if (!ok || m_cancel.load()) { // failed, or the source was stopped during the read
-        if (!m_cancel.load())
+    // m_maxDetailWindowNs assumes evenly spread events; in a dense phase the window can hold
+    // far more. The builder stops at budget / 4 (cancelling the read); then the window is
+    // halved once around the request (never below the request itself), and if that is still
+    // too large the request is answered with a null store (the model then neither waits nor
+    // re-requests this range).
+    const quint64 cap = std::max<quint64>(m_budget / 4, 1);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        TraceAggregator agg;
+        TimelineBuilder builder(agg, wFrom, wTo, true, 0);
+        builder.setByteCap(cap, &m_detailCancel);
+        TraceMeta meta;
+        QString error;
+        const bool ok = readOtf2(m_anchor, builder, &meta, &error, &m_detailCancel);
+        if (gen != m_detailGen.load())
+            return; // superseded: the newer request is answered instead
+        if (m_cancel.load()) { // the source was stopped during the read
+            emit timelineReady(TimelineSnapshot{nullptr, from, to});
+            return;
+        }
+        std::shared_ptr<TimelineStore> store;
+        if (ok && !builder.overBudget()) {
+            agg.finish(meta.traceLengthNs);
+            store = builder.finish();
+        }
+        if (store && store->bytesUsed() <= cap) {
+            m_detailStore = store;
+            emit timelineReady(TimelineSnapshot{m_detailStore, from, to});
+            return;
+        }
+        const bool overBudget = builder.overBudget() || store != nullptr; // store: larger than the cap
+        if (!overBudget) {
             qWarning() << "Trace detail load failed:" << error;
-        emit timelineReady(TimelineSnapshot{nullptr, from, to});
-        return;
+            emit timelineReady(TimelineSnapshot{nullptr, from, to});
+            return;
+        }
+        store.reset();
+        {
+            // The builder tripped m_detailCancel; clear it unless a newer request set it.
+            QMutexLocker lock(&m_detailMutex);
+            if (gen != m_detailGen.load())
+                return;
+            m_detailCancel.store(m_cancel.load());
+        }
+        const qint64 narrowed = std::max((wTo - wFrom) / 2, span);
+        if (attempt > 0 || narrowed >= wTo - wFrom)
+            break;
+        wFrom = std::clamp<qint64>(from + span / 2 - narrowed / 2, 0, len);
+        wTo = std::clamp<qint64>(wFrom + narrowed, wFrom, len);
     }
-    agg.finish(meta.traceLengthNs);
-    m_detailStore = builder.finish();
-    emit timelineReady(TimelineSnapshot{m_detailStore, from, to});
+    qWarning() << "Trace detail window over the memory budget:" << from << to;
+    emit timelineReady(TimelineSnapshot{nullptr, from, to});
 }
 
 void Trace_Data_Source::showTraceWindow(qint64 fromNs, qint64 toNs)

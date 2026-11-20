@@ -385,6 +385,48 @@ private slots:
         QCOMPARE(requests.count(), 1);
     }
 
+    // A hidden timeline (e.g. a page a StackView keeps below the visible one) does not request
+    // detail on resize or view changes; it requests once when it becomes visible.
+    void hiddenItemRequestsDetailOnlyWhenShown()
+    {
+        TraceTimelineModel model;
+        auto overview = build(m_ring4, false);
+        QVERIFY(overview && !overview->complete);
+        model.addSnapshot({overview, -1, -1, 1000 * kMs});
+        QVERIFY(model.windowed());
+        QSignalSpy requests(&model, &TraceTimelineModel::detailRequested);
+        // root > page (hidden like a StackView page below the top) > item. (A parentless item
+        // cannot become visible again: Qt derives effective visibility from the parent.)
+        QQuickItem root;
+        QQuickItem page(&root);
+        page.setParentItem(&root);
+        TraceTimelineItem item(&page);
+        item.setParentItem(&page);
+        QVERIFY(item.isVisible());
+        page.setVisible(false);
+        QVERIFY(!item.isVisible());
+        item.setModel(&model);
+        item.setWidth(kL + 2500);
+        item.setHeight(300);
+        item.setView(0, 250 * kMs);
+        item.setWidth(kL + 2000); // resize
+        item.zoomAt(kL + 100, 0.5);
+        item.panBy(50);
+        QTest::qWait(TraceTimelineModel::kDebounceMs + 100);
+        QCOMPARE(requests.count(), 0);
+        QVERIFY(!model.loadingDetail());
+
+        const qint64 start = item.viewStartNs();
+        const qint64 end = item.viewEndNs();
+        page.setVisible(true);
+        QVERIFY(item.isVisible());
+        QTRY_COMPARE(requests.count(), 1);
+        QCOMPARE(requests.first().at(0).toLongLong(), start);
+        QCOMPARE(requests.first().at(1).toLongLong(), end);
+        QTest::qWait(TraceTimelineModel::kDebounceMs + 100);
+        QCOMPARE(requests.count(), 1); // once
+    }
+
     void overviewDrawsWindowAndMovesIt()
     {
         TraceTimelineModel model;

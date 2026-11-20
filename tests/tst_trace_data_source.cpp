@@ -4,6 +4,7 @@
 #include "otf2_fixture.h"
 #include "timeline_snapshot.h"
 #include "trace_data_source.h"
+#include "trace_timeline_model.h"
 
 #include <QScopeGuard>
 #include <QSettings>
@@ -18,6 +19,7 @@ class TstTraceDataSource : public QObject
     QTemporaryDir m_tmp;
     QString m_anchor;
     QString m_many; // 8 ranks x 20000 messages, ~2 s
+    QString m_dense; // 4 ranks x 5000 messages in the first 0.5 s, then 100 s idle
 
     static constexpr qint64 kMs = 1'000'000;
 
@@ -59,6 +61,8 @@ private slots:
         QVERIFY(!m_anchor.isEmpty());
         m_many = writeManyMessagesOtf2(m_tmp.filePath(QStringLiteral("many")), 8, 20000);
         QVERIFY(!m_many.isEmpty());
+        m_dense = writeManyMessagesOtf2(m_tmp.filePath(QStringLiteral("dense")), 4, 5000, 100'000 * kMs);
+        QVERIFY(!m_dense.isEmpty());
     }
 
     void cleanup() { qunsetenv("EDUMPI_TRACE_BUDGET_MB"); }
@@ -594,6 +598,58 @@ private slots:
         Matrix expectedSend(4, QVector<long>(4, 0));
         expectedSend[0][1] = expectedSend[1][2] = expectedSend[2][3] = 1000;
         QCOMPARE(lastMatrix(pSend), expectedSend);
+    }
+
+    // maxDetailWindowNs assumes evenly spread events; in a dense phase a window of that length
+    // holds far more. The detail build must still stay within budget / 4, the request must be
+    // answered (loadingDetail back to false) and the model must not re-request in a loop.
+    void denseDetailWindowStaysWithinBudget()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        const quint64 cap = 1024 * 1024 / 4;
+        Trace_Data_Source src(m_dense);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        QCOMPARE(timeline.count(), 1);
+        const trace::TimelineSnapshot overview = timeline.last().at(0).value<trace::TimelineSnapshot>();
+        QVERIFY(overview.store && !overview.store->complete);
+        // The even-spread cap admits a window holding the whole dense phase.
+        QVERIFY2(overview.maxDetailWindowNs >= 1000 * kMs, qPrintable(QString::number(overview.maxDetailWindowNs)));
+
+        TraceTimelineModel model;
+        model.addSnapshot(overview);
+        connect(&model, &TraceTimelineModel::detailRequested, &src, &Trace_Data_Source::requestDetail,
+                Qt::DirectConnection);
+        connect(&src, &Trace_Data_Source::timelineReady, &model, &TraceTimelineModel::addSnapshot,
+                Qt::DirectConnection);
+        const qint64 from = 100 * kMs;
+        const qint64 to = 400 * kMs;
+        QVERIFY(model.requestDetail(from, to));
+        QTRY_COMPARE_WITH_TIMEOUT(timeline.count(), 2, 20000);
+        QVERIFY(!model.loadingDetail());
+        const trace::TimelineSnapshot snap = timeline.last().at(0).value<trace::TimelineSnapshot>();
+        QCOMPARE(snap.requestFromNs, from);
+        QCOMPARE(snap.requestToNs, to);
+        if (snap.store)
+            QVERIFY2(snap.store->bytesUsed() <= cap, qPrintable(QString::number(snap.store->bytesUsed())));
+
+        // Asking again for the same range is not re-forwarded (no load loop).
+        QVERIFY(model.requestDetail(from, to));
+        QTest::qWait(TraceTimelineModel::kDebounceMs + 200);
+        QCOMPARE(timeline.count(), 2);
+        QVERIFY(!model.loadingDetail());
+
+        // A short request inside the dense phase still gets a (within-budget) window. (Sent to
+        // the source directly: the model does not re-forward ranges inside an unanswered one.)
+        src.requestDetail(200 * kMs, 201 * kMs);
+        QCOMPARE(timeline.count(), 3);
+        QVERIFY(!model.loadingDetail());
+        const auto small = timeline.last().at(0).value<trace::TimelineSnapshot>().store;
+        QVERIFY(small);
+        QVERIFY2(small->bytesUsed() <= cap, qPrintable(QString::number(small->bytesUsed())));
+        QVERIFY(small->fromNs <= 200 * kMs && small->toNs >= 201 * kMs);
     }
 
     void showTraceWindowFallsBackToSeconds()

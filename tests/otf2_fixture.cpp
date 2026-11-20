@@ -445,13 +445,13 @@ QString writeMetricsOtf2(const QString &dir, bool withClass)
     return writeArchive(dir, true, withClass ? Scenario::Ring4MetricClass : Scenario::Ring4MetricMembers);
 }
 
-QString writeManyMessagesOtf2(const QString &dir, int ranks, int messagesPerRank)
+QString writeManyMessagesOtf2(const QString &dir, int ranks, int messagesPerRank, quint64 idleNs)
 {
     if (ranks < 2 || messagesPerRank < 1 || !QDir().mkpath(dir))
         return {};
     constexpr uint64_t kStepNs = 100'000;
     constexpr uint64_t kCallNs = 10'000;
-    const uint64_t lengthNs = uint64_t(messagesPerRank) * kStepNs + 1'000'000;
+    const uint64_t lengthNs = uint64_t(messagesPerRank) * kStepNs + 1'000'000 + idleNs;
     auto t = [](uint64_t ns) { return OTF2_TimeStamp(kOffset + ns); };
 
     const QByteArray path = QDir(dir).absolutePath().toUtf8();
