@@ -141,10 +141,12 @@ Rectangle {
             }
             Text {
                 Layout.fillWidth: true
-                wrapMode: Text.Wrap
+                // Paths have no spaces to break at.
+                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
                 color: "#999999"
                 text: !traceState || traceState.name === "" ? qsTr("Loading…")
                       : [qsTr("Name: %1").arg(traceState.name),
+                         qsTr("Path: %1").arg(traceState.path),
                          qsTr("Ranks: %1").arg(traceState.ranks),
                          qsTr("Duration: %1 s").arg(trace_options.formatNumber(traceState.durationSeconds, 3)),
                          qsTr("Unmatched messages: %1").arg(traceState.unmatched)].join("\n")

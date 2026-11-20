@@ -172,7 +172,7 @@ Functions excluded in `scorep.filter` are not in the trace and cannot be shown.
     communicator and call path in **Trace Options**. For `MPI_Wait*`, *Completes* names the
     nonblocking receive it completes, e.g. `MPI_Irecv from rank 3`.
 - **Trace Options** (sidebar of the trace window): display switches (arrows, all arrows, highlight
-  waiting, phases), details of the clicked bar, trace info (ranks, duration, unmatched messages),
+  waiting, phases), details of the clicked bar, trace info (name, path, ranks, duration, unmatched messages),
   and **Show window in 3D/2D/Matrix** to hand the visible time window to the other views.
 
 ### Memory budget

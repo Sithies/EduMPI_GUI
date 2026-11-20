@@ -51,6 +51,8 @@ Window {
         property string phaseLevel: "outer"
         property var lastBar: null
         property string name: ""
+        // Loaded file or folder as a local path (the file dialog yields file:// URLs).
+        readonly property string path: decodeURIComponent(run_analysis_win.tracePath.replace(/^file:\/\//, ""))
         property int ranks: 0
         property real durationSeconds: 0
         property int unmatched: 0
