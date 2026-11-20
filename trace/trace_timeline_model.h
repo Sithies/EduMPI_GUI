@@ -39,7 +39,8 @@ public:
     // Debounced (kDebounceMs): only the last range of a burst is forwarded as detailRequested.
     // Returns false (and does nothing) in full mode or for a range longer than
     // maxDetailWindowNs. A range equal to or inside the last answered request that came back
-    // failed or without covering it is not forwarded again.
+    // failed or without covering it is not forwarded again, unless that answer was over the
+    // memory budget and the new range is at most half as long.
     Q_INVOKABLE bool requestDetail(qint64 fromNs, qint64 toNs);
 
 public slots:
@@ -64,6 +65,7 @@ private:
     qint64 m_maxDetailWindowNs = 0;
     // Last answered request that failed (null store) or was not covered by its answer.
     bool m_hasUnanswered = false;
+    bool m_unansweredOverBudget = false; // it did not fit the memory budget (see forwardRequest)
     qint64 m_unansweredFrom = 0;
     qint64 m_unansweredTo = 0;
     QTimer m_debounce;

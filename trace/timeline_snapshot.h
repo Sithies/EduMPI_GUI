@@ -13,12 +13,14 @@ namespace trace {
 // requestFromNs / requestToNs: the detail request this snapshot answers (-1 for the
 // overview loaded with the trace). store may be null when a detail load failed or the source
 // was stopped. maxDetailWindowNs (overview only): longest range a detail request can cover
-// within the memory budget (0 = unknown / no limit).
+// within the memory budget (0 = unknown / no limit). overBudget: store is null because the
+// detail window did not fit the memory budget (a narrower range may still fit).
 struct TimelineSnapshot {
     std::shared_ptr<const TimelineStore> store;
     qint64 requestFromNs = -1;
     qint64 requestToNs = -1;
     qint64 maxDetailWindowNs = 0;
+    bool overBudget = false;
 };
 
 } // namespace trace

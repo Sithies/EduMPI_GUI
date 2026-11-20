@@ -276,6 +276,55 @@ private slots:
         QTRY_COMPARE(forwarded.count(), 3);
     }
 
+    // Over the memory budget (dense phase): zooming in further must load details again once
+    // the range is at most half the one that did not fit; each retry halves (no load loop).
+    void modelRetriesNarrowerAfterOverBudget()
+    {
+        TraceTimelineModel model;
+        setUpWindowedModel(model);
+        QSignalSpy forwarded(&model, &TraceTimelineModel::detailRequested);
+        const qint64 ms = 1000 * 1000;
+        const auto wait = [] { QTest::qWait(TraceTimelineModel::kDebounceMs + 150); };
+        const auto overBudget = [](qint64 from, qint64 to) {
+            trace::TimelineSnapshot s{nullptr, from, to};
+            s.overBudget = true;
+            return s;
+        };
+
+        QVERIFY(model.requestDetail(1000 * ms, 2000 * ms));
+        QTRY_COMPARE(forwarded.count(), 1);
+        model.addSnapshot(overBudget(1000 * ms, 2000 * ms));
+        QVERIFY(!model.loadingDetail());
+
+        model.requestDetail(1100 * ms, 1800 * ms); // 70 %: still blocked
+        wait();
+        QCOMPARE(forwarded.count(), 1);
+        model.requestDetail(1200 * ms, 1700 * ms); // half: forwarded
+        QTRY_COMPARE(forwarded.count(), 2);
+        model.addSnapshot(overBudget(1200 * ms, 1700 * ms));
+        QVERIFY(!model.loadingDetail());
+
+        model.requestDetail(1250 * ms, 1650 * ms); // 80 % of the new reference: blocked
+        wait();
+        QCOMPARE(forwarded.count(), 2);
+        model.requestDetail(1300 * ms, 1500 * ms); // 40 %: forwarded
+        QTRY_COMPARE(forwarded.count(), 3);
+        auto fits = std::make_shared<trace::TimelineStore>();
+        fits->fromNs = 1300 * ms;
+        fits->toNs = 1500 * ms;
+        model.addSnapshot({fits, 1300 * ms, 1500 * ms});
+        QVERIFY(!model.loadingDetail());
+        QVERIFY(model.detail());
+
+        // A failure that is not over budget still blocks contained ranges of any size.
+        model.requestDetail(4000 * ms, 5000 * ms);
+        QTRY_COMPARE(forwarded.count(), 4);
+        model.addSnapshot({nullptr, 4000 * ms, 5000 * ms});
+        model.requestDetail(4100 * ms, 4200 * ms);
+        wait();
+        QCOMPARE(forwarded.count(), 4);
+    }
+
     // set_end_time(-1) stops the source but keeps the model: a later detail request must not
     // leave loadingDetail stuck at true.
     void loadingDetailClearsAfterCancel()

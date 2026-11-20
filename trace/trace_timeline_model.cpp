@@ -68,9 +68,15 @@ void TraceTimelineModel::forwardRequest()
         return;
     if (m_loading && m_forwardedFrom == m_requestFrom && m_forwardedTo == m_requestTo)
         return;
-    // Asked before and answered without coverage (or failed): re-reading would not help.
-    if (!m_loading && m_hasUnanswered && m_requestFrom >= m_unansweredFrom && m_requestTo <= m_unansweredTo)
-        return;
+    // Asked before and answered without coverage (or failed): re-reading would not help,
+    // except after an over-budget answer for a range at most half as long (zooming in); the
+    // next over-budget answer becomes the new reference, so retries halve each time.
+    if (!m_loading && m_hasUnanswered && m_requestFrom >= m_unansweredFrom && m_requestTo <= m_unansweredTo) {
+        const qint64 span = m_requestTo - m_requestFrom;
+        const qint64 refused = m_unansweredTo - m_unansweredFrom;
+        if (!m_unansweredOverBudget || span >= refused || span * 2 > refused)
+            return;
+    }
     m_forwarded = true;
     m_forwardedFrom = m_requestFrom;
     m_forwardedTo = m_requestTo;
@@ -98,6 +104,7 @@ void TraceTimelineModel::addSnapshot(const TimelineSnapshot &snapshot)
             || (snapshot.requestFromNs >= snapshot.store->fromNs && snapshot.requestToNs <= snapshot.store->toNs));
     if (snapshot.requestFromNs >= 0) {
         m_hasUnanswered = !covered;
+        m_unansweredOverBudget = !covered && snapshot.overBudget;
         m_unansweredFrom = snapshot.requestFromNs;
         m_unansweredTo = snapshot.requestToNs;
     }

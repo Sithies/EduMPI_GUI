@@ -440,8 +440,8 @@ void Trace_Data_Source::processDetailRequest()
     // m_maxDetailWindowNs assumes evenly spread events; in a dense phase the window can hold
     // far more. The builder stops at budget / 4 (cancelling the read); then the window is
     // halved once around the request (never below the request itself), and if that is still
-    // too large the request is answered with a null store (the model then neither waits nor
-    // re-requests this range).
+    // too large the request is answered with a null store marked overBudget (the model then
+    // stops waiting and re-requests only ranges at most half as long inside it).
     const quint64 cap = std::max<quint64>(m_budget / 4, 1);
     for (int attempt = 0; attempt < 2; ++attempt) {
         TraceAggregator agg;
@@ -487,7 +487,9 @@ void Trace_Data_Source::processDetailRequest()
         wTo = std::clamp<qint64>(wFrom + narrowed, wFrom, len);
     }
     qWarning() << "Trace detail window over the memory budget:" << from << to;
-    emit timelineReady(TimelineSnapshot{nullptr, from, to});
+    TimelineSnapshot refused{nullptr, from, to};
+    refused.overBudget = true; // a narrower request (zooming in) may still fit
+    emit timelineReady(refused);
 }
 
 void Trace_Data_Source::showTraceWindow(qint64 fromNs, qint64 toNs)

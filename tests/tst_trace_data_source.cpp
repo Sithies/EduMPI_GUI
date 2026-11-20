@@ -632,8 +632,9 @@ private slots:
         const trace::TimelineSnapshot snap = timeline.last().at(0).value<trace::TimelineSnapshot>();
         QCOMPARE(snap.requestFromNs, from);
         QCOMPARE(snap.requestToNs, to);
-        if (snap.store)
-            QVERIFY2(snap.store->bytesUsed() <= cap, qPrintable(QString::number(snap.store->bytesUsed())));
+        // The dense phase does not fit: refused as over budget (not a read failure).
+        QVERIFY(!snap.store);
+        QVERIFY(snap.overBudget);
 
         // Asking again for the same range is not re-forwarded (no load loop).
         QVERIFY(model.requestDetail(from, to));
@@ -641,10 +642,10 @@ private slots:
         QCOMPARE(timeline.count(), 2);
         QVERIFY(!model.loadingDetail());
 
-        // A short request inside the dense phase still gets a (within-budget) window. (Sent to
-        // the source directly: the model does not re-forward ranges inside an unanswered one.)
-        src.requestDetail(200 * kMs, 201 * kMs);
-        QCOMPARE(timeline.count(), 3);
+        // Zooming in: a short request inside the dense phase is forwarded by the model and gets
+        // a (within-budget) window.
+        QVERIFY(model.requestDetail(200 * kMs, 201 * kMs));
+        QTRY_COMPARE_WITH_TIMEOUT(timeline.count(), 3, 20000);
         QVERIFY(!model.loadingDetail());
         const auto small = timeline.last().at(0).value<trace::TimelineSnapshot>().store;
         QVERIFY(small);

@@ -126,7 +126,9 @@ Window {
                 busyindicator.visible = false
                 // A view the user picked while loading is already on the stack: replace it
                 // instead of pushing a second one (a hidden page would keep its connections).
-                var page = run_analysis_win.selected_screen === "TraceTimeline" ? "/TraceTimeline.qml" : "Cores3D.qml"
+                var pages = {TraceTimeline: "/TraceTimeline.qml", Cores2D: "/Cores2D.qml",
+                             CoresMatrix: "/CoresCommunicationMatrix.qml"}
+                var page = pages[run_analysis_win.selected_screen] || "/Cores3D.qml"
                 var props = run_analysis_win.selected_screen === "TraceTimeline"
                         ? {listNodes: nodesList, traceState: run_analysis_win.traceState}
                         : {listNodes: nodesList}
