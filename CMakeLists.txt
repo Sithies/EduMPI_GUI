@@ -21,9 +21,36 @@ if(APPLE)
 endif()
 
 
-option(EDUMPI_TRACE "Build OTF2 trace loading support" ON)
+# OTF2 trace loading support is optional. AUTO (default): built when OTF2 is found under
+# OTF2_ROOT, otherwise the GUI builds without it. ON: OTF2 is required (CI, releases).
+# OFF: never. Windows: always OFF (OTF2 does not support it officially).
+set(EDUMPI_TRACE AUTO CACHE STRING "OTF2 trace loading support: AUTO, ON or OFF")
+set_property(CACHE EDUMPI_TRACE PROPERTY STRINGS AUTO ON OFF)
 if(WIN32)
-    set(EDUMPI_TRACE OFF CACHE BOOL "Build OTF2 trace loading support" FORCE)
+    set(EDUMPI_TRACE OFF CACHE STRING "OTF2 trace loading support: AUTO, ON or OFF" FORCE)
+endif()
+set(OTF2_ROOT "$ENV{HOME}/.local/otf2" CACHE PATH
+    "OTF2 install prefix containing bin/otf2-config (see scripts/build-otf2.sh)")
+
+set(EDUMPI_TRACE_ENABLED OFF)
+string(TOUPPER "${EDUMPI_TRACE}" _edumpi_trace_mode)
+if(_edumpi_trace_mode STREQUAL "AUTO" OR EDUMPI_TRACE)
+    find_program(OTF2_CONFIG otf2-config
+        PATHS "${OTF2_ROOT}/bin"
+        NO_DEFAULT_PATH)
+    if(OTF2_CONFIG)
+        set(EDUMPI_TRACE_ENABLED ON)
+        message(STATUS "Trace support: on (OTF2 from ${OTF2_ROOT})")
+    elseif(_edumpi_trace_mode STREQUAL "AUTO")
+        message(STATUS "Trace support: off (otf2-config not found in ${OTF2_ROOT}/bin; "
+                       "see README, \"Building with trace support\")")
+    else()
+        message(FATAL_ERROR
+            "otf2-config not found in ${OTF2_ROOT}/bin. Run scripts/build-otf2.sh <prefix> "
+            "and pass -DOTF2_ROOT=<prefix>, or configure with -DEDUMPI_TRACE=AUTO or OFF.")
+    endif()
+else()
+    message(STATUS "Trace support: off (EDUMPI_TRACE=${EDUMPI_TRACE})")
 endif()
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Quick3D Sql Concurrent OpenGL)
@@ -116,7 +143,7 @@ qt_add_qml_module(appGUI_Cluster
 
 add_subdirectory(Sidebar)
 
-if(EDUMPI_TRACE)
+if(EDUMPI_TRACE_ENABLED)
     add_subdirectory(trace)
     enable_testing()
     add_subdirectory(tests)
@@ -152,7 +179,7 @@ if(EDUMPI_DEV_MODE)
     target_compile_definitions(appGUI_Cluster PRIVATE EDUMPI_DEV_MODE)
 endif()
 
-if(EDUMPI_TRACE)
+if(EDUMPI_TRACE_ENABLED)
     target_link_libraries(appGUI_Cluster PRIVATE edumpi_trace)
     target_compile_definitions(appGUI_Cluster PRIVATE EDUMPI_TRACE=1)
     # Trace timeline QML types (QML_ELEMENT, module GUI_Cluster); absent without trace support.

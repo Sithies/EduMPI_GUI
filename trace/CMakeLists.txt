@@ -1,16 +1,5 @@
-# OTF2 trace reading support (static library). Only added when EDUMPI_TRACE=ON.
-
-set(OTF2_ROOT "$ENV{HOME}/.local/otf2" CACHE PATH
-    "OTF2 install prefix containing bin/otf2-config (see scripts/build-otf2.sh)")
-
-find_program(OTF2_CONFIG otf2-config
-    PATHS "${OTF2_ROOT}/bin"
-    NO_DEFAULT_PATH)
-if(NOT OTF2_CONFIG)
-    message(FATAL_ERROR
-        "otf2-config not found in ${OTF2_ROOT}/bin. Run scripts/build-otf2.sh <prefix> "
-        "and pass -DOTF2_ROOT=<prefix>, or configure with -DEDUMPI_TRACE=OFF.")
-endif()
+# OTF2 trace reading support (static library). Only added when the top-level CMakeLists found
+# OTF2 (EDUMPI_TRACE_ENABLED); OTF2_CONFIG is the otf2-config it found.
 
 function(_otf2_config out)
     execute_process(COMMAND "${OTF2_CONFIG}" ${ARGN}
