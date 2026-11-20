@@ -295,11 +295,15 @@ private slots:
         QTRY_COMPARE(forwarded.count(), 1);
         model.addSnapshot(overBudget(1000 * ms, 2000 * ms));
         QVERIFY(!model.loadingDetail());
+        QVERIFY(model.detailOverBudget()); // the view shows "zoom in further"
+        QVERIFY(model.property("detailOverBudget").toBool());
 
         model.requestDetail(1100 * ms, 1800 * ms); // 70 %: still blocked
+        QVERIFY(model.detailOverBudget());
         wait();
         QCOMPARE(forwarded.count(), 1);
         model.requestDetail(1200 * ms, 1700 * ms); // half: forwarded
+        QVERIFY(!model.detailOverBudget()); // will be tried: no note meanwhile
         QTRY_COMPARE(forwarded.count(), 2);
         model.addSnapshot(overBudget(1200 * ms, 1700 * ms));
         QVERIFY(!model.loadingDetail());
@@ -315,6 +319,7 @@ private slots:
         model.addSnapshot({fits, 1300 * ms, 1500 * ms});
         QVERIFY(!model.loadingDetail());
         QVERIFY(model.detail());
+        QVERIFY(!model.detailOverBudget());
 
         // A failure that is not over budget still blocks contained ranges of any size.
         model.requestDetail(4000 * ms, 5000 * ms);
@@ -323,6 +328,15 @@ private slots:
         model.requestDetail(4100 * ms, 4200 * ms);
         wait();
         QCOMPARE(forwarded.count(), 4);
+        QVERIFY(!model.detailOverBudget()); // a read failure is not "too dense"
+
+        // Leaving an over-budget range clears the note.
+        model.requestDetail(6000 * ms, 7000 * ms);
+        QTRY_COMPARE(forwarded.count(), 5);
+        model.addSnapshot(overBudget(6000 * ms, 7000 * ms));
+        QVERIFY(model.detailOverBudget());
+        model.requestDetail(8000 * ms, 8500 * ms);
+        QVERIFY(!model.detailOverBudget());
     }
 
     // set_end_time(-1) stops the source but keeps the model: a later detail request must not

@@ -19,6 +19,9 @@ class TraceTimelineModel : public QObject
     Q_PROPERTY(bool loadingDetail READ loadingDetail NOTIFY changed)
     // Longest range requestDetail accepts (0 = no limit); wider views show the overview.
     Q_PROPERTY(qint64 maxDetailWindowNs READ maxDetailWindowNs NOTIFY changed)
+    // The last requested range lies in a phase too dense for the memory budget and will not be
+    // loaded at this length: the view asks to zoom in further.
+    Q_PROPERTY(bool detailOverBudget READ detailOverBudget NOTIFY changed)
 
 public:
     static constexpr int kDebounceMs = 250;
@@ -30,6 +33,7 @@ public:
     bool windowed() const; // overview is not complete: details are loaded on demand
     bool loadingDetail() const { return m_loading; }
     qint64 maxDetailWindowNs() const { return m_maxDetailWindowNs; }
+    bool detailOverBudget() const;
 
     std::shared_ptr<const trace::TimelineStore> overview() const { return m_overview; }
     // The complete overview in full mode; in windowed mode the latest detail window if it
@@ -52,6 +56,8 @@ signals:
 
 private:
     void forwardRequest();
+    // The last request lies inside the last unanswered one and is not retried (see requestDetail).
+    bool requestBlocked() const;
 
     std::shared_ptr<const trace::TimelineStore> m_overview;
     std::shared_ptr<const trace::TimelineStore> m_detail;

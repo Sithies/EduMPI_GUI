@@ -101,6 +101,8 @@ Rectangle {
                         if (m && m.windowed && m.maxDetailWindowNs > 0
                                 && (timeline.viewEndNs - timeline.viewStartNs) > m.maxDetailWindowNs)
                             hints.push(qsTr("Zoom in to see messages and details"))
+                        else if (m && m.detailOverBudget)
+                            hints.push(qsTr("Too dense for the memory budget — zoom in further"))
                         if (timeline.showArrows && timeline.selectedRank === -1 && !timeline.allArrows)
                             hints.push(qsTr("Click a rank to see its messages"))
                         if (timeline.showArrows && timeline.arrowsCapped)
