@@ -249,6 +249,42 @@ QVector<ColumnSample> sampleRow(const TimelineStore &overview, const TimelineSto
     return out;
 }
 
+namespace {
+
+// See HitResult::completes.
+QStringList completedCalls(const TimelineStore &detail, const RankRow &row, const Activity &a, const QString &own)
+{
+    QStringList keys;
+    QVector<int> counts;
+    const qint64 end = qint64(a.firstLink) + a.linkCount;
+    for (qint64 i = std::max<qint64>(0, a.firstLink); i < end && i < row.links.size(); ++i) {
+        const int target = row.links[i];
+        if (target < 0 || target >= detail.messages.size())
+            continue;
+        const Message &m = detail.messages[target];
+        const bool isSend = m.sender == row.rank && m.sendNs == a.startNs;
+        const QString fn = detail.functions.value(isSend ? m.sendFunction : m.recvFunction);
+        if (fn.isEmpty() || fn == own)
+            continue;
+        const QString key = isSend
+            ? QStringLiteral("%1 to rank %2").arg(fn).arg(m.receiver >= 0 ? m.receiver : m.destination)
+            : QStringLiteral("%1 from rank %2").arg(fn).arg(m.sender);
+        const qsizetype k = keys.indexOf(key);
+        if (k < 0) {
+            keys.append(key);
+            counts.append(1);
+        } else {
+            ++counts[k];
+        }
+    }
+    for (qsizetype k = 0; k < keys.size(); ++k)
+        if (counts[k] > 1)
+            keys[k] = QStringLiteral("%1× %2").arg(counts[k]).arg(keys[k]);
+    return keys;
+}
+
+} // namespace
+
 HitResult activityAt(const TimelineStore &detail, int rowIndex, qint64 ns)
 {
     HitResult h;
@@ -303,6 +339,8 @@ HitResult activityAt(const TimelineStore &detail, int rowIndex, qint64 ns)
                 h.comm = m.comm;
             }
         }
+        if (hit->category != Category::Collective)
+            h.completes = completedCalls(detail, row, *hit, h.function);
     } else {
         h.function = QStringLiteral("Computation");
         h.startNs = gapStart;

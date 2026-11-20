@@ -53,6 +53,10 @@ struct HitResult {
     quint64 comm = 0;
     int messageCount = 0;
     QStringList callPath; // user functions open at the hit time, outermost first
+    // Calls this one completes that carry another name, e.g. "MPI_Irecv from rank 3" for a
+    // MPI_Wait; equal entries are counted ("2× MPI_Irecv from rank 0"). Empty for calls that
+    // complete themselves (MPI_Recv, MPI_Send) and for collectives.
+    QStringList completes;
 };
 
 // The activity containing ns (innermost if MPI calls nest), or the gap around ns as

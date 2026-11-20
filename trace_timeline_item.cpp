@@ -401,6 +401,7 @@ void TraceTimelineItem::clickAt(qreal x, qreal y)
     d.insert(QStringLiteral("tag"), hit.tag);
     d.insert(QStringLiteral("comm"), double(hit.comm));
     d.insert(QStringLiteral("callPath"), hit.callPath);
+    d.insert(QStringLiteral("completes"), hit.completes);
     d.insert(QStringLiteral("messageCount"), hit.messageCount);
     emit barClicked(d);
 }

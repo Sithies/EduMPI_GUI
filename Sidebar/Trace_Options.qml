@@ -24,6 +24,10 @@ Rectangle {
             return []
         var lines = []
         lines.push(qsTr("Function: %1").arg(bar.function))
+        // Why a MPI_Wait* waits: the nonblocking calls it completes.
+        var completes = bar.completes ? Array.prototype.slice.call(bar.completes) : []
+        if (completes.length > 0)
+            lines.push(qsTr("Completes: %1").arg(completes.join(", ")))
         lines.push(qsTr("Rank: %1").arg(bar.rank))
         lines.push(qsTr("Start: %1 s").arg(formatNumber(bar.startUs / 1e6, 6)))
         lines.push(qsTr("Duration: %1 µs").arg(formatNumber(bar.durationUs, 1)))

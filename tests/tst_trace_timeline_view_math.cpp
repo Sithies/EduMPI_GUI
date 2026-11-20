@@ -280,6 +280,37 @@ private slots:
         QCOMPARE(coll.bytes, quint64(64));
     }
 
+    // A MPI_Wait* that completes nonblocking receives names them: why the rank waits.
+    void activityAtNamesCompletedCalls()
+    {
+        QTemporaryDir tmp;
+        const auto nb = build(writeNonblockingOtf2(tmp.filePath(QStringLiteral("nb"))));
+        QVERIFY(nb);
+        const HitResult wait = activityAt(*nb, nb->rowIndexOfRank(0), 200 * kMs);
+        QCOMPARE(wait.function, QStringLiteral("MPI_Wait"));
+        QCOMPARE(wait.completes, QStringList{QStringLiteral("MPI_Irecv from rank 1")});
+        const HitResult waitall = activityAt(*nb, nb->rowIndexOfRank(1), 300 * kMs + 500'000);
+        QCOMPARE(waitall.function, QStringLiteral("MPI_Waitall"));
+        QCOMPARE(waitall.completes, QStringList{QStringLiteral("MPI_Irecv from rank 0")});
+        // The posting call itself completes nothing.
+        const HitResult post = activityAt(*nb, nb->rowIndexOfRank(0), 100 * kMs + 500'000);
+        QCOMPARE(post.function, QStringLiteral("MPI_Irecv"));
+        QVERIFY2(post.completes.isEmpty(), qPrintable(post.completes.join(";")));
+
+        // Two receives from the same rank are counted.
+        const auto wa = build(writeWaitallOtf2(tmp.filePath(QStringLiteral("wa"))));
+        QVERIFY(wa);
+        const HitResult both = activityAt(*wa, wa->rowIndexOfRank(1), 200 * kMs);
+        QCOMPARE(both.function, QStringLiteral("MPI_Waitall"));
+        QCOMPARE(both.completes, QStringList{QStringLiteral("2× MPI_Irecv from rank 0")});
+
+        // Blocking calls complete themselves: nothing extra.
+        const auto r4 = build(writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))));
+        QVERIFY(r4);
+        QVERIFY(activityAt(*r4, r4->rowIndexOfRank(0), 200 * kMs).completes.isEmpty());
+        QVERIFY(activityAt(*r4, r4->rowIndexOfRank(0), 100 * kMs + 500'000).completes.isEmpty());
+    }
+
     void activityAtOutsideRowsIsEmpty()
     {
         QTemporaryDir tmp;

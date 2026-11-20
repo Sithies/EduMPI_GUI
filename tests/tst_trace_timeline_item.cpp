@@ -299,7 +299,7 @@ private slots:
         QCOMPARE(d.value(QStringLiteral("startUs")).toDouble(), 101000.0);
         QCOMPARE(d.value(QStringLiteral("durationUs")).toDouble(), 301000.0);
         QCOMPARE(d.value(QStringLiteral("partner")).toInt(), 3);
-        for (const char *key : {"bytes", "tag", "comm", "callPath", "messageCount"})
+        for (const char *key : {"bytes", "tag", "comm", "callPath", "messageCount", "completes"})
             QVERIFY2(d.contains(QLatin1String(key)), key);
         item.clickAt(kL + 200, 5); // axis: nothing
         QCOMPARE(spy.count(), 1);
