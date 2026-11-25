@@ -107,18 +107,20 @@ private slots:
         QVERIFY(std::abs(item.maxWaitSeconds() - 0.299) < 1e-6);
         const QImage img = render(item);
         QCOMPARE(img.pixelColor(0, 0), QColor(Qt::white)); // background
-        // Rank 0 sits at the top of the circle, filled with the first node colour.
+        // Rank 0 sits at the top of the circle. It is the only rank that waits (3 -> 0, late
+        // sender), so it is filled with the blue end of the scale (as in the 3D view), rank 1 white.
         const QPointF p0 = item.nodePosition(item.graph().indexOfRank(0));
         QVERIFY(std::abs(p0.x() - 300) < 1e-6);
-        QCOMPARE(QColor(img.pixel(int(p0.x()), int(p0.y()))).name(), QStringLiteral("#4e79a7"));
-        // The 3 -> 0 edge (the only one with waiting) is drawn reddish at its middle.
-        const QPointF mid = item.edgeMidpoint(edgeIndex(item.graph(), 3, 0));
-        const QColor c(img.pixel(int(mid.x()), int(mid.y())));
-        QVERIFY2(c.red() > c.blue() + 40, qPrintable(c.name()));
-        // The 0 -> 1 edge (no waiting) is grey.
-        const QPointF mid01 = item.edgeMidpoint(edgeIndex(item.graph(), 0, 1));
-        const QColor g(img.pixel(int(mid01.x()), int(mid01.y())));
-        QVERIFY2(std::abs(g.red() - g.blue()) < 40 && g != QColor(Qt::white), qPrintable(g.name()));
+        QCOMPARE(QColor(img.pixel(int(p0.x()), int(p0.y()))).name(), QStringLiteral("#0000ff"));
+        QVERIFY(std::abs(item.nodeWaitSeconds(item.graph().indexOfRank(0)) - 0.299) < 1e-6);
+        const QPointF p1 = item.nodePosition(item.graph().indexOfRank(1));
+        QCOMPARE(QColor(img.pixel(int(p1.x()), int(p1.y()))).name(), QStringLiteral("#ffffff"));
+        // P2P edges are green, with or without waiting.
+        for (const auto &pair : {std::pair{3, 0}, std::pair{0, 1}}) {
+            const QPointF mid = item.edgeMidpoint(edgeIndex(item.graph(), pair.first, pair.second));
+            const QColor c(img.pixel(int(mid.x()), int(mid.y())));
+            QVERIFY2(c.green() > c.red() + 60 && c.green() > c.blue() + 60, qPrintable(c.name()));
+        }
     }
 
     void wholeRunWhenWindowEmpty()

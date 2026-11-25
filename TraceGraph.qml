@@ -77,7 +77,7 @@ Rectangle {
                         if (graph.shownEdgeCount < graph.edgeCount)
                             t += qsTr(" (heaviest %1 shown)").arg(graph.shownEdgeCount)
                         if (graph.maxWaitSeconds > 0)
-                            t += qsTr(" · max. waiting %1 ms").arg((graph.maxWaitSeconds * 1000).toFixed(3))
+                            t += qsTr(" · max. waiting per rank %1 ms").arg((graph.maxWaitSeconds * 1000).toFixed(3))
                         return t
                     }
                 }
@@ -105,11 +105,12 @@ Rectangle {
                 anchors.margins: 4
                 spacing: 14
 
+                // Colours as in the 3D view (Cores3D.qml): P2P green, collectives black,
+                // waiting per process white to blue. New: communicator node, host border.
                 Repeater {
                     model: [
-                        { label: qsTr("Message (no waiting)"), colour: "#7b8794", dashed: false },
-                        { label: qsTr("Receiver waits (late sender)"), colour: "#d9534f", dashed: false },
-                        { label: qsTr("Collective → communicator"), colour: "#3b82f6", dashed: true }
+                        { label: qsTr("P2P message"), colour: "#00d500", dashed: false },
+                        { label: qsTr("Collective → communicator"), colour: "#000000", dashed: true }
                     ]
                     delegate: Row {
                         required property var modelData
@@ -137,6 +138,82 @@ Rectangle {
                             color: "#374151"
                             font.pointSize: 11
                         }
+                    }
+                }
+                Row {
+                    spacing: 4
+                    Canvas {
+                        width: 14
+                        height: 14
+                        anchors.verticalCenter: parent.verticalCenter
+                        onPaint: {
+                            var ctx = getContext("2d")
+                            ctx.reset()
+                            ctx.fillStyle = "#d1d5db"
+                            ctx.strokeStyle = "#1f2937"
+                            ctx.lineWidth = 1
+                            ctx.beginPath()
+                            ctx.moveTo(7, 1)
+                            ctx.lineTo(13, 7)
+                            ctx.lineTo(7, 13)
+                            ctx.lineTo(1, 7)
+                            ctx.closePath()
+                            ctx.fill()
+                            ctx.stroke()
+                        }
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("Communicator")
+                        color: "#374151"
+                        font.pointSize: 11
+                    }
+                }
+                Row {
+                    spacing: 4
+                    visible: graph.level === "ranks"
+                    Rectangle {
+                        width: 12
+                        height: 12
+                        radius: 6
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: "#ffffff"
+                        border.color: "#f28e2b"
+                        border.width: 2
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("Border = compute node")
+                        color: "#374151"
+                        font.pointSize: 11
+                    }
+                }
+                // Node fill: waiting time (late sender) of the rank, as the 3D view's scale.
+                Row {
+                    spacing: 4
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("Waiting (late sender): 0")
+                        color: "#374151"
+                        font.pointSize: 11
+                    }
+                    Rectangle {
+                        width: 70
+                        height: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        border.color: "#9ca3af"
+                        border.width: 1
+                        gradient: Gradient {
+                            orientation: Gradient.Horizontal
+                            GradientStop { position: 0.0; color: "#ffffff" }
+                            GradientStop { position: 1.0; color: "#0000ff" }
+                        }
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("%1 ms").arg((graph.maxWaitSeconds * 1000).toFixed(3))
+                        color: "#374151"
+                        font.pointSize: 11
                     }
                 }
                 Text {

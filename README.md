@@ -175,10 +175,12 @@ Functions excluded in `scorep.filter` are not in the trace and cannot be shown.
 - **Trace Graph**: communication graph of the current time window (the timeline's window; the whole
   run until one is chosen). Its own view under **Views**, or below the timeline (**Graph** button in
   the timeline toolbar, divider movable).
-  - Ranks are nodes on a circle (or a grid), grouped and coloured by compute node; P2P messages are
-    edges (arrows from sender to receiver), collectives dashed edges to one diamond per communicator.
-  - Edge width: bytes (default), number of messages or waiting time; edge colour: waiting time of the
-    receiver (late sender), grey = no waiting, red = most waiting in the window.
+  - Ranks are nodes on a circle (or a grid), grouped by compute node (border colour); P2P messages
+    are edges (arrows from sender to receiver), collectives dashed edges to one diamond per
+    communicator.
+  - Colours as in the 3D view: P2P edges green, collective edges black; node fill = waiting time of
+    the rank (late sender), white = none, blue = most in the window (scale in the legend).
+  - Edge width: bytes (default), number of messages or waiting time.
   - A message counts when its send call starts in the window, a collective when the rank's call
     starts in it (as in *Show window in 3D/2D/Matrix*).
   - Many ranks: only the heaviest edges are drawn (100 / 500 / 2000 / all), the selected rank's edges

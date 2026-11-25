@@ -22,9 +22,13 @@ constexpr double kMargin = 44;  // room for labels and node arcs around the circ
 const QColor kBackground(0xff, 0xff, 0xff);
 const QColor kTextColor(0x37, 0x41, 0x51);
 const QColor kHintColor(0x6b, 0x72, 0x80);
-const QColor kEdgeColor(0x7b, 0x87, 0x94);      // no waiting
-const QColor kEdgeWaitColor(0xd9, 0x53, 0x4f);  // most waiting in the window
-const QColor kCollectiveColor(0x3b, 0x82, 0xf6);
+// Colours of the 3D view (Cores3D.qml): P2P lines green, collective lines black, waiting
+// (late sender per process) white to blue. New elements: communicator node, host colours.
+const QColor kP2PColor(0x00, 0xd5, 0x00);
+const QColor kCollectiveColor(0x00, 0x00, 0x00);
+const QColor kWaitLowColor(0xff, 0xff, 0xff);
+const QColor kWaitHighColor(0x00, 0x00, 0xff);
+const QColor kCommunicatorColor(0xd1, 0xd5, 0xdb);
 const QColor kSelectionColor(0x1d, 0x4e, 0xd8);
 const QColor kNodeBorder(0x1f, 0x29, 0x37);
 
@@ -284,9 +288,14 @@ void TraceGraphItem::rebuild()
     }
     setStatus(status);
     m_unitPos = trace::layoutGraph(m_graph, m_layout);
-    m_maxWait = 0;
+    // Waiting of a rank (late sender): receiver of a P2P edge, caller of a collective.
+    m_nodeWait = QVector<double>(m_graph.nodes.size(), 0.0);
     for (const GraphEdge &e : std::as_const(m_graph.edges))
-        m_maxWait = std::max(m_maxWait, e.waitSeconds);
+        m_nodeWait[e.kind == GraphEdge::Kind::P2P ? e.to : e.from] += e.waitSeconds;
+    m_maxWait = 0;
+    for (int i = 0; i < m_graph.nodes.size(); ++i)
+        if (m_graph.nodes[i].kind != GraphNode::Kind::Communicator)
+            m_maxWait = std::max(m_maxWait, m_nodeWait[i]);
     reselect();
     emit graphChanged();
     update();
@@ -542,10 +551,8 @@ void TraceGraphItem::paint(QPainter *painter)
         const GraphEdge &e = m_graph.edges[i];
         const EdgePath path = edgePath(e);
         const bool dim = focus >= 0 && e.from != focus && e.to != focus;
-        QColor c = mix(kEdgeColor, kEdgeWaitColor, m_maxWait > 0 ? e.waitSeconds / m_maxWait : 0);
-        if (e.kind == GraphEdge::Kind::Collective)
-            c = mix(kCollectiveColor, kEdgeWaitColor, m_maxWait > 0 ? e.waitSeconds / m_maxWait : 0);
-        c.setAlphaF(dim ? 0.12 : 0.8);
+        QColor c = e.kind == GraphEdge::Kind::Collective ? kCollectiveColor : kP2PColor;
+        c.setAlphaF(dim ? 0.12 : (e.kind == GraphEdge::Kind::Collective ? 0.6 : 0.85));
         QPen pen(c, edgeWidth(e));
         pen.setCapStyle(Qt::RoundCap);
         if (e.kind == GraphEdge::Kind::Collective)
@@ -582,13 +589,19 @@ void TraceGraphItem::paint(QPainter *painter)
     for (int i = 0; i < m_graph.nodes.size(); ++i) {
         const GraphNode &n = m_graph.nodes[i];
         const QPointF p = nodePosition(i);
-        QColor fill = groupColor(n.group);
+        // Fill: waiting of the rank / host (white to blue, as in the 3D view). Border: the host
+        // colour when the ranks of several hosts are shown, the selection colour when selected.
+        QColor fill = n.kind == GraphNode::Kind::Communicator
+            ? kCommunicatorColor
+            : mix(kWaitLowColor, kWaitHighColor, m_maxWait > 0 ? m_nodeWait.value(i) / m_maxWait : 0);
         if (!lit[i])
             fill = mix(fill, kBackground, 0.75);
         painter->setBrush(fill);
-        QPen border(i == focus ? kSelectionColor : kNodeBorder, i == focus ? 2.5 : 0.8);
+        const bool hostBorder = n.kind == GraphNode::Kind::Rank && m_graph.groups.size() > 1;
+        QPen border(i == focus ? kSelectionColor : hostBorder ? groupColor(n.group) : kNodeBorder,
+                    i == focus ? 2.5 : hostBorder ? 2.0 : 0.8);
         if (!lit[i])
-            border.setColor(mix(kNodeBorder, kBackground, 0.75));
+            border.setColor(mix(border.color(), kBackground, 0.75));
         painter->setPen(border);
         if (n.kind == GraphNode::Kind::Communicator) {
             const double s = std::max(nr, 8.0);

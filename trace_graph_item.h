@@ -15,8 +15,9 @@ class TraceTimelineModel;
 
 // Communication graph of a trace window (TraceTimelineModel): ranks (or nodes) as graph nodes,
 // P2P messages as edges, collectives as star edges to one node per communicator (see
-// trace/graph_model.h for the counting rules). Edge width = the chosen weight (bytes, messages
-// or waiting time), edge colour = waiting time (late sender), collectives dashed.
+// trace/graph_model.h for the counting rules). Colours follow the 3D view: P2P edges green,
+// collective edges black (dashed), node fill = waiting time of the rank (late sender, white to
+// blue). Edge width = the chosen weight (bytes, messages or waiting time).
 // Compiled only with EDUMPI_TRACE; QML sees the model as a plain QObject*.
 //
 // Window: [viewStartNs, viewEndNs); an empty window means the whole run. The graph needs the
@@ -47,6 +48,7 @@ class TraceGraphItem : public QQuickPaintedItem
     Q_PROPERTY(QString status READ status NOTIFY graphChanged)
     Q_PROPERTY(int edgeCount READ edgeCount NOTIFY graphChanged)
     Q_PROPERTY(int shownEdgeCount READ shownEdgeCount NOTIFY graphChanged)
+    // Largest waiting time (late sender) of one rank / host in the window: the blue end of the scale.
     Q_PROPERTY(double maxWaitSeconds READ maxWaitSeconds NOTIFY graphChanged)
 
 public:
@@ -82,6 +84,7 @@ public:
     int edgeCount() const { return int(m_graph.edges.size()); }
     int shownEdgeCount() const { return int(m_drawn.size()); }
     double maxWaitSeconds() const { return m_maxWait; }
+    double nodeWaitSeconds(int node) const { return m_nodeWait.value(node); }
 
     // Rank node: toggles selectedRank; edge: emits edgeClicked; elsewhere nothing.
     Q_INVOKABLE void clickAt(qreal x, qreal y);
@@ -145,7 +148,8 @@ private:
     QVector<QPointF> m_unitPos; // layoutGraph() result
     QVector<int> m_drawn;       // indices into m_graph.edges, heaviest first
     double m_maxWeight = 0;
-    double m_maxWait = 0;
+    QVector<double> m_nodeWait; // waiting (late sender) per graph node, seconds
+    double m_maxWait = 0;       // largest waiting of a rank / host node
     QString m_status = QStringLiteral("empty");
 
     bool m_requested = false;
