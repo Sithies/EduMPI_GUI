@@ -45,6 +45,18 @@ QColor groupColor(int group)
     return group < 0 ? kCollectiveColor : kGroupPalette[group % 10];
 }
 
+// Text next to the point at, on the side of dir (a direction away from the graph's centre):
+// left-aligned to the right of the centre, right-aligned to the left of it, centred above and
+// below, so that long labels do not run back over their node.
+QRectF outsideLabelRect(QPointF at, QPointF dir, double width)
+{
+    const double len = std::sqrt(dir.x() * dir.x() + dir.y() * dir.y());
+    const double cx = len > 0 ? dir.x() / len : 0;
+    // Shift by half the width the more the label points sideways (cx = ±1: fully beside).
+    const double left = at.x() - width / 2 + cx * width / 2;
+    return QRectF(left, at.y() - 8, width, 16);
+}
+
 QColor mix(const QColor &a, const QColor &b, double t)
 {
     t = std::clamp(t, 0.0, 1.0);
@@ -589,8 +601,8 @@ void TraceGraphItem::paint(QPainter *painter)
                 const double off = m_graph.rankNodeCount <= kLabelLimit ? 26 : 10;
                 const QPointF at = center() + QPointF(std::cos(am), std::sin(am)) * (r + off);
                 painter->setPen(kTextColor);
-                const QRectF t(at.x() - 60, at.y() - 8, 120, 16);
-                painter->drawText(t, Qt::AlignCenter, name);
+                const double tw = fm.horizontalAdvance(name) + 4;
+                painter->drawText(outsideLabelRect(at, at - center(), tw), Qt::AlignCenter, name);
             }
             first = last + 1;
         }
@@ -669,16 +681,24 @@ void TraceGraphItem::paint(QPainter *painter)
         QString text = nodeLabel(i);
         if (n.kind == GraphNode::Kind::Communicator)
             text += QStringLiteral(" (%1)").arg(n.members);
-        // Rank / host labels outside the circle, communicator labels below the diamond.
-        QPointF at = p + QPointF(0, std::max(nr, 8.0) + 8);
+        // Rank / host labels outside the circle (beside their node), communicator labels below
+        // the diamond on a white box, so that the star's edges do not run through them.
+        const QFontMetricsF lfm(painter->font());
+        const double tw = lfm.horizontalAdvance(text) + 4;
+        QRectF box(p.x() - tw / 2, p.y() + std::max(nr, 8.0) + 2, tw, 16);
         if (n.kind != GraphNode::Kind::Communicator && m_layout == trace::GraphLayout::Circle) {
-            QPointF out = p - center();
+            const QPointF out = p - center();
             const double len = std::sqrt(out.x() * out.x() + out.y() * out.y());
             if (len > 0)
-                at = p + out / len * (std::max(nr, 8.0) + 9);
+                box = outsideLabelRect(p + out / len * (std::max(nr, 8.0) + 4), out, tw);
+        }
+        if (n.kind == GraphNode::Kind::Communicator) {
+            QColor bg = kBackground;
+            bg.setAlphaF(0.85);
+            painter->fillRect(box, bg);
         }
         painter->setPen(lit[i] ? kTextColor : mix(kTextColor, kBackground, 0.7));
-        painter->drawText(QRectF(at.x() - 50, at.y() - 8, 100, 16), Qt::AlignCenter, text);
+        painter->drawText(box, Qt::AlignCenter, text);
     }
 
     // Why no edges are drawn.
