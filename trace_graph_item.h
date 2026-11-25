@@ -46,6 +46,8 @@ class TraceGraphItem : public QQuickPaintedItem
     // Auto merges when there are more than kAutoCommunicatorLimit communicators.
     Q_PROPERTY(QString communicators READ communicators WRITE setCommunicators NOTIFY displayChanged)
     Q_PROPERTY(bool communicatorsMerged READ communicatorsMerged NOTIFY graphChanged)
+    // Compute nodes opened into their ranks (double-click, nodes level only).
+    Q_PROPERTY(int expandedCount READ expandedCount NOTIFY graphChanged)
     // "circle" or "grid"
     Q_PROPERTY(QString layout READ layout WRITE setLayout NOTIFY displayChanged)
     // Heaviest edges drawn (0 = all); edges of the selected rank are always drawn.
@@ -93,6 +95,7 @@ public:
     QString communicators() const;
     void setCommunicators(const QString &mode);
     bool communicatorsMerged() const { return m_commMerged; }
+    int expandedCount() const { return int(m_options.expandedNodes.size()); }
     QString layout() const;
     void setLayout(const QString &layout);
     int maxEdges() const { return m_maxEdges; }
@@ -105,6 +108,12 @@ public:
 
     // Rank node: toggles selectedRank; edge: emits edgeClicked; elsewhere nothing.
     Q_INVOKABLE void clickAt(qreal x, qreal y);
+    // Nodes level: a compute node opens into its ranks, a rank of an opened node closes it again.
+    // Returns true if something changed.
+    Q_INVOKABLE bool toggleExpandAt(qreal x, qreal y);
+    Q_INVOKABLE void collapseAll();
+    // Hover text for the node or edge at (x, y), "" elsewhere.
+    Q_INVOKABLE QString toolTipAt(qreal x, qreal y) const;
 
     void paint(QPainter *painter) override;
 
@@ -171,6 +180,7 @@ private:
     double m_maxWeight = 0;
     QVector<double> m_nodeWait; // waiting (late sender) per graph node, seconds
     double m_maxWait = 0;       // largest waiting of a rank / host node
+    quint64 m_maxInternal = 0;  // largest traffic inside one compute node (nodes level)
     QString m_status = QStringLiteral("empty");
 
     bool m_requested = false;

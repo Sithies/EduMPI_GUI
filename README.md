@@ -187,6 +187,11 @@ Functions excluded in `scorep.filter` are not in the trace and cannot be shown.
     always (equal edges spread over the graph). **Nodes: Auto** (default) shows ranks while zoomed in
     (window ≤ 50 ms) or for ≤ 64 ranks, otherwise compute nodes (each node's ranks merged into one
     graph node); **Ranks** / **Compute nodes** fix the level.
+  - Level switch **Auto | Ranks | Nodes** also in the graph's toolbar; a line above the graph and
+    the ⓘ tooltip explain what the circles and lines mean. Hover a circle or line for its numbers.
+  - Nodes level: lines are messages between ranks of different nodes, the green ring around a node
+    the messages inside it (wider = more). Double-click a node to open it into its ranks
+    (double-click one of them, or **Merge … opened node(s)**, to merge it again).
   - **Communicators: Auto** (default) merges all communicator nodes into one when there are more
     than 8; **One node each** / **One node for all** fix it. Collectives can be hidden entirely.
   - The graph is meant for short windows (single steps, topology such as ring or tree); from 1 s on

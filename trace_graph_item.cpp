@@ -57,6 +57,22 @@ QRectF outsideLabelRect(QPointF at, QPointF dir, double width)
     return QRectF(left, at.y() - 8, width, 16);
 }
 
+QString formatBytes(double bytes)
+{
+    static const char *units[] = {"B", "KB", "MB", "GB", "TB"};
+    int u = 0;
+    while (bytes >= 1024 && u < 4) {
+        bytes /= 1024;
+        ++u;
+    }
+    return QStringLiteral("%1 %2").arg(bytes, 0, 'f', u == 0 ? 0 : 1).arg(QLatin1String(units[u]));
+}
+
+QString formatMs(double seconds)
+{
+    return QStringLiteral("%1 ms").arg(seconds * 1000, 0, 'f', 3);
+}
+
 QColor mix(const QColor &a, const QColor &b, double t)
 {
     t = std::clamp(t, 0.0, 1.0);
@@ -351,6 +367,9 @@ void TraceGraphItem::rebuild()
     m_nodeWait = QVector<double>(m_graph.nodes.size(), 0.0);
     for (const GraphEdge &e : std::as_const(m_graph.edges))
         m_nodeWait[e.kind == GraphEdge::Kind::P2P ? e.to : e.from] += e.waitSeconds;
+    m_maxInternal = 0;
+    for (const GraphNode &n : std::as_const(m_graph.nodes))
+        m_maxInternal = std::max(m_maxInternal, n.internalBytes);
     m_maxWait = 0;
     for (int i = 0; i < m_graph.nodes.size(); ++i)
         if (m_graph.nodes[i].kind != GraphNode::Kind::Communicator)
@@ -526,6 +545,109 @@ void TraceGraphItem::clickAt(qreal x, qreal y)
     emit edgeClicked(d);
 }
 
+bool TraceGraphItem::toggleExpandAt(qreal x, qreal y)
+{
+    if (m_options.level != trace::GraphLevel::Nodes)
+        return false;
+    const int node = nodeAt(QPointF(x, y));
+    if (node < 0)
+        return false;
+    const GraphNode &n = m_graph.nodes[node];
+    if (n.kind == GraphNode::Kind::Node)
+        m_options.expandedNodes.append(n.node);
+    else if (n.kind == GraphNode::Kind::Rank && m_options.expandedNodes.contains(n.node))
+        m_options.expandedNodes.removeAll(n.node);
+    else
+        return false;
+    rebuild();
+    return true;
+}
+
+void TraceGraphItem::collapseAll()
+{
+    if (m_options.expandedNodes.isEmpty())
+        return;
+    m_options.expandedNodes.clear();
+    rebuild();
+}
+
+QString TraceGraphItem::toolTipAt(qreal x, qreal y) const
+{
+    const QPointF p(x, y);
+    const int node = nodeAt(p);
+    if (node >= 0) {
+        const GraphNode &n = m_graph.nodes[node];
+        // Traffic of the node with other graph nodes (P2P edges).
+        quint64 sentBytes = 0, recvBytes = 0, collBytes = 0;
+        int sent = 0, recv = 0, calls = 0, partners = 0;
+        for (const GraphEdge &e : m_graph.edges) {
+            if (e.kind == GraphEdge::Kind::Collective) {
+                if (e.from == node || e.to == node) {
+                    collBytes += e.bytes;
+                    calls += e.messages;
+                    ++partners;
+                }
+                continue;
+            }
+            if (e.from == node) {
+                sentBytes += e.bytes;
+                sent += e.messages;
+            }
+            if (e.to == node) {
+                recvBytes += e.bytes;
+                recv += e.messages;
+            }
+        }
+        QStringList lines;
+        const QString traffic = tr("Sent %1 in %2 messages, received %3 in %4")
+                                    .arg(formatBytes(double(sentBytes))).arg(sent)
+                                    .arg(formatBytes(double(recvBytes))).arg(recv);
+        switch (n.kind) {
+        case GraphNode::Kind::Rank:
+            lines << tr("Rank %1 (compute node %2)").arg(n.rank).arg(n.node) << traffic
+                  << tr("Waiting (late sender): %1").arg(formatMs(nodeWaitSeconds(node)));
+            if (m_options.level == trace::GraphLevel::Nodes)
+                lines << tr("Double-click: merge %1 into one node again").arg(n.node);
+            else
+                lines << tr("Click: select the rank (also in the timeline)");
+            break;
+        case GraphNode::Kind::Node:
+            lines << tr("Compute node %1 with %2 ranks").arg(n.node).arg(n.members)
+                  << tr("Inside the node: %1 in %2 messages (green ring)")
+                         .arg(formatBytes(double(n.internalBytes))).arg(n.internalMessages)
+                  << tr("To / from other nodes: ") + traffic.left(1).toLower() + traffic.mid(1)
+                  << tr("Waiting (late sender), sum of its ranks: %1").arg(formatMs(nodeWaitSeconds(node)))
+                  << tr("Double-click: show its ranks");
+            break;
+        case GraphNode::Kind::Communicator:
+            if (n.comm == trace::kMergedCommunicators)
+                lines << tr("All %1 communicators merged into one node").arg(n.members);
+            else
+                lines << tr("Communicator %1 with %2 ranks").arg(n.comm).arg(n.members);
+            lines << tr("%1 collective calls from %2 graph nodes, %3")
+                         .arg(calls).arg(partners).arg(formatBytes(double(collBytes)));
+            break;
+        }
+        return lines.join(QLatin1Char('\n'));
+    }
+    const int edge = edgeAt(p);
+    if (edge < 0)
+        return {};
+    const GraphEdge &e = m_graph.edges[edge];
+    auto name = [&](int i) {
+        const GraphNode &n = m_graph.nodes[i];
+        return n.kind == GraphNode::Kind::Rank ? tr("rank %1").arg(n.rank) : nodeLabel(i);
+    };
+    const bool collective = e.kind == GraphEdge::Kind::Collective;
+    const QString arrow = collective || !m_options.directed ? QStringLiteral(" – ") : QStringLiteral(" → ");
+    QStringList lines;
+    lines << (collective ? tr("Collectives: ") : tr("Messages: ")) + name(e.from) + arrow + name(e.to)
+          << tr("%1 %2, %3").arg(e.messages).arg(collective ? tr("calls") : tr("messages")).arg(formatBytes(double(e.bytes)))
+          << tr("Waiting (late sender): %1").arg(formatMs(e.waitSeconds))
+          << tr("Click: details in Trace Options");
+    return lines.join(QLatin1Char('\n'));
+}
+
 void TraceGraphItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry)
 {
     QQuickPaintedItem::geometryChange(newGeometry, oldGeometry);
@@ -665,6 +787,19 @@ void TraceGraphItem::paint(QPainter *painter)
         if (!lit[i])
             border.setColor(mix(border.color(), kBackground, 0.75));
         painter->setPen(border);
+        if (n.kind == GraphNode::Kind::Node && n.internalBytes > 0 && m_maxInternal > 0) {
+            // Traffic inside the compute node: green ring, wider the more (relative to the window's most).
+            const double t = std::sqrt(double(n.internalBytes) / double(m_maxInternal));
+            QColor ring = kP2PColor;
+            ring.setAlphaF(lit[i] ? 0.85 : 0.2);
+            const double rw = 1.5 + 4.0 * t;
+            const double rr = std::max(nr, 8.0) + 2 + rw / 2;
+            painter->save();
+            painter->setPen(QPen(ring, rw));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawEllipse(p, rr, rr);
+            painter->restore();
+        }
         if (n.kind == GraphNode::Kind::Communicator) {
             const double s = std::max(nr, 8.0);
             QPolygonF diamond;
@@ -690,7 +825,8 @@ void TraceGraphItem::paint(QPainter *painter)
             const QPointF out = p - center();
             const double len = std::sqrt(out.x() * out.x() + out.y() * out.y());
             if (len > 0)
-                box = outsideLabelRect(p + out / len * (std::max(nr, 8.0) + 4), out, tw);
+                box = outsideLabelRect(p + out / len * (std::max(nr, 8.0) + (n.kind == GraphNode::Kind::Node ? 18 : 4)),
+                                       out, tw);
         }
         if (n.kind == GraphNode::Kind::Communicator) {
             QColor bg = kBackground;

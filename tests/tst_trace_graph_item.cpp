@@ -329,6 +329,52 @@ private slots:
         QCOMPARE(item.effectiveLevel(), QStringLiteral("ranks"));
     }
 
+    // Nodes level: double-click opens a compute node into its ranks and closes it again;
+    // tooltips explain nodes and edges; traffic inside a node draws a green ring.
+    void nodesExpandAndExplain()
+    {
+        TraceTimelineModel model;
+        TraceGraphItem item;
+        setupRing4(model, item); // ranks 0, 1 on nodeA; 2, 3 on nodeB; ring 0->1->2->3->0
+        item.setLevel(QStringLiteral("nodes"));
+        QCOMPARE(item.graph().rankNodeCount, 2);
+        QCOMPARE(item.graph().nodes[0].internalMessages, 1); // 0 -> 1 inside nodeA
+        const QPointF a = item.nodePosition(0);
+        const QString tip = item.toolTipAt(a.x(), a.y());
+        QVERIFY2(tip.contains(QStringLiteral("Compute node nodeA with 2 ranks")), qPrintable(tip));
+        QVERIFY2(tip.contains(QStringLiteral("Inside the node")), qPrintable(tip));
+        // Green ring just outside the node.
+        const QImage img = render(item);
+        bool green = false;
+        for (int dy = 9; dy <= 16 && !green; ++dy) {
+            const QColor c(img.pixel(int(a.x()), int(a.y()) + dy));
+            green = c.green() > 150 && c.red() < 120 && c.blue() < 120;
+        }
+        QVERIFY(green);
+        // Open nodeA: its two ranks + nodeB.
+        QVERIFY(item.toggleExpandAt(a.x(), a.y()));
+        QCOMPARE(item.expandedCount(), 1);
+        QCOMPARE(item.graph().rankNodeCount, 3);
+        const int r0 = item.graph().indexOfRank(0);
+        QVERIFY(r0 >= 0);
+        QVERIFY(edgeIndex(item.graph(), 0, 1) >= 0); // now a drawn edge between the ranks
+        const QPointF p0 = item.nodePosition(r0);
+        QVERIFY(item.toolTipAt(p0.x(), p0.y()).contains(QStringLiteral("Rank 0 (compute node nodeA)")));
+        // Double-click on one of its ranks merges it again.
+        QVERIFY(item.toggleExpandAt(p0.x(), p0.y()));
+        QCOMPARE(item.expandedCount(), 0);
+        QCOMPARE(item.graph().rankNodeCount, 2);
+        // Ranks level: no expanding; edge tooltip.
+        item.setLevel(QStringLiteral("ranks"));
+        const QPointF pr = item.nodePosition(item.graph().indexOfRank(0));
+        QVERIFY(!item.toggleExpandAt(pr.x(), pr.y()));
+        const QPointF mid = item.edgeMidpoint(edgeIndex(item.graph(), 3, 0));
+        const QString et = item.toolTipAt(mid.x(), mid.y());
+        QVERIFY2(et.startsWith(QStringLiteral("Messages: rank 3 → rank 0")), qPrintable(et));
+        QVERIFY2(et.contains(QStringLiteral("299.000 ms")), qPrintable(et));
+        QCOMPARE(item.toolTipAt(1, 1), QString());
+    }
+
     void communicatorsMergeOnDemand()
     {
         TraceTimelineModel model;
@@ -373,6 +419,7 @@ private slots:
                   "    property bool graphDirected: true\n"
                   "    property string graphWeight: 'bytes'\n"
                   "    property string graphLevel: 'ranks'\n"
+                  "    property string graphCommunicators: 'auto'\n"
                   "    property string graphLayout: 'circle'\n"
                   "    property int graphMaxEdges: 500\n"
                   "    property var lastEdge: null\n"

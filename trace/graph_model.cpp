@@ -47,7 +47,7 @@ CommGraph buildCommGraph(const TimelineStore &store, qint64 fromNs, qint64 toNs,
     }
     QVector<int> nodeOfRow(store.rows.size(), -1);
     for (int grp = 0; grp < g.groups.size(); ++grp) {
-        if (nodesLevel) {
+        if (nodesLevel && !options.expandedNodes.contains(g.groups[grp])) {
             GraphNode n;
             n.kind = GraphNode::Kind::Node;
             n.node = g.groups[grp];
@@ -138,7 +138,7 @@ CommGraph buildCommGraph(const TimelineStore &store, qint64 fromNs, qint64 toNs,
                     continue;
                 const int other = nodeOfRow[recvRow];
                 if (other == self) {
-                    if (nodesLevel) {
+                    if (g.nodes[self].kind == GraphNode::Kind::Node) {
                         g.nodes[self].internalBytes += m.bytes;
                         g.nodes[self].internalMessages += 1;
                     }

@@ -66,6 +66,65 @@ Rectangle {
                     color: "#00FF00"
                     text: qsTr("Trace Graph")
                 }
+                // Level switch: Auto (by zoom) | Ranks | Nodes, shared with Trace Options.
+                Row {
+                    spacing: 2
+                    Repeater {
+                        model: [
+                            { value: "auto", label: qsTr("Auto"), tip: qsTr("Ranks when zoomed in (window up to 50 ms) or for up to 64 ranks, compute nodes otherwise") },
+                            { value: "ranks", label: qsTr("Ranks"), tip: qsTr("One circle per MPI rank") },
+                            { value: "nodes", label: qsTr("Nodes"), tip: qsTr("One circle per compute node, its ranks merged") }
+                        ]
+                        delegate: Rectangle {
+                            required property var modelData
+                            readonly property bool active: graph.level === modelData.value
+                            width: levelText.implicitWidth + 12
+                            height: trace_graph_view.embedded ? 18 : 22
+                            radius: 3
+                            color: active ? "#00a000" : (levelMouse.containsMouse ? "#666666" : "#5a5a5a")
+                            Text {
+                                id: levelText
+                                anchors.centerIn: parent
+                                text: modelData.label + (modelData.value === "auto" && parent.active
+                                      ? " (" + (graph.effectiveLevel === "nodes" ? qsTr("nodes") : qsTr("ranks")) + ")" : "")
+                                color: "white"
+                                font.pointSize: 9
+                            }
+                            MouseArea {
+                                id: levelMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: {
+                                    if (trace_graph_view.traceState)
+                                        trace_graph_view.traceState.graphLevel = modelData.value
+                                }
+                            }
+                            ToolTip.visible: levelMouse.containsMouse
+                            ToolTip.delay: 500
+                            ToolTip.text: modelData.tip
+                        }
+                    }
+                }
+                Rectangle {
+                    visible: graph.expandedCount > 0
+                    width: collapseText.implicitWidth + 12
+                    height: trace_graph_view.embedded ? 18 : 22
+                    radius: 3
+                    color: collapseMouse.containsMouse ? "#666666" : "#5a5a5a"
+                    Text {
+                        id: collapseText
+                        anchors.centerIn: parent
+                        text: qsTr("Merge %1 opened node(s)").arg(graph.expandedCount)
+                        color: "white"
+                        font.pointSize: 9
+                    }
+                    MouseArea {
+                        id: collapseMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: graph.collapseAll()
+                    }
+                }
                 Text {
                     Layout.fillWidth: true
                     elide: Text.ElideRight
@@ -74,8 +133,6 @@ Rectangle {
                         if (graph.edgeCount === 0)
                             return ""
                         var t = qsTr("%1 edges").arg(graph.edgeCount)
-                        if (graph.level === "auto" && graph.effectiveLevel === "nodes")
-                            t += qsTr(" · compute nodes (zoom in for ranks)")
                         if (graph.communicatorsMerged)
                             t += qsTr(" · communicators merged")
                         if (graph.shownEdgeCount < graph.edgeCount)
@@ -192,6 +249,25 @@ Rectangle {
                         font.pointSize: 11
                     }
                 }
+                Row {
+                    spacing: 4
+                    visible: graph.effectiveLevel === "nodes"
+                    Rectangle {
+                        width: 12
+                        height: 12
+                        radius: 6
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: "#ffffff"
+                        border.color: "#00d500"
+                        border.width: 3
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("Green ring = messages inside the node")
+                        color: "#374151"
+                        font.pointSize: 11
+                    }
+                }
                 // Node fill: waiting time (late sender) of the rank, as the 3D view's scale.
                 Row {
                     spacing: 4
@@ -232,6 +308,57 @@ Rectangle {
             }
         }
 
+        // What the picture shows (changes with the level) + ⓘ with the full explanation.
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: explainRow.implicitHeight + 6
+            color: "#ffffff"
+            RowLayout {
+                id: explainRow
+                anchors.fill: parent
+                anchors.leftMargin: 6
+                anchors.rightMargin: 6
+                spacing: 6
+                Text {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    color: "#374151"
+                    font.pointSize: 10
+                    text: graph.effectiveLevel === "nodes"
+                          ? qsTr("Each circle is one compute node (all its ranks together). Lines: messages between ranks of different nodes. Green ring: messages inside the node. Double-click a node to show its ranks.")
+                          : qsTr("Each circle is one MPI rank, border colour = its compute node. Lines: messages, arrow from sender to receiver. Click a rank to select it, hover for details.")
+                }
+                Rectangle {
+                    width: 16
+                    height: 16
+                    radius: 8
+                    color: infoMouse.containsMouse ? "#4a90e2" : "#9ca3af"
+                    Text {
+                        anchors.centerIn: parent
+                        text: "i"
+                        font.bold: true
+                        font.pixelSize: 10
+                        color: "white"
+                    }
+                    MouseArea {
+                        id: infoMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                    }
+                    ToolTip.visible: infoMouse.containsMouse
+                    ToolTip.delay: 300
+                    ToolTip.text: qsTr("Trace Graph: who talks to whom in the current time window.\n"
+                        + "• Ranks: one circle per MPI process, grouped by compute node (border colour).\n"
+                        + "• Nodes: the ranks of each compute node merged into one circle; only messages between nodes are lines, messages inside a node are the green ring (wider = more).\n"
+                        + "• Green lines: point-to-point messages (width = bytes, messages or waiting time).\n"
+                        + "• Black dashed lines: collectives (MPI_Allreduce, …) to a diamond per communicator.\n"
+                        + "• Fill white → blue: waiting time (late sender), as in the 3D view.\n"
+                        + "• Auto: ranks when zoomed in to single steps (≤ 50 ms) or for ≤ 64 ranks, nodes otherwise.\n"
+                        + "Hover a circle or line for its numbers; double-click a node to open it into its ranks.")
+                }
+            }
+        }
+
         TraceGraphItem {
             id: graph
             Layout.fillWidth: true
@@ -245,7 +372,7 @@ Rectangle {
             directed: trace_graph_view.traceState ? trace_graph_view.traceState.graphDirected : true
             weight: trace_graph_view.traceState ? trace_graph_view.traceState.graphWeight : "bytes"
             level: trace_graph_view.traceState ? trace_graph_view.traceState.graphLevel : "auto"
-            communicators: trace_graph_view.traceState ? trace_graph_view.traceState.graphCommunicators : "auto"
+            communicators: trace_graph_view.traceState && trace_graph_view.traceState.graphCommunicators ? trace_graph_view.traceState.graphCommunicators : "auto"
             layout: trace_graph_view.traceState ? trace_graph_view.traceState.graphLayout : "circle"
             maxEdges: trace_graph_view.traceState ? trace_graph_view.traceState.graphMaxEdges : 500
 
@@ -259,8 +386,27 @@ Rectangle {
             }
 
             // Click: node selects the rank (also in the timeline), edge shows its details.
+            // Double-click (nodes level): open a compute node into its ranks / merge it again.
             TapHandler {
                 onTapped: (eventPoint, button) => graph.clickAt(eventPoint.position.x, eventPoint.position.y)
+                onDoubleTapped: (eventPoint, button) => graph.toggleExpandAt(eventPoint.position.x, eventPoint.position.y)
+            }
+
+            // Hover: numbers of the node or edge under the mouse.
+            HoverHandler {
+                id: graphHover
+                onPointChanged: {
+                    var t = graph.toolTipAt(point.position.x, point.position.y)
+                    if (t !== hoverTip.text)
+                        hoverTip.text = t
+                    hoverTip.x = Math.min(point.position.x + 14, Math.max(0, graph.width - hoverTip.width))
+                    hoverTip.y = Math.min(point.position.y + 18, Math.max(0, graph.height - hoverTip.height))
+                }
+            }
+            ToolTip {
+                id: hoverTip
+                visible: graphHover.hovered && text !== ""
+                delay: 250
             }
         }
     }

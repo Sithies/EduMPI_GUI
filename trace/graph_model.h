@@ -29,6 +29,8 @@ struct GraphOptions {
     bool collectives = true;
     bool directed = true; // false: a -> b and b -> a are merged into one edge
     GraphLevel level = GraphLevel::Ranks;
+    // Nodes level: hosts shown as their single ranks (opened by the user), the rest merged.
+    QStringList expandedNodes;
 };
 
 struct GraphNode {
