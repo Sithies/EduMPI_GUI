@@ -83,6 +83,12 @@ Window {
     property bool p2p_recv_lines: false
     property bool coll_lines: false
 
+    // communicators of the selected second (filled by Cores3D) and the one selected in the
+    // sidebar, as in main.qml / MPI_Run_Analysis.qml. The trace rows carry no communicator
+    // name yet, so the list stays empty here.
+    property var communicatorList: []
+    property string selected_comm: ""
+
     function showError(message){
         var component = Qt.createComponent("/Error.qml");
         if(component.status === Component.Ready){

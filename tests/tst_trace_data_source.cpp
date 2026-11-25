@@ -42,6 +42,11 @@ class TstTraceDataSource : public QObject
     }
 
     static Matrix lastMatrix(const QSignalSpy &spy) { return spy.last().at(0).value<Matrix>(); }
+    static QVariantList p2pRow(const char *function, int rank, int partner, qlonglong sent,
+                               qlonglong received)
+    {
+        return QVariantList{QString::fromLatin1(function), rank, partner, sent, received, QString()};
+    }
 
     // Loads the ring4 fixture; QVERIFY inside, so callers check QTest::currentTestFailed().
     void load(Trace_Data_Source &src)
@@ -206,10 +211,13 @@ private slots:
         QCOMPARE(s.size(), QString("MPI_Send, MPI_Recv, ").size());
 
         const auto p2pList = p2p.last().at(0).value<QList<QVariantList>>();
-        QVERIFY(p2pList.contains(QVariantList{QString("MPI_Send"), 0, 1}));
-        QVERIFY(p2pList.contains(QVariantList{QString("MPI_Recv"), 0, 3}));
+        // Same layout as Database_Thread::detailed_p2p_Query: function, processrank,
+        // partnerrank, bytes sent, bytes received, communicator (Cores3D draws arrows from
+        // the byte columns).
+        QVERIFY(p2pList.contains(p2pRow("MPI_Send", 0, 1, 1000, 0)));
+        QVERIFY(p2pList.contains(p2pRow("MPI_Recv", 0, 3, 0, 1000)));
         for (const QVariantList &row : p2pList)
-            QCOMPARE(row.size(), 3);
+            QCOMPARE(row.size(), 6);
         QVERIFY(coll.last().at(0).value<QList<QVariantList>>().isEmpty());
 
         const Matrix ps = lastMatrix(pSend);
@@ -252,10 +260,10 @@ private slots:
         QCOMPARE(s.size(), QString("MPI_Irecv, MPI_Isend, ").size());
 
         const auto p2pList = p2p.last().at(0).value<QList<QVariantList>>();
-        QVERIFY(p2pList.contains(QVariantList{QString("MPI_Irecv"), 0, 1}));
-        QVERIFY(p2pList.contains(QVariantList{QString("MPI_Irecv"), 1, 0}));
-        QVERIFY(p2pList.contains(QVariantList{QString("MPI_Isend"), 0, 1}));
-        QVERIFY(p2pList.contains(QVariantList{QString("MPI_Isend"), 1, 0}));
+        QVERIFY(p2pList.contains(p2pRow("MPI_Irecv", 0, 1, 0, 400)));
+        QVERIFY(p2pList.contains(p2pRow("MPI_Irecv", 1, 0, 0, 300)));
+        QVERIFY(p2pList.contains(p2pRow("MPI_Isend", 0, 1, 300, 0)));
+        QVERIFY(p2pList.contains(p2pRow("MPI_Isend", 1, 0, 400, 0)));
 
         Matrix expectedRecv(4, QVector<long>(4, 0));
         expectedRecv[0][1] = 400;
@@ -353,7 +361,8 @@ private slots:
         const auto collList = coll.last().at(0).value<QList<QVariantList>>();
         QCOMPARE(collList.size(), 4);
         for (const QVariantList &row : collList) {
-            QCOMPARE(row.size(), 4);
+            QCOMPARE(row.size(), 5); // + communicator, as in the DB rows
+            QCOMPARE(row.at(4).toString(), QString());
             QCOMPARE(row.at(0).toString(), QStringLiteral("MPI_Allreduce"));
             QCOMPARE(row.at(2).toString(), QString());
             QVERIFY(!row.at(3).toByteArray().isEmpty());

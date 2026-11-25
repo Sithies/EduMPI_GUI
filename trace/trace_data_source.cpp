@@ -298,7 +298,11 @@ void Trace_Data_Source::emitDetailRows(const QVector<const DetailRow *> &details
         const int partRank = k.partner;
 
         if (k.commType == QLatin1String("p2p")) {
-            p2pList.append(QVariantList{k.function, procRank, partRank});
+            // Same row as Database_Thread::detailed_p2p_Query: Cores3D draws a send/recv arrow
+            // only for rows that moved data. The communicator name is not read from the trace
+            // yet (empty, as with an EduStore without the communicator column).
+            p2pList.append(QVariantList{k.function, procRank, partRank, qlonglong(sendSize),
+                                        qlonglong(recvSize), QString()});
             // The DB skips MPI_Wait rows here: they carry partner -1 (bytes are on the
             // MPI_Irecv rows). Skip by that property, not by name.
             if (partRank < 0)
@@ -316,7 +320,7 @@ void Trace_Data_Source::emitDetailRows(const QVector<const DetailRow *> &details
                 p2pRecv[procRank][partRank] += recvSize;
         } else if (k.commType == QLatin1String("collective")) {
             const QString algorithm; // not recorded in traces
-            collList.append(QVariantList{k.function, procRank, algorithm, k.collPartners});
+            collList.append(QVariantList{k.function, procRank, algorithm, k.collPartners, QString()});
             const QString fun = k.function + QStringLiteral(" (") + algorithm + QStringLiteral("), ");
             if (!s.contains(fun))
                 s.append(fun);
