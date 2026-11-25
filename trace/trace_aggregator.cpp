@@ -53,8 +53,8 @@ size_t qHash(const TraceAggregator::MatchKey &k, size_t seed)
 
 bool TraceAggregator::DetailKey::operator<(const DetailKey &o) const
 {
-    return std::tie(collective, rank, function, partner, collPartners)
-         < std::tie(o.collective, o.rank, o.function, o.partner, o.collPartners);
+    return std::tie(collective, rank, function, partner, collPartners, comm)
+         < std::tie(o.collective, o.rank, o.function, o.partner, o.collPartners, o.comm);
 }
 
 int TraceAggregator::secondOf(qint64 ns)
@@ -109,7 +109,7 @@ void TraceAggregator::bookMatch(const P2PSend &s, const P2PRecv &r)
 void TraceAggregator::addSend(const P2PSend &send)
 {
     bucket(send.enterNs, send.rank, false).sendBytes += qint64(send.bytes);
-    addDetail(send.enterNs, {false, send.function, send.rank, send.peer, {}}, qint64(send.bytes), 0);
+    addDetail(send.enterNs, {false, send.function, send.rank, send.peer, {}, send.comm}, qint64(send.bytes), 0);
 
     const MatchKey key{send.rank, send.peer, send.comm, send.tag};
     auto it = m_pending.find(key);
@@ -125,7 +125,7 @@ void TraceAggregator::addSend(const P2PSend &send)
 void TraceAggregator::addRecv(const P2PRecv &recv)
 {
     bucket(recv.enterNs, recv.rank, false).recvBytes += qint64(recv.bytes);
-    addDetail(recv.enterNs, {false, recv.function, recv.rank, recv.peer, {}}, 0, qint64(recv.bytes));
+    addDetail(recv.enterNs, {false, recv.function, recv.rank, recv.peer, {}, recv.comm}, 0, qint64(recv.bytes));
 
     const MatchKey key{recv.peer, recv.rank, recv.comm, recv.tag};
     auto it = m_pending.find(key);
@@ -166,7 +166,7 @@ void TraceAggregator::addCollective(const Collective &coll)
     Bucket &b = bucket(coll.enterNs, coll.rank, true);
     b.sendBytes += qint64(coll.bytesSent);
     b.recvBytes += qint64(coll.bytesRecv);
-    addDetail(coll.enterNs, {true, coll.function, coll.rank, -1, partnerMask(coll.members, coll.rank)},
+    addDetail(coll.enterNs, {true, coll.function, coll.rank, -1, partnerMask(coll.members, coll.rank), coll.comm},
               qint64(coll.bytesSent), qint64(coll.bytesRecv));
 
     const quint64 index = m_collSeq[qMakePair(coll.rank, coll.comm)]++;
@@ -225,7 +225,7 @@ TraceSummary TraceAggregator::finish(qint64 traceLengthNs)
             const DetailKey &k = it.key();
             s.details[sec].append({k.collective ? QStringLiteral("collective") : QStringLiteral("p2p"),
                                    k.function, k.rank, k.partner, k.collPartners,
-                                   it.value().sendBytes, it.value().recvBytes});
+                                   it.value().sendBytes, it.value().recvBytes, k.comm});
         }
     }
     m_buckets.clear();

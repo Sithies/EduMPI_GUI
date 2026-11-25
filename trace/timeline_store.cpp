@@ -111,10 +111,11 @@ struct DetailKey {
     int rank;
     int partner;
     QByteArray collPartners;
+    quint64 comm;
     bool operator<(const DetailKey &o) const
     {
-        return std::tie(collective, rank, function, partner, collPartners)
-             < std::tie(o.collective, o.rank, o.function, o.partner, o.collPartners);
+        return std::tie(collective, rank, function, partner, collPartners, comm)
+             < std::tie(o.collective, o.rank, o.function, o.partner, o.collPartners, o.comm);
     }
 };
 } // namespace
@@ -150,7 +151,7 @@ WindowAggregate TimelineStore::aggregate(qint64 from, qint64 to) const
                     b.recvBytes += qint64(c.bytesRecv);
                     b.lateSender += c.lateSender;
                     auto &d = details[{true, functions.value(a.function), r.rank, -1,
-                                       partnerMask(c.members, r.rank)}];
+                                       partnerMask(c.members, r.rank), c.comm}];
                     d.first += qint64(c.bytesSent);
                     d.second += qint64(c.bytesRecv);
                     continue;
@@ -159,13 +160,13 @@ WindowAggregate TimelineStore::aggregate(qint64 from, qint64 to) const
                 if (m.sender == r.rank && m.sendNs >= 0 && m.sendNs == a.startNs) {
                     b.sendBytes += qint64(m.bytes);
                     b.lateReceiver += m.lateReceiver;
-                    details[{false, functions.value(m.sendFunction), r.rank, m.destination, {}}].first
+                    details[{false, functions.value(m.sendFunction), r.rank, m.destination, {}, m.comm}].first
                         += qint64(m.bytes);
                 }
                 if (m.receiver == r.rank && m.recvNs == a.endNs) {
                     b.recvBytes += qint64(m.bytes);
                     b.lateSender += m.lateSender;
-                    details[{false, functions.value(m.recvFunction), r.rank, m.sender, {}}].second
+                    details[{false, functions.value(m.recvFunction), r.rank, m.sender, {}, m.comm}].second
                         += qint64(m.bytes);
                 }
             }
@@ -183,7 +184,7 @@ WindowAggregate TimelineStore::aggregate(qint64 from, qint64 to) const
     for (auto it = details.cbegin(); it != details.cend(); ++it) {
         const DetailKey &k = it.key();
         out.details.append({k.collective ? QStringLiteral("collective") : QStringLiteral("p2p"), k.function,
-                            k.rank, k.partner, k.collPartners, it.value().first, it.value().second});
+                            k.rank, k.partner, k.collPartners, it.value().first, it.value().second, k.comm});
     }
     return out;
 }

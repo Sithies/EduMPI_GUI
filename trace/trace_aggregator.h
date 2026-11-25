@@ -46,6 +46,7 @@ private:
         int rank;
         int partner;
         QByteArray collPartners;
+        quint64 comm; // the DB groups by communicator (communicationarea), too
         bool operator<(const DetailKey &o) const;
     };
     struct DetailSums {

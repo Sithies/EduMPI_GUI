@@ -82,6 +82,10 @@ private slots:
         QCOMPARE(meta.traceLengthNs, qint64(2'500'000'000));
         QCOMPARE(meta.realtimeStart, QDateTime(QDate(2026, 1, 1), QTime(10, 0), QTimeZone::UTC));
         QCOMPARE(meta.name, QStringLiteral("ring4"));
+        // communicator names from the Comm definitions (C_World = 0, C_Sub = 1)
+        QCOMPARE(meta.commNames.value(0), QStringLiteral("MPI_COMM_WORLD"));
+        QCOMPARE(meta.commNames.value(1), QStringLiteral("SUB"));
+        QCOMPARE(meta.commNames.size(), 2);
         verifyRing4(s);
     }
 

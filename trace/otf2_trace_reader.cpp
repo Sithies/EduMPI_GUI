@@ -142,6 +142,7 @@ struct GlobalDefs {
     QMap<OTF2_LocationRef, RawLocation> locations;
     QHash<OTF2_GroupRef, RawGroup> groups;
     QHash<OTF2_CommRef, OTF2_GroupRef> comms;
+    QHash<OTF2_CommRef, OTF2_StringRef> commNames;
     QHash<OTF2_RegionRef, RawRegion> regions;
     // Synchronous metric classes (e.g. PAPI counters, written as METRIC events at every
     // Enter / Leave) or metric instances (asynchronous recorders) exist. Metric members alone
@@ -199,10 +200,12 @@ OTF2_CallbackCode onGroup(void *ud, OTF2_GroupRef self, OTF2_StringRef, OTF2_Gro
     return OTF2_CALLBACK_SUCCESS;
 }
 
-OTF2_CallbackCode onComm(void *ud, OTF2_CommRef self, OTF2_StringRef, OTF2_GroupRef group,
+OTF2_CallbackCode onComm(void *ud, OTF2_CommRef self, OTF2_StringRef name, OTF2_GroupRef group,
                          OTF2_CommRef, OTF2_CommFlag)
 {
-    static_cast<GlobalDefs *>(ud)->comms.insert(self, group);
+    auto *d = static_cast<GlobalDefs *>(ud);
+    d->comms.insert(self, group);
+    d->commNames.insert(self, name);
     return OTF2_CALLBACK_SUCCESS;
 }
 
@@ -401,6 +404,9 @@ QHash<OTF2_CommRef, CommInfo> resolveComms(const GlobalDefs &d)
 class EventTranslator
 {
 public:
+    // An MPI communicator whose events are translated (resolveComms kept it).
+    bool knowsComm(OTF2_CommRef comm) const { return m_comms.contains(comm); }
+
     EventTranslator(TraceSink &sink, const GlobalDefs &d, const std::atomic_bool *cancel)
         : m_sink(sink)
         , m_cancel(cancel)
@@ -802,6 +808,12 @@ bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QStri
     m.name = anchor.absoluteDir().dirName();
     m.traceLengthNs = tr.durationNs(defs.length); // declared length; extended to the last event below
     m.hasMetrics = defs.hasMetrics;
+    for (auto it = defs.commNames.cbegin(); it != defs.commNames.cend(); ++it) {
+        if (!tr.knowsComm(it.key()))
+            continue; // non-MPI communicator: its events are skipped
+        const QString name = defs.strings.value(it.value());
+        m.commNames.insert(it.key(), name.isEmpty() ? QStringLiteral("Comm %1").arg(it.key()) : name);
+    }
     m.realtimeStart = defs.realtime == OTF2_UNDEFINED_TIMESTAMP
         ? QDateTime()
         : QDateTime::fromMSecsSinceEpoch(qint64(defs.realtime / 1'000'000), QTimeZone::UTC);

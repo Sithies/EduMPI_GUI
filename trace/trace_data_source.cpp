@@ -39,17 +39,19 @@ QVector<int> decodePartners(const QByteArray &bitmask)
 }
 
 // Grouping key of detail rows over several seconds (the DB's GROUP BY function,
-// communicationtype, processrank, partnerrank, coll_algorithm, coll_partnerranks).
+// communicationtype, processrank, partnerrank, coll_algorithm, coll_partnerranks,
+// communicationarea).
 struct DetailGroupKey {
     QString commType;
     QString function;
     int rank;
     int partner;
     QByteArray collPartners;
+    quint64 comm;
     bool operator<(const DetailGroupKey &o) const
     {
-        return std::tie(commType, function, rank, partner, collPartners)
-            < std::tie(o.commType, o.function, o.rank, o.partner, o.collPartners);
+        return std::tie(commType, function, rank, partner, collPartners, comm)
+            < std::tie(o.commType, o.function, o.rank, o.partner, o.collPartners, o.comm);
     }
 };
 
@@ -273,7 +275,7 @@ void Trace_Data_Source::emitDetailRows(const QVector<const DetailRow *> &details
 {
     QMap<DetailGroupKey, QPair<qint64, qint64>> groups; // -> (send, recv)
     for (const DetailRow *d : details) {
-        auto &sum = groups[{d->commType, d->function, d->rank, d->partner, d->collPartners}];
+        auto &sum = groups[{d->commType, d->function, d->rank, d->partner, d->collPartners, d->comm}];
         sum.first += d->sendBytes;
         sum.second += d->recvBytes;
     }
@@ -296,13 +298,13 @@ void Trace_Data_Source::emitDetailRows(const QVector<const DetailRow *> &details
         const long recvSize = long(it.value().second);
         const int procRank = k.rank;
         const int partRank = k.partner;
+        const QString communicator = m_meta.commNames.value(k.comm);
 
         if (k.commType == QLatin1String("p2p")) {
             // Same row as Database_Thread::detailed_p2p_Query: Cores3D draws a send/recv arrow
-            // only for rows that moved data. The communicator name is not read from the trace
-            // yet (empty, as with an EduStore without the communicator column).
+            // only for rows that moved data and filters them by communicator name.
             p2pList.append(QVariantList{k.function, procRank, partRank, qlonglong(sendSize),
-                                        qlonglong(recvSize), QString()});
+                                        qlonglong(recvSize), communicator});
             // The DB skips MPI_Wait rows here: they carry partner -1 (bytes are on the
             // MPI_Irecv rows). Skip by that property, not by name.
             if (partRank < 0)
@@ -320,7 +322,7 @@ void Trace_Data_Source::emitDetailRows(const QVector<const DetailRow *> &details
                 p2pRecv[procRank][partRank] += recvSize;
         } else if (k.commType == QLatin1String("collective")) {
             const QString algorithm; // not recorded in traces
-            collList.append(QVariantList{k.function, procRank, algorithm, k.collPartners, QString()});
+            collList.append(QVariantList{k.function, procRank, algorithm, k.collPartners, communicator});
             const QString fun = k.function + QStringLiteral(" (") + algorithm + QStringLiteral("), ");
             if (!s.contains(fun))
                 s.append(fun);

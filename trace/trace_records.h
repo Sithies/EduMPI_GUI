@@ -2,6 +2,7 @@
 
 #include <QByteArray>
 #include <QDateTime>
+#include <QHash>
 #include <QMap>
 #include <QString>
 #include <QVector>
@@ -88,6 +89,7 @@ struct DetailRow {
     QByteArray collPartners;
     qint64 sendBytes;
     qint64 recvBytes;
+    quint64 comm; // communicator of the calls (name: TraceMeta::commNames)
 };
 
 // Archive-level information, known after the definitions (before the first event) except
@@ -98,6 +100,9 @@ struct TraceMeta {
     qint64 traceLengthNs = 0;
     quint64 eventCount = 0;  // sum of the event counts of all read locations
     bool hasMetrics = false; // archive defines metrics that are recorded as METRIC events
+    // Name per MPI communicator (the comm of the records), e.g. "MPI_COMM_WORLD". A
+    // communicator without a name in the definitions gets "Comm <id>".
+    QHash<quint64, QString> commNames;
 };
 
 // One non-MPI (user function) region of a rank, e.g. main / phase_a / send_to.

@@ -43,9 +43,9 @@ class TstTraceDataSource : public QObject
 
     static Matrix lastMatrix(const QSignalSpy &spy) { return spy.last().at(0).value<Matrix>(); }
     static QVariantList p2pRow(const char *function, int rank, int partner, qlonglong sent,
-                               qlonglong received)
+                               qlonglong received, const QString &comm = QStringLiteral("MPI_COMM_WORLD"))
     {
-        return QVariantList{QString::fromLatin1(function), rank, partner, sent, received, QString()};
+        return QVariantList{QString::fromLatin1(function), rank, partner, sent, received, comm};
     }
 
     // Loads the ring4 fixture; QVERIFY inside, so callers check QTest::currentTestFailed().
@@ -234,6 +234,25 @@ private slots:
         QCOMPARE(lastMatrix(total), expectedSend);
     }
 
+    // Second 2 of ring4: R3 sends 200 B to R2 on SUB and 100 B to R0 on WORLD. The rows carry
+    // the communicator names, so the 3D view's communicator selector can list both.
+    void detailRowsCarryCommunicatorNames()
+    {
+        Trace_Data_Source src(m_anchor);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        QSignalSpy p2p(&src, &Trace_Data_Source::updateDetailedP2P);
+        const QDateTime t = src.startTimestamp().addSecs(2);
+        src.showDataFromTimePeriod(t, t);
+
+        const auto p2pList = p2p.last().at(0).value<QList<QVariantList>>();
+        QVERIFY(p2pList.contains(p2pRow("MPI_Send", 3, 2, 200, 0, QStringLiteral("SUB"))));
+        QVERIFY(p2pList.contains(p2pRow("MPI_Recv", 2, 3, 0, 200, QStringLiteral("SUB"))));
+        QVERIFY(p2pList.contains(p2pRow("MPI_Send", 3, 0, 100, 0)));
+        QVERIFY(p2pList.contains(p2pRow("MPI_Ssend", 1, 2, 500, 0)));
+    }
+
     // Receives completed by MPI_Wait / MPI_Waitall must reach the p2p receive matrix and
     // appear as "MPI_Irecv" in the functions string (EduMPI DB books them on MPI_Irecv rows).
     void nonblockingReceivesFillRecvMatrix()
@@ -362,7 +381,7 @@ private slots:
         QCOMPARE(collList.size(), 4);
         for (const QVariantList &row : collList) {
             QCOMPARE(row.size(), 5); // + communicator, as in the DB rows
-            QCOMPARE(row.at(4).toString(), QString());
+            QCOMPARE(row.at(4).toString(), QStringLiteral("MPI_COMM_WORLD"));
             QCOMPARE(row.at(0).toString(), QStringLiteral("MPI_Allreduce"));
             QCOMPARE(row.at(2).toString(), QString());
             QVERIFY(!row.at(3).toByteArray().isEmpty());
@@ -587,8 +606,11 @@ private slots:
         QSignalSpy data(&src, &Trace_Data_Source::updateDataReady);
         QSignalSpy pSend(&src, &Trace_Data_Source::setCommMatrixP2PSend);
         QSignalSpy shown(&src, &Trace_Data_Source::traceWindowShown);
+        QSignalSpy p2p(&src, &Trace_Data_Source::updateDetailedP2P);
         src.showTraceWindow(0, 300 * kMs);
         QCOMPARE(shown.count(), 1);
+        // rows from the loaded timeline carry the communicator name, too
+        QVERIFY(p2p.last().at(0).value<QList<QVariantList>>().contains(p2pRow("MPI_Send", 0, 1, 1000, 0)));
         QCOMPARE(shown.last().at(0).toLongLong(), 0);
         QCOMPARE(shown.last().at(1).toLongLong(), 300 * kMs);
         QCOMPARE(shown.last().at(2).toBool(), true);
