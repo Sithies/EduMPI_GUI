@@ -1,0 +1,6 @@
+SCOREP_REGION_NAMES_BEGIN
+    EXCLUDE
+    fillArray*
+    concatenate*
+    my_rand*
+SCOREP_REGION_NAMES_END
