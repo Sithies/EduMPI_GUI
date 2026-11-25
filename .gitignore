@@ -41,3 +41,7 @@ CMakeLists.txt.user*
 *.files
 *.includes
 .DS_Store
+
+# Synthetic test traces (tools/big-trace), several GB
+tools/big-trace/out/
+tools/big-trace/gen_trace
