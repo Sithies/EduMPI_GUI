@@ -174,6 +174,44 @@ CommGraph buildCommGraph(const TimelineStore &store, qint64 fromNs, qint64 toNs,
     return g;
 }
 
+CommGraph mergeCommunicators(const CommGraph &graph)
+{
+    const int n = graph.rankNodeCount;
+    if (graph.nodes.size() - n <= 1)
+        return graph;
+    CommGraph g;
+    g.groups = graph.groups;
+    g.rankNodeCount = n;
+    g.nodes = graph.nodes.mid(0, n);
+    GraphNode all;
+    all.kind = GraphNode::Kind::Communicator;
+    all.comm = kMergedCommunicators;
+    all.members = int(graph.nodes.size()) - n;
+    all.group = -1;
+    g.nodes.append(all);
+    QHash<int, int> collectiveOf; // rank / host node -> its edge to the merged node
+    for (const GraphEdge &e : graph.edges) {
+        if (e.kind != GraphEdge::Kind::Collective) {
+            g.edges.append(e);
+            continue;
+        }
+        auto it = collectiveOf.find(e.from);
+        if (it == collectiveOf.end()) {
+            GraphEdge m;
+            m.kind = GraphEdge::Kind::Collective;
+            m.from = e.from;
+            m.to = n;
+            it = collectiveOf.insert(e.from, int(g.edges.size()));
+            g.edges.append(m);
+        }
+        GraphEdge &m = g.edges[*it];
+        m.bytes += e.bytes;
+        m.messages += e.messages;
+        m.waitSeconds += e.waitSeconds;
+    }
+    return g;
+}
+
 double edgeWeight(const GraphEdge &edge, GraphWeight weight)
 {
     switch (weight) {
@@ -191,9 +229,19 @@ QVector<int> selectEdges(const CommGraph &graph, GraphWeight weight, int maxEdge
     for (int i = 0; i < graph.edges.size(); ++i)
         if (weight == GraphWeight::Wait || edgeWeight(graph.edges[i], weight) > 0)
             order.append(i);
-    // Heaviest first; ties by index for a stable picture.
-    std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
-        return edgeWeight(graph.edges[a], weight) > edgeWeight(graph.edges[b], weight);
+    // Heaviest first. Ties by a fixed scrambled order of the edge's ends, so that a limit cuts
+    // equal edges all over the graph instead of keeping only those of the first ranks.
+    auto spread = [&](int i) {
+        const GraphEdge &e = graph.edges[i];
+        return (quint32(e.from) * 2654435761u) ^ (quint32(e.to) * 2246822519u) ^ quint32(e.kind);
+    };
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+        const double wa = edgeWeight(graph.edges[a], weight);
+        const double wb = edgeWeight(graph.edges[b], weight);
+        if (wa != wb)
+            return wa > wb;
+        const quint32 sa = spread(a), sb = spread(b);
+        return sa != sb ? sa < sb : a < b;
     });
     if (maxEdges <= 0 || order.size() <= maxEdges)
         return order;

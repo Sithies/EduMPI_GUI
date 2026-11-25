@@ -68,9 +68,18 @@ struct CommGraph {
 // without traffic, so the layout stays stable while the window moves) resp. all nodes (hosts).
 CommGraph buildCommGraph(const TimelineStore &store, qint64 fromNs, qint64 toNs, const GraphOptions &options);
 
+// Communicator id of the node that mergeCommunicators() makes.
+constexpr quint64 kMergedCommunicators = ~quint64(0);
+
+// The graph with all communicator nodes merged into one (comm = kMergedCommunicators, members =
+// number of merged communicators); collective edges of a rank / host are summed. For traces
+// with many communicators, whose nodes would cover each other in the middle.
+CommGraph mergeCommunicators(const CommGraph &graph);
+
 double edgeWeight(const GraphEdge &edge, GraphWeight weight);
 
-// Edges to draw, heaviest first: at most maxEdges (0 = all) by weight, plus every edge of
+// Edges to draw, heaviest first (equal weights spread over the graph, not by node order): at
+// most maxEdges (0 = all) by weight, plus every edge of
 // focusNode (-1 = none) even beyond that limit. Edges with weight 0 are left out except under
 // GraphWeight::Wait, where messages without waiting still show the communication.
 QVector<int> selectEdges(const CommGraph &graph, GraphWeight weight, int maxEdges, int focusNode);

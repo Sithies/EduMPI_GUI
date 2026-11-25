@@ -302,6 +302,46 @@ private slots:
         QVERIFY2(t.elapsed() < 2000, qPrintable(QString::number(t.elapsed())));
     }
 
+    // Auto level: many ranks in a long window -> compute nodes; zoomed in -> ranks.
+    void autoLevelFollowsZoom()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeManyMessagesOtf2(tmp.filePath(QStringLiteral("many")), 128, 20, 100 * kMs);
+        QVERIFY(!anchor.isEmpty());
+        TraceTimelineModel model;
+        model.addSnapshot({build(anchor)});
+        TraceGraphItem item;
+        item.setWidth(600);
+        item.setHeight(400);
+        item.setModel(&model);
+        QCOMPARE(item.level(), QStringLiteral("auto"));
+        QCOMPARE(item.effectiveLevel(), QStringLiteral("nodes")); // whole run, > 100 ms
+        QCOMPARE(item.graph().rankNodeCount, 2);
+        item.setViewStartNs(0);
+        item.setViewEndNs(3 * kMs);
+        QCOMPARE(item.effectiveLevel(), QStringLiteral("ranks"));
+        QCOMPARE(item.graph().rankNodeCount, 128);
+        // Fixed levels ignore the zoom.
+        item.setLevel(QStringLiteral("nodes"));
+        QCOMPARE(item.effectiveLevel(), QStringLiteral("nodes"));
+        item.setLevel(QStringLiteral("ranks"));
+        item.setViewEndNs(0); // whole run
+        QCOMPARE(item.effectiveLevel(), QStringLiteral("ranks"));
+    }
+
+    void communicatorsMergeOnDemand()
+    {
+        TraceTimelineModel model;
+        TraceGraphItem item;
+        setupRing4(model, item);
+        item.setViewEndNs(0); // whole run: one communicator
+        QCOMPARE(item.communicators(), QStringLiteral("auto"));
+        QVERIFY(!item.communicatorsMerged()); // a single one is never merged
+        item.setCommunicators(QStringLiteral("merged"));
+        QVERIFY(!item.communicatorsMerged());
+        QCOMPARE(item.graph().nodes.size(), 5);
+    }
+
     // TraceGraph.qml as its own view and below the timeline: loads, follows traceState.
     void traceGraphQmlFollowsTraceState()
     {

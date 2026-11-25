@@ -37,8 +37,15 @@ class TraceGraphItem : public QQuickPaintedItem
     Q_PROPERTY(bool directed READ directed WRITE setDirected NOTIFY displayChanged)
     // "bytes", "messages" or "wait"
     Q_PROPERTY(QString weight READ weight WRITE setWeight NOTIFY displayChanged)
-    // "ranks" or "nodes"
+    // "auto" (default), "ranks" or "nodes". Auto: ranks while the window is short (zoomed in,
+    // single steps) or the trace small, compute nodes for long windows of many ranks.
     Q_PROPERTY(QString level READ level WRITE setLevel NOTIFY displayChanged)
+    // Level actually drawn: "ranks" or "nodes".
+    Q_PROPERTY(QString effectiveLevel READ effectiveLevel NOTIFY graphChanged)
+    // "auto" (default), "separate" or "merged": one node per communicator or one for all.
+    // Auto merges when there are more than kAutoCommunicatorLimit communicators.
+    Q_PROPERTY(QString communicators READ communicators WRITE setCommunicators NOTIFY displayChanged)
+    Q_PROPERTY(bool communicatorsMerged READ communicatorsMerged NOTIFY graphChanged)
     // "circle" or "grid"
     Q_PROPERTY(QString layout READ layout WRITE setLayout NOTIFY displayChanged)
     // Heaviest edges drawn (0 = all); edges of the selected rank are always drawn.
@@ -55,6 +62,12 @@ public:
     static constexpr int kDefaultMaxEdges = 500;
     static constexpr int kArrowHeadLimit = 300; // no arrow heads when more edges are drawn
     static constexpr int kLabelLimit = 64;      // rank labels only up to this many ranks
+    // Auto level: ranks for at most this many ranks, or for windows up to kAutoRanksWindowNs.
+    static constexpr int kAutoRankLimit = 64;
+    static constexpr qint64 kAutoRanksWindowNs = 50'000'000; // 50 ms
+    static constexpr int kAutoCommunicatorLimit = 8;
+    // Hint to zoom in from this window length on (the graph sums up many steps).
+    static constexpr qint64 kLongWindowNs = 1'000'000'000; // 1 s
 
     explicit TraceGraphItem(QQuickItem *parent = nullptr);
 
@@ -76,6 +89,10 @@ public:
     void setWeight(const QString &weight);
     QString level() const;
     void setLevel(const QString &level);
+    QString effectiveLevel() const;
+    QString communicators() const;
+    void setCommunicators(const QString &mode);
+    bool communicatorsMerged() const { return m_commMerged; }
     QString layout() const;
     void setLayout(const QString &layout);
     int maxEdges() const { return m_maxEdges; }
@@ -142,6 +159,10 @@ private:
     trace::GraphOptions m_options;
     trace::GraphWeight m_weight = trace::GraphWeight::Bytes;
     trace::GraphLayout m_layout = trace::GraphLayout::Circle;
+    enum class Mode : quint8 { Auto, Off, On }; // level: On = nodes; communicators: On = merged
+    Mode m_levelMode = Mode::Auto;
+    Mode m_commMode = Mode::Auto;
+    bool m_commMerged = false;
     int m_maxEdges = kDefaultMaxEdges;
 
     trace::CommGraph m_graph;

@@ -267,6 +267,78 @@ private slots:
         QCOMPARE(edgeWeight(g.edges[top.first()], GraphWeight::Messages), 1.0);
     }
 
+    void mergeCommunicatorsSumsStars()
+    {
+        CommGraph g;
+        g.groups = {QStringLiteral("n")};
+        for (int r = 0; r < 3; ++r) {
+            GraphNode n;
+            n.rank = r;
+            g.nodes.append(n);
+        }
+        g.rankNodeCount = 3;
+        for (quint64 c : {7, 9}) {
+            GraphNode n;
+            n.kind = GraphNode::Kind::Communicator;
+            n.comm = c;
+            n.members = 3;
+            n.group = -1;
+            g.nodes.append(n);
+        }
+        auto add = [&](GraphEdge::Kind k, int from, int to, quint64 bytes, double wait) {
+            GraphEdge e;
+            e.kind = k;
+            e.from = from;
+            e.to = to;
+            e.bytes = bytes;
+            e.messages = 1;
+            e.waitSeconds = wait;
+            g.edges.append(e);
+        };
+        add(GraphEdge::Kind::P2P, 0, 1, 10, 0.1);
+        add(GraphEdge::Kind::Collective, 0, 3, 100, 0.5);
+        add(GraphEdge::Kind::Collective, 0, 4, 200, 0.25);
+        add(GraphEdge::Kind::Collective, 2, 4, 50, 0);
+        const CommGraph m = mergeCommunicators(g);
+        QCOMPARE(m.nodes.size(), 4);
+        QCOMPARE(m.rankNodeCount, 3);
+        QCOMPARE(m.nodes[3].comm, kMergedCommunicators);
+        QCOMPARE(m.nodes[3].members, 2);
+        QCOMPARE(m.edges.size(), 3);
+        QCOMPARE(findEdge(m, 0, 1)->bytes, quint64(10));
+        const GraphEdge *c0 = findEdge(m, 0, 3, GraphEdge::Kind::Collective);
+        QVERIFY(c0);
+        QCOMPARE(c0->bytes, quint64(300));
+        QCOMPARE(c0->messages, 2);
+        QCOMPARE(c0->waitSeconds, 0.75);
+        QCOMPARE(findEdge(m, 2, 3, GraphEdge::Kind::Collective)->bytes, quint64(50));
+        // One communicator: unchanged.
+        QCOMPARE(mergeCommunicators(m).nodes.size(), 4);
+    }
+
+    // Equal weights under a limit: spread over the ring, not only the first ranks.
+    void selectEdgesSpreadsTies()
+    {
+        CommGraph g;
+        g.rankNodeCount = 256;
+        g.nodes.resize(256);
+        for (int r = 0; r < 256; ++r) {
+            GraphEdge e;
+            e.from = r;
+            e.to = (r + 1) % 256;
+            e.bytes = 64;
+            g.edges.append(e);
+        }
+        const QVector<int> sel = selectEdges(g, GraphWeight::Bytes, 64, -1);
+        QCOMPARE(sel.size(), 64);
+        int quarter[4] = {0, 0, 0, 0};
+        for (int i : sel)
+            ++quarter[g.edges[i].from / 64];
+        for (int q : quarter)
+            QVERIFY2(q >= 6, qPrintable(QString::number(q))); // every quarter of the ring gets some
+        QCOMPARE(selectEdges(g, GraphWeight::Bytes, 64, -1), sel); // stable
+    }
+
     void layouts()
     {
         auto s = syntheticRing(4);

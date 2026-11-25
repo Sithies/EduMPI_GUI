@@ -57,7 +57,8 @@ Window {
         property bool graphCollectives: true
         property bool graphDirected: true
         property string graphWeight: "bytes"     // "bytes", "messages" or "wait"
-        property string graphLevel: "ranks"      // "ranks" or "nodes"
+        property string graphLevel: "auto"       // "auto", "ranks" or "nodes"
+        property string graphCommunicators: "auto" // "auto", "separate" or "merged"
         property string graphLayout: "circle"    // "circle" or "grid"
         property int graphMaxEdges: 500          // heaviest edges drawn, 0 = all
         property var lastEdge: null

@@ -215,10 +215,21 @@ Rectangle {
                 }
                 ComboBox {
                     Layout.fillWidth: true
-                    readonly property var values: ["ranks", "nodes"]
-                    model: [qsTr("Ranks"), qsTr("Compute nodes")]
+                    readonly property var values: ["auto", "ranks", "nodes"]
+                    model: [qsTr("Auto (by zoom)"), qsTr("Ranks"), qsTr("Compute nodes")]
                     currentIndex: traceState ? Math.max(0, values.indexOf(traceState.graphLevel)) : 0
                     onActivated: (index) => traceState.graphLevel = values[index]
+                }
+                Text {
+                    text: qsTr("Communicators:")
+                    color: "#999999"
+                }
+                ComboBox {
+                    Layout.fillWidth: true
+                    readonly property var values: ["auto", "separate", "merged"]
+                    model: [qsTr("Auto"), qsTr("One node each"), qsTr("One node for all")]
+                    currentIndex: traceState ? Math.max(0, values.indexOf(traceState.graphCommunicators)) : 0
+                    onActivated: (index) => traceState.graphCommunicators = values[index]
                 }
                 Text {
                     text: qsTr("Layout:")

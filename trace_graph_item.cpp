@@ -3,6 +3,7 @@
 #include <QFontMetrics>
 #include <QPainter>
 #include <QPainterPath>
+#include <QSet>
 
 #include <algorithm>
 #include <cmath>
@@ -185,15 +186,45 @@ void TraceGraphItem::setWeight(const QString &weight)
 
 QString TraceGraphItem::level() const
 {
-    return m_options.level == trace::GraphLevel::Nodes ? QStringLiteral("nodes") : QStringLiteral("ranks");
+    switch (m_levelMode) {
+    case Mode::On: return QStringLiteral("nodes");
+    case Mode::Off: return QStringLiteral("ranks");
+    case Mode::Auto: break;
+    }
+    return QStringLiteral("auto");
 }
 
 void TraceGraphItem::setLevel(const QString &level)
 {
-    const trace::GraphLevel l = level == QLatin1String("nodes") ? trace::GraphLevel::Nodes : trace::GraphLevel::Ranks;
-    if (l == m_options.level)
+    const Mode m = level == QLatin1String("nodes") ? Mode::On : level == QLatin1String("ranks") ? Mode::Off : Mode::Auto;
+    if (m == m_levelMode)
         return;
-    m_options.level = l;
+    m_levelMode = m;
+    emit displayChanged();
+    rebuild();
+}
+
+QString TraceGraphItem::effectiveLevel() const
+{
+    return m_options.level == trace::GraphLevel::Nodes ? QStringLiteral("nodes") : QStringLiteral("ranks");
+}
+
+QString TraceGraphItem::communicators() const
+{
+    switch (m_commMode) {
+    case Mode::On: return QStringLiteral("merged");
+    case Mode::Off: return QStringLiteral("separate");
+    case Mode::Auto: break;
+    }
+    return QStringLiteral("auto");
+}
+
+void TraceGraphItem::setCommunicators(const QString &mode)
+{
+    const Mode m = mode == QLatin1String("merged") ? Mode::On : mode == QLatin1String("separate") ? Mode::Off : Mode::Auto;
+    if (m == m_commMode)
+        return;
+    m_commMode = m;
     emit displayChanged();
     rebuild();
 }
@@ -269,6 +300,17 @@ void TraceGraphItem::rebuild()
     const qint64 from = windowStart();
     const qint64 to = windowEnd();
     const auto detail = m_model ? m_model->detail() : nullptr;
+    // Level: auto = ranks when zoomed in (single steps) or few ranks, else compute nodes (if
+    // there are several).
+    bool nodes = m_levelMode == Mode::On;
+    if (m_levelMode == Mode::Auto && overview && overview->rows.size() > kAutoRankLimit
+        && to - from > kAutoRanksWindowNs) {
+        QSet<QString> hosts;
+        for (const auto &row : overview->rows)
+            hosts.insert(row.node);
+        nodes = hosts.size() > 1;
+    }
+    m_options.level = nodes ? trace::GraphLevel::Nodes : trace::GraphLevel::Ranks;
     QString status;
     if (!overview || overview->rows.isEmpty()) {
         m_graph = CommGraph();
@@ -287,6 +329,11 @@ void TraceGraphItem::rebuild()
             status = QStringLiteral("loading");
     }
     setStatus(status);
+    const int comms = int(m_graph.nodes.size()) - m_graph.rankNodeCount;
+    m_commMerged = comms > 1
+        && (m_commMode == Mode::On || (m_commMode == Mode::Auto && comms > kAutoCommunicatorLimit));
+    if (m_commMerged)
+        m_graph = trace::mergeCommunicators(m_graph);
     m_unitPos = trace::layoutGraph(m_graph, m_layout);
     // Waiting of a rank (late sender): receiver of a P2P edge, caller of a collective.
     m_nodeWait = QVector<double>(m_graph.nodes.size(), 0.0);
@@ -396,7 +443,10 @@ QString TraceGraphItem::nodeLabel(int node) const
     switch (n.kind) {
     case GraphNode::Kind::Rank: return QString::number(n.rank);
     case GraphNode::Kind::Node: return n.node;
-    case GraphNode::Kind::Communicator: return tr("comm %1").arg(n.comm);
+    case GraphNode::Kind::Communicator:
+        if (n.comm == trace::kMergedCommunicators)
+            return tr("all communicators");
+        return tr("comm %1").arg(n.comm);
     }
     return {};
 }
@@ -641,6 +691,8 @@ void TraceGraphItem::paint(QPainter *painter)
         hint = tr("Loading messages…");
     else if (m_graph.edges.isEmpty())
         hint = tr("No communication in this window");
+    else if (windowEnd() - windowStart() >= kLongWindowNs)
+        hint = tr("Long window: the graph sums up many steps — zoom in to see single steps");
     if (!hint.isEmpty()) {
         painter->setPen(kHintColor);
         painter->drawText(QRectF(0, 4, width(), 18), Qt::AlignHCenter | Qt::AlignTop, hint);

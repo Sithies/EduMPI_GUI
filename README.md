@@ -184,7 +184,13 @@ Functions excluded in `scorep.filter` are not in the trace and cannot be shown.
   - A message counts when its send call starts in the window, a collective when the rank's call
     starts in it (as in *Show window in 3D/2D/Matrix*).
   - Many ranks: only the heaviest edges are drawn (100 / 500 / 2000 / all), the selected rank's edges
-    always. **Compute nodes** merges the ranks of each node into one graph node.
+    always (equal edges spread over the graph). **Nodes: Auto** (default) shows ranks while zoomed in
+    (window ≤ 50 ms) or for ≤ 64 ranks, otherwise compute nodes (each node's ranks merged into one
+    graph node); **Ranks** / **Compute nodes** fix the level.
+  - **Communicators: Auto** (default) merges all communicator nodes into one when there are more
+    than 8; **One node each** / **One node for all** fix it. Collectives can be hidden entirely.
+  - The graph is meant for short windows (single steps, topology such as ring or tree); from 1 s on
+    it hints to zoom in.
   - Click a rank to select it (also in the timeline, other ranks are dimmed); click an edge to see
     its bytes, messages and waiting time in **Trace Options**.
   - Long windows of large traces: the graph needs the window's messages; as in the timeline, zoom in

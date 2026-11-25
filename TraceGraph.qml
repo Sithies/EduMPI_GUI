@@ -74,6 +74,10 @@ Rectangle {
                         if (graph.edgeCount === 0)
                             return ""
                         var t = qsTr("%1 edges").arg(graph.edgeCount)
+                        if (graph.level === "auto" && graph.effectiveLevel === "nodes")
+                            t += qsTr(" · compute nodes (zoom in for ranks)")
+                        if (graph.communicatorsMerged)
+                            t += qsTr(" · communicators merged")
                         if (graph.shownEdgeCount < graph.edgeCount)
                             t += qsTr(" (heaviest %1 shown)").arg(graph.shownEdgeCount)
                         if (graph.maxWaitSeconds > 0)
@@ -171,7 +175,7 @@ Rectangle {
                 }
                 Row {
                     spacing: 4
-                    visible: graph.level === "ranks"
+                    visible: graph.effectiveLevel === "ranks"
                     Rectangle {
                         width: 12
                         height: 12
@@ -240,7 +244,8 @@ Rectangle {
             showCollectives: trace_graph_view.traceState ? trace_graph_view.traceState.graphCollectives : true
             directed: trace_graph_view.traceState ? trace_graph_view.traceState.graphDirected : true
             weight: trace_graph_view.traceState ? trace_graph_view.traceState.graphWeight : "bytes"
-            level: trace_graph_view.traceState ? trace_graph_view.traceState.graphLevel : "ranks"
+            level: trace_graph_view.traceState ? trace_graph_view.traceState.graphLevel : "auto"
+            communicators: trace_graph_view.traceState ? trace_graph_view.traceState.graphCommunicators : "auto"
             layout: trace_graph_view.traceState ? trace_graph_view.traceState.graphLayout : "circle"
             maxEdges: trace_graph_view.traceState ? trace_graph_view.traceState.graphMaxEdges : 500
 
