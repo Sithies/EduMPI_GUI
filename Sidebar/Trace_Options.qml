@@ -3,7 +3,8 @@ import QtQuick.Controls
 import QtQuick.Layouts 6.3
 
 // Sidebar panel of the trace window (Sidebar_Trace): display options of the Trace Timeline
-// view, details of the last clicked bar, trace info and "Show window in 3D/2D/Matrix" (the
+// and Trace Graph views, details of the last clicked bar / edge, trace info and "Show window
+// in 3D/2D/Matrix" (the
 // memory budget is set in Trace_Load.qml). Shares its state with TraceTimeline.qml through the window's
 // traceState object (Trace_Analysis.qml); uses no trace-only types.
 Rectangle {
@@ -14,6 +15,32 @@ Rectangle {
     color: "#383936"
 
     readonly property var bar: traceState ? traceState.lastBar : null
+    readonly property var edge: traceState ? traceState.lastEdge : null
+
+    function formatBytes(bytes) {
+        var units = ["B", "KB", "MB", "GB", "TB"]
+        var u = 0
+        while (bytes >= 1024 && u < units.length - 1) {
+            bytes /= 1024
+            ++u
+        }
+        return formatNumber(bytes, u === 0 ? 0 : 1) + " " + units[u]
+    }
+
+    function edgeLines() {
+        if (!edge)
+            return []
+        var lines = []
+        if (edge.kind === "collective")
+            lines.push(qsTr("Collectives: %1 → %2").arg(edge.from).arg(edge.to))
+        else
+            lines.push(qsTr("Messages: %1 %2 %3").arg(edge.from).arg(edge.directed ? "→" : "↔").arg(edge.to))
+        lines.push(qsTr("Count: %1").arg(edge.messages))
+        lines.push(qsTr("Bytes: %1 (%2)").arg(formatNumber(edge.bytes, 0)).arg(formatBytes(edge.bytes)))
+        lines.push(qsTr("Waiting (late sender): %1 ms").arg(formatNumber(edge.waitSeconds * 1000, 3)))
+        lines.push(qsTr("Window: %1 – %2 s").arg(formatNumber(edge.fromNs / 1e9, 6)).arg(formatNumber(edge.toNs / 1e9, 6)))
+        return lines
+    }
 
     function formatNumber(value, decimals) {
         return Number(value).toLocaleString(Qt.locale("en_US"), "f", decimals)
@@ -132,6 +159,102 @@ Rectangle {
                 color: "#999999"
                 text: trace_options.bar ? trace_options.barLines().join("\n")
                                         : qsTr("Click a bar in the timeline to see its details.")
+            }
+
+            Text {
+                text: qsTr("Trace Graph display:")
+                topPadding: 8
+                color: "#00FF00"
+            }
+            CheckBox {
+                text: qsTr("Below the timeline")
+                checked: traceState ? traceState.graphBelowTimeline : false
+                palette.base: "#333333"
+                palette.windowText: "#999999"
+                onToggled: traceState.graphBelowTimeline = checked
+            }
+            CheckBox {
+                text: qsTr("P2P messages")
+                checked: traceState ? traceState.graphP2P : true
+                palette.base: "#333333"
+                palette.windowText: "#999999"
+                onToggled: traceState.graphP2P = checked
+            }
+            CheckBox {
+                text: qsTr("Collectives (star)")
+                checked: traceState ? traceState.graphCollectives : true
+                palette.base: "#333333"
+                palette.windowText: "#999999"
+                onToggled: traceState.graphCollectives = checked
+            }
+            CheckBox {
+                text: qsTr("Direction (arrows)")
+                checked: traceState ? traceState.graphDirected : true
+                palette.base: "#333333"
+                palette.windowText: "#999999"
+                onToggled: traceState.graphDirected = checked
+            }
+            GridLayout {
+                columns: 2
+                Layout.fillWidth: true
+                columnSpacing: 6
+                Text {
+                    text: qsTr("Edge width:")
+                    color: "#999999"
+                }
+                ComboBox {
+                    Layout.fillWidth: true
+                    readonly property var values: ["bytes", "messages", "wait"]
+                    model: [qsTr("Bytes"), qsTr("Messages"), qsTr("Waiting time")]
+                    currentIndex: traceState ? Math.max(0, values.indexOf(traceState.graphWeight)) : 0
+                    onActivated: (index) => traceState.graphWeight = values[index]
+                }
+                Text {
+                    text: qsTr("Nodes:")
+                    color: "#999999"
+                }
+                ComboBox {
+                    Layout.fillWidth: true
+                    readonly property var values: ["ranks", "nodes"]
+                    model: [qsTr("Ranks"), qsTr("Compute nodes")]
+                    currentIndex: traceState ? Math.max(0, values.indexOf(traceState.graphLevel)) : 0
+                    onActivated: (index) => traceState.graphLevel = values[index]
+                }
+                Text {
+                    text: qsTr("Layout:")
+                    color: "#999999"
+                }
+                ComboBox {
+                    Layout.fillWidth: true
+                    readonly property var values: ["circle", "grid"]
+                    model: [qsTr("Circle"), qsTr("Grid")]
+                    currentIndex: traceState ? Math.max(0, values.indexOf(traceState.graphLayout)) : 0
+                    onActivated: (index) => traceState.graphLayout = values[index]
+                }
+                Text {
+                    text: qsTr("Edges:")
+                    color: "#999999"
+                }
+                ComboBox {
+                    Layout.fillWidth: true
+                    readonly property var values: [100, 500, 2000, 0]
+                    model: [qsTr("Heaviest 100"), qsTr("Heaviest 500"), qsTr("Heaviest 2000"), qsTr("All")]
+                    currentIndex: traceState ? Math.max(0, values.indexOf(traceState.graphMaxEdges)) : 1
+                    onActivated: (index) => traceState.graphMaxEdges = values[index]
+                }
+            }
+
+            Text {
+                text: qsTr("Selected edge:")
+                topPadding: 8
+                color: "#00FF00"
+            }
+            Text {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                color: "#999999"
+                text: trace_options.edge ? trace_options.edgeLines().join("\n")
+                                         : qsTr("Click an edge in the Trace Graph to see its details.")
             }
 
             Text {

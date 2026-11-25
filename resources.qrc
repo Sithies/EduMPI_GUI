@@ -20,6 +20,7 @@
         <file>MPI_Run_Analysis.qml</file>
         <file>Trace_Analysis.qml</file>
         <file>TraceTimeline.qml</file>
+        <file>TraceGraph.qml</file>
         <file>TraceOverviewBar.qml</file>
         <file>Application_Start_OpenMP.qml</file>
         <file>Detailed_Information_Bar.qml</file>

@@ -188,11 +188,13 @@ if(EDUMPI_TRACE_ENABLED)
     # Trace timeline QML types (QML_ELEMENT, module GUI_Cluster); absent without trace support.
     target_sources(appGUI_Cluster PRIVATE
         trace_timeline_item.h trace_timeline_item.cpp
-        trace_overview_item.h trace_overview_item.cpp)
-    # Views using those types; resources.qrc serves them as /TraceTimeline.qml and
-    # /TraceOverviewBar.qml, loaded only when a timeline exists.
+        trace_overview_item.h trace_overview_item.cpp
+        trace_graph_item.h trace_graph_item.cpp)
+    # Views using those types; resources.qrc serves them as /TraceTimeline.qml,
+    # /TraceGraph.qml and /TraceOverviewBar.qml, loaded only when a timeline exists.
     qt_target_qml_sources(appGUI_Cluster QML_FILES
         TraceTimeline.qml
+        TraceGraph.qml
         TraceOverviewBar.qml)
 endif()
 

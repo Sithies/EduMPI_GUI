@@ -19,6 +19,7 @@ edumpi_add_trace_test(otf2_reader
 edumpi_add_trace_test(data_source otf2_fixture.h otf2_fixture.cpp)
 edumpi_add_trace_test(timeline_builder otf2_fixture.h otf2_fixture.cpp)
 edumpi_add_trace_test(timeline_view_math otf2_fixture.h otf2_fixture.cpp)
+edumpi_add_trace_test(graph_model otf2_fixture.h otf2_fixture.cpp)
 
 # Cluster_Architecture fed by Trace_Data_Source: compiles the app classes it needs
 # (Cluster_Architecture pulls in Database_Thread for the DB path) into the test.
@@ -39,7 +40,16 @@ target_compile_definitions(tst_trace_cluster_architecture PRIVATE EDUMPI_TRACE=1
 edumpi_add_trace_test(timeline_item
     otf2_fixture.h otf2_fixture.cpp
     ${PROJECT_SOURCE_DIR}/trace_timeline_item.h ${PROJECT_SOURCE_DIR}/trace_timeline_item.cpp
-    ${PROJECT_SOURCE_DIR}/trace_overview_item.h ${PROJECT_SOURCE_DIR}/trace_overview_item.cpp)
+    ${PROJECT_SOURCE_DIR}/trace_overview_item.h ${PROJECT_SOURCE_DIR}/trace_overview_item.cpp
+    ${PROJECT_SOURCE_DIR}/trace_graph_item.h ${PROJECT_SOURCE_DIR}/trace_graph_item.cpp)
 find_package(Qt6 REQUIRED COMPONENTS Quick)
 target_link_libraries(tst_trace_timeline_item PRIVATE Qt6::Gui Qt6::Quick)
 set_tests_properties(trace_timeline_item PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Trace Graph item rendered into a QImage, and TraceGraph.qml / the graph below the timeline.
+edumpi_add_trace_test(graph_item
+    otf2_fixture.h otf2_fixture.cpp
+    ${PROJECT_SOURCE_DIR}/trace_timeline_item.h ${PROJECT_SOURCE_DIR}/trace_timeline_item.cpp
+    ${PROJECT_SOURCE_DIR}/trace_graph_item.h ${PROJECT_SOURCE_DIR}/trace_graph_item.cpp)
+target_link_libraries(tst_trace_graph_item PRIVATE Qt6::Gui Qt6::Quick)
+set_tests_properties(trace_graph_item PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

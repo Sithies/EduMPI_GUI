@@ -16,6 +16,7 @@
 #include "otf2_trace_reader.h"
 #include "timeline_builder.h"
 #include "trace_aggregator.h"
+#include "trace_graph_item.h"
 #include "trace_overview_item.h"
 #include "trace_timeline_item.h"
 #include "trace_timeline_model.h"
@@ -316,6 +317,7 @@ private slots:
         const QString qmlFile = QFINDTESTDATA("../TraceTimeline.qml");
         QVERIFY2(!qmlFile.isEmpty(), "TraceTimeline.qml not found");
         qmlRegisterType<TraceTimelineItem>("GUI_Cluster", 1, 0, "TraceTimelineItem");
+        qmlRegisterType<TraceGraphItem>("GUI_Cluster", 1, 0, "TraceGraphItem"); // TraceGraph below the timeline
         TraceTimelineModel model;
         model.addSnapshot({build(m_ring4)});
         QQmlEngine engine;
@@ -353,6 +355,7 @@ private slots:
         const QString qmlFile = QFINDTESTDATA("../TraceTimeline.qml");
         QVERIFY2(!qmlFile.isEmpty(), "TraceTimeline.qml not found");
         qmlRegisterType<TraceTimelineItem>("GUI_Cluster", 1, 0, "TraceTimelineItem");
+        qmlRegisterType<TraceGraphItem>("GUI_Cluster", 1, 0, "TraceGraphItem"); // TraceGraph below the timeline
         TraceTimelineModel model;
         model.addSnapshot({build(m_ring4)});
         QQmlEngine engine;

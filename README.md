@@ -31,6 +31,7 @@ and to **visualize communication patterns, performance metrics, and wait states*
   - Replay it in the 2D, 3D and matrix views in a separate trace window  
   - **Trace Timeline**: one row per rank, every MPI call as a bar, zoom from the whole run down to 10 µs  
   - Late-sender wait times, message arrows and per-call details  
+  - **Trace Graph**: who communicates with whom in the current window, ranks as nodes, messages as edges  
 
 - **Educational Focus**
   - Helps students understand MPI behavior through visual cues  
@@ -64,7 +65,7 @@ OTF2 reader (trace/otf2_trace_reader)
                                                ▼
                    Trace_Data_Source (own thread, memory budget)
                         ├──► 2D / 3D / matrix   (same signals as the database)
-                        └──► Trace Timeline
+                        └──► Trace Timeline / Trace Graph
 ```
 
 Everything up to `Trace_Data_Source` lives in the library `trace/` (`edumpi_trace`), which does not
@@ -147,7 +148,7 @@ Functions excluded in `scorep.filter` are not in the trace and cannot be shown.
 
 ### Trace window
 - **Views**: 2D, 3D and matrix work as for a database run, with the bottom bar replaying second by
-  second. **Trace Timeline** is only available here.
+  second. **Trace Timeline** and **Trace Graph** are only available here.
 - **Trace Timeline**: one row per rank, grouped by node, one bar per MPI call.
 
   | Colour | Meaning |
@@ -171,9 +172,26 @@ Functions excluded in `scorep.filter` are not in the trace and cannot be shown.
   - **Details**: click a bar to see function, rank, start, duration, wait time, partner, bytes, tag,
     communicator and call path in **Trace Options**. For `MPI_Wait*`, *Completes* names the
     nonblocking receive it completes, e.g. `MPI_Irecv from rank 3`.
-- **Trace Options** (sidebar of the trace window): display switches (arrows, all arrows, highlight
-  waiting, phases), details of the clicked bar, trace info (name, path, ranks, duration, unmatched messages),
-  and **Show window in 3D/2D/Matrix** to hand the visible time window to the other views.
+- **Trace Graph**: communication graph of the current time window (the timeline's window; the whole
+  run until one is chosen). Its own view under **Views**, or below the timeline (**Graph** button in
+  the timeline toolbar, divider movable).
+  - Ranks are nodes on a circle (or a grid), grouped and coloured by compute node; P2P messages are
+    edges (arrows from sender to receiver), collectives dashed edges to one diamond per communicator.
+  - Edge width: bytes (default), number of messages or waiting time; edge colour: waiting time of the
+    receiver (late sender), grey = no waiting, red = most waiting in the window.
+  - A message counts when its send call starts in the window, a collective when the rank's call
+    starts in it (as in *Show window in 3D/2D/Matrix*).
+  - Many ranks: only the heaviest edges are drawn (100 / 500 / 2000 / all), the selected rank's edges
+    always. **Compute nodes** merges the ranks of each node into one graph node.
+  - Click a rank to select it (also in the timeline, other ranks are dimmed); click an edge to see
+    its bytes, messages and waiting time in **Trace Options**.
+  - Long windows of large traces: the graph needs the window's messages; as in the timeline, zoom in
+    until they can be loaded within the memory budget.
+- **Trace Options** (sidebar of the trace window): display switches of the timeline (arrows, all arrows,
+  highlight waiting, phases) and of the graph (below the timeline, P2P, collectives, direction, edge
+  width, ranks / compute nodes, layout, number of edges), details of the clicked bar and edge, trace
+  info (name, path, ranks, duration, unmatched messages), and **Show window in 3D/2D/Matrix** to hand
+  the visible time window to the other views.
 
 ### Memory budget
 The timeline never uses more memory than its budget. By default this is half of the free memory. Set

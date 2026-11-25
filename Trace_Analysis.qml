@@ -7,7 +7,7 @@ import "."
 
 // Trace window: same layout and window properties as MPI_Run_Analysis.qml (Bottom_Bar,
 // the sidebar and the views read them by name), fed from an OTF2 trace instead of the
-// database. Sidebar_Trace adds the Trace Timeline view and the Trace Options.
+// database. Sidebar_Trace adds the Trace Timeline and Trace Graph views and the Trace Options.
 Window {
     id: run_analysis_win
     width: 1440
@@ -38,8 +38,9 @@ Window {
     // "Window: … s" after "Show window in 3D/2D/Matrix"; cleared when the bottom bar moves.
     property string traceWindowNote: ""
 
-    // State of the Trace Timeline view shared by TraceTimeline.qml, TraceOverviewBar.qml and
-    // Sidebar/Trace_Options.qml (plain QML, no trace-only types).
+    // State of the Trace Timeline and Trace Graph views shared by TraceTimeline.qml,
+    // TraceGraph.qml, TraceOverviewBar.qml and Sidebar/Trace_Options.qml (plain QML, no
+    // trace-only types).
     property QtObject traceState: QtObject {
         property real viewStartNs: 0
         property real viewEndNs: 0
@@ -50,6 +51,16 @@ Window {
         property bool showPhases: true
         property string phaseLevel: "outer"
         property var lastBar: null
+        // Trace Graph: shown below the timeline, display options, last clicked edge.
+        property bool graphBelowTimeline: false
+        property bool graphP2P: true
+        property bool graphCollectives: true
+        property bool graphDirected: true
+        property string graphWeight: "bytes"     // "bytes", "messages" or "wait"
+        property string graphLevel: "ranks"      // "ranks" or "nodes"
+        property string graphLayout: "circle"    // "circle" or "grid"
+        property int graphMaxEdges: 500          // heaviest edges drawn, 0 = all
+        property var lastEdge: null
         property string name: ""
         // Loaded file or folder as a local path (the file dialog yields file:// URLs).
         readonly property string path: decodeURIComponent(run_analysis_win.tracePath.replace(/^file:\/\//, ""))
@@ -63,6 +74,8 @@ Window {
     property bool p2p: true
     property bool collective: true
     property string selected_screen: "Cores3D"
+    // Trace Timeline / Trace Graph: the overview bar replaces the bottom bar.
+    readonly property bool traceView: selected_screen === "TraceTimeline" || selected_screen === "TraceGraph"
     property string option: "send/recv ratio (per proc)"
     property color gradient1: "green"
     property color gradient2: "red"
@@ -134,10 +147,10 @@ Window {
                 busyindicator.visible = false
                 // A view the user picked while loading is already on the stack: replace it
                 // instead of pushing a second one (a hidden page would keep its connections).
-                var pages = {TraceTimeline: "/TraceTimeline.qml", Cores2D: "/Cores2D.qml",
-                             CoresMatrix: "/CoresCommunicationMatrix.qml"}
+                var pages = {TraceTimeline: "/TraceTimeline.qml", TraceGraph: "/TraceGraph.qml",
+                             Cores2D: "/Cores2D.qml", CoresMatrix: "/CoresCommunicationMatrix.qml"}
                 var page = pages[run_analysis_win.selected_screen] || "/Cores3D.qml"
-                var props = run_analysis_win.selected_screen === "TraceTimeline"
+                var props = run_analysis_win.traceView
                         ? {listNodes: nodesList, traceState: run_analysis_win.traceState}
                         : {listNodes: nodesList}
                 if(ascreen.depth > 0){
@@ -234,16 +247,16 @@ Window {
             id: bottom_main
             live: false
             anchors.bottom: parent.bottom
-            // Replaced by the overview while the Trace Timeline view is shown (kept alive, so
-            // switching back restores it unchanged).
-            visible: run_analysis_win.selected_screen !== "TraceTimeline"
+            // Replaced by the overview while the Trace Timeline or Trace Graph view is shown (kept
+            // alive, so switching back restores it unchanged).
+            visible: !run_analysis_win.traceView
         }
-        // The bar (and its playback) is hidden in the Trace Timeline view: pause there, so it
-        // does not keep replacing the 3D/2D/Matrix data in the background.
+        // The bar (and its playback) is hidden in the Trace Timeline / Trace Graph view: pause
+        // there, so it does not keep replacing the 3D/2D/Matrix data in the background.
         Connections {
             target: run_analysis_win
             function onSelected_screenChanged(){
-                if(run_analysis_win.selected_screen === "TraceTimeline"){
+                if(run_analysis_win.traceView){
                     bottom_main.pausePlayback()
                 }
             }
@@ -264,7 +277,7 @@ Window {
             y: bottom_main.y
             width: bottom_main.width
             height: bottom_main.height
-            active: run_analysis_win.selected_screen === "TraceTimeline"
+            active: run_analysis_win.traceView
                     && nodesList !== null && nodesList.timeline !== null
             visible: active
             source: "/TraceOverviewBar.qml"

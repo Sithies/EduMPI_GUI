@@ -8,6 +8,8 @@ import GUI_Cluster 1.0
 // the window's Cluster_Architecture has a timeline, i.e. only in trace builds.
 // View range, display options and the last clicked bar are kept in the window's traceState
 // (Trace_Analysis.qml), shared with Trace_Options.qml and the overview bar.
+// With traceState.graphBelowTimeline the Trace Graph (TraceGraph.qml) of the same window is shown
+// below the timeline (SplitView, divider movable).
 Rectangle {
     id: trace_timeline_view
     color: "#ffffff"
@@ -60,6 +62,11 @@ Rectangle {
         function onViewRequested(startNs, endNs) {
             timeline.setView(startNs, endNs)
         }
+        // A rank picked in the graph below.
+        function onSelectedRankChanged() {
+            if (trace_timeline_view.restored && timeline.selectedRank !== trace_timeline_view.traceState.selectedRank)
+                timeline.selectedRank = trace_timeline_view.traceState.selectedRank
+        }
     }
 
     ColumnLayout {
@@ -95,6 +102,15 @@ Rectangle {
                 Button {
                     text: qsTr("Full run")
                     onClicked: timeline.showFullRun()
+                }
+                Button {
+                    text: qsTr("Graph")
+                    checkable: true
+                    enabled: trace_timeline_view.traceState !== null
+                    checked: trace_timeline_view.traceState ? trace_timeline_view.traceState.graphBelowTimeline : false
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Show the communication graph of this window below the timeline")
+                    onToggled: trace_timeline_view.traceState.graphBelowTimeline = checked
                 }
                 Text {
                     Layout.fillWidth: true
@@ -185,142 +201,165 @@ Rectangle {
             }
         }
 
-        Item {
+        SplitView {
+            id: split
             Layout.fillWidth: true
             Layout.fillHeight: true
+            orientation: Qt.Vertical
 
-            TraceTimelineItem {
-                id: timeline
-                anchors.left: parent.left
-                anchors.top: parent.top
-                anchors.bottom: parent.bottom
-                anchors.right: vbar.left
-                model: trace_timeline_view.timelineModel
-                showArrows: trace_timeline_view.traceState ? trace_timeline_view.traceState.showArrows : true
-                allArrows: trace_timeline_view.traceState ? trace_timeline_view.traceState.allArrows : false
-                highlightWait: trace_timeline_view.traceState ? trace_timeline_view.traceState.highlightWait : true
-                showPhases: trace_timeline_view.traceState ? trace_timeline_view.traceState.showPhases : true
-                phaseLevel: trace_timeline_view.traceState ? trace_timeline_view.traceState.phaseLevel : "outer"
+            Item {
+                SplitView.fillHeight: true
+                SplitView.minimumHeight: 80
 
-                onViewChanged: trace_timeline_view.syncState()
-                // Rows stay within [0, max(0, contentHeight − (height − 22))].
-                onContentYChanged: {
-                    var y = trace_timeline_view.clampContentY(contentY)
-                    if (y !== contentY)
-                        contentY = y
-                }
-                onSelectedRankChanged: {
-                    if (trace_timeline_view.traceState && trace_timeline_view.restored)
-                        trace_timeline_view.traceState.selectedRank = selectedRank
-                }
-                onBarClicked: (details) => {
-                    if (trace_timeline_view.traceState)
-                        trace_timeline_view.traceState.lastBar = details
+                TraceTimelineItem {
+                    id: timeline
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.right: vbar.left
+                    model: trace_timeline_view.timelineModel
+                    showArrows: trace_timeline_view.traceState ? trace_timeline_view.traceState.showArrows : true
+                    allArrows: trace_timeline_view.traceState ? trace_timeline_view.traceState.allArrows : false
+                    highlightWait: trace_timeline_view.traceState ? trace_timeline_view.traceState.highlightWait : true
+                    showPhases: trace_timeline_view.traceState ? trace_timeline_view.traceState.showPhases : true
+                    phaseLevel: trace_timeline_view.traceState ? trace_timeline_view.traceState.phaseLevel : "outer"
+
+                    onViewChanged: trace_timeline_view.syncState()
+                    // Rows stay within [0, max(0, contentHeight − (height − 22))].
+                    onContentYChanged: {
+                        var y = trace_timeline_view.clampContentY(contentY)
+                        if (y !== contentY)
+                            contentY = y
+                    }
+                    onSelectedRankChanged: {
+                        if (trace_timeline_view.traceState && trace_timeline_view.restored)
+                            trace_timeline_view.traceState.selectedRank = selectedRank
+                    }
+                    onBarClicked: (details) => {
+                        if (trace_timeline_view.traceState)
+                            trace_timeline_view.traceState.lastBar = details
+                    }
+
+                    // Wheel / two-finger swipe up-down: zoom around the pointer; swipe sideways (or a
+                    // tilt wheel) and Shift + wheel: move in time; Alt + wheel: scroll the rows.
+                    // WheelHandler takes only mice and only one direction by default, so trackpads
+                    // (macOS) and both directions are set explicitly. macOS turns Shift + mouse wheel
+                    // into a horizontal wheel, Linux keeps it vertical: both move in time.
+                    WheelHandler {
+                        target: null
+                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                        acceptedModifiers: Qt.NoModifier
+                        orientation: Qt.Vertical
+                        onWheel: (event) => {
+                            if (Math.abs(event.angleDelta.y) >= Math.abs(event.angleDelta.x) && event.angleDelta.y !== 0)
+                                timeline.zoomAt(event.x, Math.pow(0.85, event.angleDelta.y / 120))
+                        }
+                    }
+                    WheelHandler {
+                        target: null
+                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                        acceptedModifiers: Qt.NoModifier
+                        orientation: Qt.Horizontal
+                        onWheel: (event) => {
+                            var dx = event.angleDelta.x
+                            if (Math.abs(dx) > Math.abs(event.angleDelta.y))
+                                timeline.panBy(-(event.pixelDelta.x !== 0 ? event.pixelDelta.x : dx / 3))
+                        }
+                    }
+                    WheelHandler {
+                        target: null
+                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                        acceptedModifiers: Qt.ShiftModifier
+                        orientation: Qt.Vertical
+                        onWheel: (event) => timeline.panBy(-event.angleDelta.y / 3)
+                    }
+                    WheelHandler {
+                        target: null
+                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                        acceptedModifiers: Qt.ShiftModifier
+                        orientation: Qt.Horizontal
+                        onWheel: (event) => timeline.panBy(-event.angleDelta.x / 3)
+                    }
+                    WheelHandler {
+                        target: null
+                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                        acceptedModifiers: Qt.AltModifier
+                        orientation: Qt.Vertical
+                        onWheel: (event) => trace_timeline_view.scrollRows(event.angleDelta.y)
+                    }
+                    WheelHandler {
+                        target: null
+                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                        acceptedModifiers: Qt.AltModifier
+                        orientation: Qt.Horizontal
+                        onWheel: (event) => trace_timeline_view.scrollRows(event.angleDelta.x)
+                    }
+                    // Drag: pan in time (horizontal) and scroll the rows (vertical).
+                    DragHandler {
+                        id: drag
+                        target: null
+                        property real lastX: 0
+                        property real lastY: 0
+                        onActiveChanged: {
+                            lastX = 0
+                            lastY = 0
+                        }
+                        onActiveTranslationChanged: {
+                            var dx = activeTranslation.x - lastX
+                            var dy = activeTranslation.y - lastY
+                            lastX = activeTranslation.x
+                            lastY = activeTranslation.y
+                            if (dx !== 0)
+                                timeline.panBy(-dx)
+                            if (dy !== 0)
+                                timeline.contentY = trace_timeline_view.clampContentY(timeline.contentY - dy)
+                        }
+                    }
+                    // Click: label selects the rank, bar / phase band shows details.
+                    TapHandler {
+                        onTapped: (eventPoint, button) => timeline.clickAt(eventPoint.position.x, eventPoint.position.y)
+                    }
                 }
 
-                // Wheel / two-finger swipe up-down: zoom around the pointer; swipe sideways (or a
-                // tilt wheel) and Shift + wheel: move in time; Alt + wheel: scroll the rows.
-                // WheelHandler takes only mice and only one direction by default, so trackpads
-                // (macOS) and both directions are set explicitly. macOS turns Shift + mouse wheel
-                // into a horizontal wheel, Linux keeps it vertical: both move in time.
-                WheelHandler {
-                    target: null
-                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                    acceptedModifiers: Qt.NoModifier
+                ScrollBar {
+                    id: vbar
                     orientation: Qt.Vertical
-                    onWheel: (event) => {
-                        if (Math.abs(event.angleDelta.y) >= Math.abs(event.angleDelta.x) && event.angleDelta.y !== 0)
-                            timeline.zoomAt(event.x, Math.pow(0.85, event.angleDelta.y / 120))
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.topMargin: 22
+                    anchors.bottom: parent.bottom
+                    policy: ScrollBar.AlwaysOn
+                    size: timeline.contentHeight > trace_timeline_view.visibleRowsHeight
+                          ? trace_timeline_view.visibleRowsHeight / timeline.contentHeight : 1.0
+                    position: timeline.contentHeight > 0 ? timeline.contentY / timeline.contentHeight : 0
+                    onPositionChanged: {
+                        if (pressed)
+                            timeline.contentY = trace_timeline_view.clampContentY(position * timeline.contentHeight)
                     }
                 }
-                WheelHandler {
-                    target: null
-                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                    acceptedModifiers: Qt.NoModifier
-                    orientation: Qt.Horizontal
-                    onWheel: (event) => {
-                        var dx = event.angleDelta.x
-                        if (Math.abs(dx) > Math.abs(event.angleDelta.y))
-                            timeline.panBy(-(event.pixelDelta.x !== 0 ? event.pixelDelta.x : dx / 3))
-                    }
-                }
-                WheelHandler {
-                    target: null
-                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                    acceptedModifiers: Qt.ShiftModifier
-                    orientation: Qt.Vertical
-                    onWheel: (event) => timeline.panBy(-event.angleDelta.y / 3)
-                }
-                WheelHandler {
-                    target: null
-                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                    acceptedModifiers: Qt.ShiftModifier
-                    orientation: Qt.Horizontal
-                    onWheel: (event) => timeline.panBy(-event.angleDelta.x / 3)
-                }
-                WheelHandler {
-                    target: null
-                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                    acceptedModifiers: Qt.AltModifier
-                    orientation: Qt.Vertical
-                    onWheel: (event) => trace_timeline_view.scrollRows(event.angleDelta.y)
-                }
-                WheelHandler {
-                    target: null
-                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                    acceptedModifiers: Qt.AltModifier
-                    orientation: Qt.Horizontal
-                    onWheel: (event) => trace_timeline_view.scrollRows(event.angleDelta.x)
-                }
-                // Drag: pan in time (horizontal) and scroll the rows (vertical).
-                DragHandler {
-                    id: drag
-                    target: null
-                    property real lastX: 0
-                    property real lastY: 0
-                    onActiveChanged: {
-                        lastX = 0
-                        lastY = 0
-                    }
-                    onActiveTranslationChanged: {
-                        var dx = activeTranslation.x - lastX
-                        var dy = activeTranslation.y - lastY
-                        lastX = activeTranslation.x
-                        lastY = activeTranslation.y
-                        if (dx !== 0)
-                            timeline.panBy(-dx)
-                        if (dy !== 0)
-                            timeline.contentY = trace_timeline_view.clampContentY(timeline.contentY - dy)
-                    }
-                }
-                // Click: label selects the rank, bar / phase band shows details.
-                TapHandler {
-                    onTapped: (eventPoint, button) => timeline.clickAt(eventPoint.position.x, eventPoint.position.y)
+
+                Text {
+                    anchors.centerIn: timeline
+                    visible: trace_timeline_view.timelineModel === null || trace_timeline_view.timelineModel.rankCount === 0
+                    text: qsTr("Loading trace timeline…")
+                    color: "#374151"
                 }
             }
 
-            ScrollBar {
-                id: vbar
-                orientation: Qt.Vertical
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.topMargin: 22
-                anchors.bottom: parent.bottom
-                policy: ScrollBar.AlwaysOn
-                size: timeline.contentHeight > trace_timeline_view.visibleRowsHeight
-                      ? trace_timeline_view.visibleRowsHeight / timeline.contentHeight : 1.0
-                position: timeline.contentHeight > 0 ? timeline.contentY / timeline.contentHeight : 0
-                onPositionChanged: {
-                    if (pressed)
-                        timeline.contentY = trace_timeline_view.clampContentY(position * timeline.contentHeight)
+            // Trace Graph of the same window (created only while shown).
+            Loader {
+                id: graph_loader
+                active: trace_timeline_view.traceState !== null && trace_timeline_view.traceState.graphBelowTimeline
+                visible: active
+                SplitView.preferredHeight: split.height * 0.45
+                SplitView.minimumHeight: 120
+                sourceComponent: Component {
+                    TraceGraph {
+                        listNodes: trace_timeline_view.listNodes
+                        traceState: trace_timeline_view.traceState
+                        embedded: true
+                    }
                 }
-            }
-
-            Text {
-                anchors.centerIn: timeline
-                visible: trace_timeline_view.timelineModel === null || trace_timeline_view.timelineModel.rankCount === 0
-                text: qsTr("Loading trace timeline…")
-                color: "#374151"
             }
         }
     }
