@@ -11,7 +11,14 @@
 #include <otf2/otf2.h>
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdarg>
+#include <deque>
+#include <limits>
+#include <optional>
+#include <thread>
+#include <variant>
+#include <vector>
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -283,6 +290,11 @@ struct CommInfo {
     QVector<int> members;     // world ranks, indexed by comm-local rank
 };
 
+} // namespace
+
+// Reader state kept in checkpoints (ReadCheckpoint), hence outside the anonymous namespace.
+namespace reader_state {
+
 // One open MPI region of a location plus the records that belong to it.
 struct OpenRegion {
     OTF2_RegionRef region;
@@ -301,9 +313,50 @@ struct OpenUserRegion {
 
 struct LocationState {
     int rank = -1;
+    uint64_t delivered = 0; // events of the location delivered so far (all event types)
     QVector<OpenRegion> stack;
     QVector<OpenUserRegion> userStack;
 };
+
+} // namespace reader_state
+
+struct ReadCheckpoint {
+    qint64 ns = 0;
+    OTF2_TimeStamp raw = 0;                      // timestamp of the first event not yet read
+    QHash<OTF2_LocationRef, uint64_t> positions; // OTF2_EvtReader_Seek target per location
+    QHash<OTF2_LocationRef, reader_state::LocationState> locations;
+    qint64 maxNs = 0;
+    std::shared_ptr<const MatchState> match;
+};
+
+int TraceIndex::indexBefore(qint64 ns) const
+{
+    return int(std::upper_bound(m_times.cbegin(), m_times.cend(), ns) - m_times.cbegin()) - 1;
+}
+
+std::shared_ptr<const ReadCheckpoint> TraceIndex::before(qint64 ns) const
+{
+    const int i = indexBefore(ns);
+    return i >= 0 ? m_points[i] : nullptr;
+}
+
+void TraceIndex::clear()
+{
+    m_times.clear();
+    m_points.clear();
+}
+
+void TraceIndex::append(qint64 ns, std::shared_ptr<const ReadCheckpoint> checkpoint)
+{
+    m_times.append(ns);
+    m_points.append(std::move(checkpoint));
+}
+
+namespace {
+
+using reader_state::LocationState;
+using reader_state::OpenRegion;
+using reader_state::OpenUserRegion;
 
 QString nodeNameOf(const GlobalDefs &d, OTF2_SystemTreeNodeRef parent)
 {
@@ -419,6 +472,27 @@ public:
 
     void addLocation(OTF2_LocationRef loc, int rank) { m_locations[loc].rank = rank; }
     bool cancelled() const { return m_cancel && m_cancel->load(std::memory_order_relaxed); }
+
+    // Early stop (TraceSink::stopAfterNs); stopAfterNs < 0 = never.
+    void setStopAfter(qint64 stopAfterNs) { m_stopAfter = stopAfterNs; }
+    bool stopped() const { return m_stopped; }
+    // Called for every event before it is translated: true (the read ends here, the event is
+    // not used) once past the stop time with no MPI call entered up to it still open and no
+    // partner awaited by the sink. Checked every kStopCheckEvents events past the stop time.
+    bool shouldStop(qint64 ns)
+    {
+        if (m_stopAfter < 0 || ns <= m_stopAfter || ++m_sinceStopCheck < kStopCheckEvents)
+            return false;
+        m_sinceStopCheck = 0;
+        for (const LocationState &st : std::as_const(m_locations))
+            for (const OpenRegion &r : st.stack)
+                if (r.enterNs <= m_stopAfter)
+                    return false;
+        if (m_sink.waitingForPartners())
+            return false;
+        m_stopped = true;
+        return true;
+    }
     qint64 maxEventNs() const { return m_maxNs; }
 
     qint64 durationNs(uint64_t ticks) const
@@ -431,12 +505,55 @@ public:
              + qint64(static_cast<long double>(rem) * kNsPerSecond / m_resolution);
     }
 
-    qint64 timeNs(OTF2_TimeStamp t)
+    qint64 nsOf(OTF2_TimeStamp t) const { return t <= m_offset ? 0 : durationNs(t - m_offset); }
+    void noteTime(qint64 ns) { m_maxNs = std::max(m_maxNs, ns); }
+
+    // Index building: checkpoints at count - 1 evenly spaced times over lengthNs.
+    void setIndex(TraceIndex *index, const QList<OTF2_LocationRef> &locations, int count, qint64 lengthNs)
     {
-        const qint64 ns = t <= m_offset ? 0 : durationNs(t - m_offset);
-        m_maxNs = std::max(m_maxNs, ns);
-        return ns;
+        m_index = index;
+        m_indexLocations = locations;
+        m_cpTimes.clear();
+        m_nextCp = 0;
+        if (!index || count < 2 || lengthNs <= 0)
+            return;
+        for (int k = 1; k < count; ++k)
+            m_cpTimes.append(qint64(double(lengthNs) * k / count));
     }
+    // Called for every event before it is translated (its time ns / raw).
+    void maybeCheckpoint(OTF2_LocationRef current, qint64 ns, OTF2_TimeStamp raw)
+    {
+        if (m_nextCp >= m_cpTimes.size() || ns < m_cpTimes[m_nextCp])
+            return;
+        while (m_nextCp < m_cpTimes.size() && ns >= m_cpTimes[m_nextCp])
+            ++m_nextCp;
+        auto cp = std::make_shared<ReadCheckpoint>();
+        cp->ns = ns;
+        cp->raw = raw;
+        // Event positions start at 1 and Seek(p) makes p the next event read. Resume every
+        // location at its first event not yet delivered (the event being delivered now is not
+        // counted yet). OTF2_EvtReader_GetPos is no help here: the local readers read ahead by
+        // a varying number of events.
+        Q_UNUSED(current);
+        cp->positions.reserve(m_indexLocations.size());
+        for (OTF2_LocationRef loc : std::as_const(m_indexLocations))
+            cp->positions.insert(loc, m_locations.value(loc).delivered + 1);
+        cp->locations = m_locations;
+        cp->maxNs = m_maxNs;
+        m_sink.saveMatchStateInto(&cp->match);
+        m_index->append(ns, std::move(cp));
+    }
+
+    // Resuming at a checkpoint: its reader state and the sink's matching state; events before
+    // its time (only the last event of locations already exhausted there) are skipped.
+    void resume(const ReadCheckpoint &cp)
+    {
+        m_locations = cp.locations;
+        m_maxNs = cp.maxNs;
+        m_resumeRaw = cp.raw;
+        m_sink.restoreMatchState(cp.match);
+    }
+    bool beforeResume(OTF2_TimeStamp t) const { return t < m_resumeRaw; }
 
     LocationState *location(OTF2_LocationRef loc)
     {
@@ -537,6 +654,14 @@ public:
     // Regions still open at the end of the trace are closed at endNs.
     void closeAll(qint64 endNs)
     {
+        if (m_stopped) {
+            // Regions entered after the stop time are not needed (and their real end unknown).
+            for (LocationState &st : m_locations) {
+                st.stack.clear();
+                while (!st.userStack.isEmpty() && st.userStack.last().enterNs > m_stopAfter)
+                    st.userStack.removeLast();
+            }
+        }
         for (LocationState &st : m_locations) {
             while (!st.stack.isEmpty()) {
                 const OpenRegion r = st.stack.takeLast();
@@ -609,17 +734,35 @@ private:
     QHash<OTF2_CommRef, CommInfo> m_comms;
     QHash<OTF2_LocationRef, LocationState> m_locations;
     qint64 m_maxNs = 0;
+    static constexpr int kStopCheckEvents = 4096;
+    TraceIndex *m_index = nullptr;
+    QList<OTF2_LocationRef> m_indexLocations;
+    QVector<qint64> m_cpTimes;
+    int m_nextCp = 0;
+    OTF2_TimeStamp m_resumeRaw = 0;
+    qint64 m_stopAfter = -1;
+    int m_sinceStopCheck = kStopCheckEvents - 1; // first event past the stop time checks
+    bool m_stopped = false;
 };
 
 // Common prologue of all event callbacks: cancellation check and location lookup.
-#define EVT_PROLOGUE                                                   \
-    auto *tr = static_cast<EventTranslator *>(ud);                     \
-    if (tr->cancelled())                                               \
-        return OTF2_CALLBACK_INTERRUPT;                                \
-    LocationState *st = tr->location(loc);                             \
-    if (!st)                                                           \
-        return OTF2_CALLBACK_SUCCESS;                                  \
-    const qint64 ns = tr->timeNs(time)
+#define EVT_PROLOGUE                                                       \
+    auto *tr = static_cast<EventTranslator *>(ud);                         \
+    if (tr->cancelled())                                                   \
+        return OTF2_CALLBACK_INTERRUPT;                                    \
+    const qint64 ns = tr->nsOf(time);                                      \
+    /* Checkpoint first: it copies the location states, and st below must */\
+    /* point into the detached copy the read goes on with, not the saved one. */\
+    tr->maybeCheckpoint(loc, ns, time);                                    \
+    LocationState *st = tr->location(loc);                                 \
+    if (!st)                                                               \
+        return OTF2_CALLBACK_SUCCESS;                                      \
+    ++st->delivered;                                                       \
+    if (tr->beforeResume(time))                                            \
+        return OTF2_CALLBACK_SUCCESS;                                      \
+    tr->noteTime(ns);                                                      \
+    if (tr->shouldStop(ns))                                                \
+        return OTF2_CALLBACK_INTERRUPT
 
 OTF2_CallbackCode onEnter(OTF2_LocationRef loc, OTF2_TimeStamp time, void *ud, OTF2_AttributeList *,
                           OTF2_RegionRef region)
@@ -683,6 +826,29 @@ OTF2_CallbackCode onMpiCollectiveEnd(OTF2_LocationRef loc, OTF2_TimeStamp time, 
 
 #undef EVT_PROLOGUE
 
+// Events not translated are still counted per location (checkpoint positions). One counting
+// callback per OTF2 event type, instantiated from the setter's callback type: all global event
+// callbacks start with (location, time, userData, attributeList).
+template <typename Fn>
+struct EventCounter;
+template <typename... Args>
+struct EventCounter<OTF2_CallbackCode (*)(OTF2_LocationRef, OTF2_TimeStamp, void *, OTF2_AttributeList *, Args...)> {
+    static OTF2_CallbackCode count(OTF2_LocationRef loc, OTF2_TimeStamp, void *ud, OTF2_AttributeList *, Args...)
+    {
+        auto *tr = static_cast<EventTranslator *>(ud);
+        if (tr->cancelled())
+            return OTF2_CALLBACK_INTERRUPT;
+        if (LocationState *st = tr->location(loc))
+            ++st->delivered;
+        return OTF2_CALLBACK_SUCCESS;
+    }
+};
+template <typename Fn>
+void countWith(OTF2_ErrorCode (*set)(OTF2_GlobalEvtReaderCallbacks *, Fn), OTF2_GlobalEvtReaderCallbacks *cb)
+{
+    set(cb, &EventCounter<Fn>::count);
+}
+
 QString incompleteTrace(const char *what, OTF2_LocationRef loc, OTF2_ErrorCode rc)
 {
     return QStringLiteral("Trace is incomplete or damaged: could not read %1 of location %2 — %3")
@@ -731,12 +897,90 @@ bool prepareLocations(OTF2_Reader *reader, const QList<OTF2_LocationRef> &locati
     return true;
 }
 
-OTF2_ErrorCode readEvents(OTF2_Reader *reader, EventTranslator &tr)
+OTF2_ErrorCode readEvents(OTF2_Reader *reader, EventTranslator &tr, quint64 total, const ReadProgress &progress)
 {
     OTF2_GlobalEvtReader *ger = OTF2_Reader_GetGlobalEvtReader(reader);
     if (!ger)
         return OTF2_ERROR_INVALID;
     OTF2_GlobalEvtReaderCallbacks *cb = OTF2_GlobalEvtReaderCallbacks_New();
+    // All event types first (counting only), then the translated ones.
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetUnknownCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetBufferFlushCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetMeasurementOnOffCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetMpiIsendCompleteCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetMpiIrecvRequestCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetMpiRequestTestCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetMpiRequestCancelledCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetMpiCollectiveBeginCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetOmpForkCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetOmpJoinCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetOmpAcquireLockCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetOmpReleaseLockCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetOmpTaskCreateCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetOmpTaskSwitchCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetOmpTaskCompleteCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetMetricCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetParameterStringCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetParameterIntCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetParameterUnsignedIntCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaWinCreateCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaWinDestroyCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaCollectiveBeginCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaCollectiveEndCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaGroupSyncCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaRequestLockCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaAcquireLockCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaTryLockCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaReleaseLockCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaSyncCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaWaitChangeCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaPutCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaGetCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaAtomicCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaOpCompleteBlockingCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaOpCompleteNonBlockingCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaOpTestCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetRmaOpCompleteRemoteCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetThreadForkCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetThreadJoinCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetThreadTeamBeginCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetThreadTeamEndCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetThreadAcquireLockCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetThreadReleaseLockCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetThreadTaskCreateCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetThreadTaskSwitchCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetThreadTaskCompleteCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetThreadCreateCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetThreadBeginCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetThreadWaitCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetThreadEndCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetCallingContextEnterCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetCallingContextLeaveCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetCallingContextSampleCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoCreateHandleCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoDestroyHandleCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoDuplicateHandleCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoSeekCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoChangeStatusFlagsCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoDeleteFileCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoOperationBeginCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoOperationTestCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoOperationIssuedCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoOperationCompleteCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoOperationCancelledCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoAcquireLockCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoReleaseLockCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetIoTryLockCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetProgramBeginCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetProgramEndCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetNonBlockingCollectiveRequestCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetNonBlockingCollectiveCompleteCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetCommCreateCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetCommDestroyCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetMpiProbeCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetMpiMrecvCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetMpiImrecvRequestCallback, cb);
+    countWith(&OTF2_GlobalEvtReaderCallbacks_SetMpiImrecvCallback, cb);
     OTF2_GlobalEvtReaderCallbacks_SetEnterCallback(cb, &onEnter);
     OTF2_GlobalEvtReaderCallbacks_SetLeaveCallback(cb, &onLeave);
     OTF2_GlobalEvtReaderCallbacks_SetMpiSendCallback(cb, &onMpiSend);
@@ -747,14 +991,134 @@ OTF2_ErrorCode readEvents(OTF2_Reader *reader, EventTranslator &tr)
     const OTF2_ErrorCode regRc = OTF2_Reader_RegisterGlobalEvtCallbacks(reader, ger, cb, &tr);
     OTF2_GlobalEvtReaderCallbacks_Delete(cb);
 
-    uint64_t read = 0;
-    const OTF2_ErrorCode rc = regRc != OTF2_SUCCESS
-        ? regRc
-        : OTF2_Reader_ReadAllGlobalEvents(reader, ger, &read);
+    // Read in chunks of about 0.5 % of the events to report progress in between.
+    OTF2_ErrorCode rc = regRc;
+    if (rc == OTF2_SUCCESS) {
+        const uint64_t chunk = std::clamp<quint64>(total / 200, 1000, quint64(1) << 20);
+        quint64 done = 0;
+        for (;;) {
+            uint64_t read = 0;
+            rc = OTF2_Reader_ReadGlobalEvents(reader, ger, chunk, &read);
+            done += read;
+            if (rc != OTF2_SUCCESS || tr.cancelled() || tr.stopped())
+                break;
+            const bool finished = read < chunk;
+            if (progress)
+                progress(finished ? std::max(done, total) : std::min(done, total), total);
+            if (finished)
+                break;
+        }
+    }
+    if (tr.stopped() && !tr.cancelled()) {
+        rc = OTF2_SUCCESS; // interrupted by the early stop: a complete read of what is needed
+        if (progress)
+            progress(total, total);
+    }
     OTF2_Reader_CloseGlobalEvtReader(reader, ger);
     OTF2_Reader_CloseEvtFiles(reader);
     return rc;
 }
+
+// Pipelined reads: the reader thread's EventTranslator writes into a RecordPipe, which hands
+// the records in batches through a bounded queue to the calling thread (drainInto).
+class RecordPipe : public TraceSink
+{
+public:
+    explicit RecordPipe(const std::atomic_bool *cancel) : m_cancel(cancel) { m_batch.reserve(kBatch); }
+
+    // Producer side (reader thread).
+    void addRank(int, const QString &) override {} // ranks go to the sink directly
+    void addCall(const MpiCall &call) override { put(call); }
+    void addSend(const P2PSend &send) override { put(send); }
+    void addRecv(const P2PRecv &recv) override { put(recv); }
+    void addCollective(const Collective &coll) override { put(coll); }
+    void addUserRegion(const UserRegion &region) override { put(region); }
+    void saveMatchStateInto(std::shared_ptr<const MatchState> *target) override { put(SaveMatch{target}); }
+    void progress(quint64 done, quint64 total)
+    {
+        put(Progress{done, total});
+        flush(); // progress reaches the sink without waiting for a full batch
+    }
+    void close()
+    {
+        flush();
+        std::lock_guard lock(m_mutex);
+        m_closed = true;
+        m_notEmpty.notify_all();
+    }
+
+    // Consumer side (calling thread): until close(); records are dropped once *cancel is set.
+    void drainInto(TraceSink &sink, const ReadProgress &progress)
+    {
+        for (;;) {
+            std::vector<Record> batch;
+            {
+                std::unique_lock lock(m_mutex);
+                m_notEmpty.wait(lock, [this] { return !m_queue.empty() || m_closed; });
+                if (m_queue.empty())
+                    return;
+                batch = std::move(m_queue.front());
+                m_queue.pop_front();
+                m_notFull.notify_one();
+            }
+            if (m_cancel && m_cancel->load(std::memory_order_relaxed))
+                continue;
+            for (Record &r : batch) {
+                std::visit([&](auto &rec) { deliver(sink, progress, rec); }, r);
+            }
+        }
+    }
+
+private:
+    struct SaveMatch {
+        std::shared_ptr<const MatchState> *target;
+    };
+    struct Progress {
+        quint64 done;
+        quint64 total;
+    };
+    using Record = std::variant<MpiCall, P2PSend, P2PRecv, Collective, UserRegion, SaveMatch, Progress>;
+    static constexpr size_t kBatch = 16384;
+    static constexpr size_t kMaxBatches = 8; // bounds the memory of records in flight
+
+    template <typename T>
+    void put(T &&record)
+    {
+        m_batch.emplace_back(std::forward<T>(record));
+        if (m_batch.size() >= kBatch)
+            flush();
+    }
+    void flush()
+    {
+        if (m_batch.empty())
+            return;
+        std::unique_lock lock(m_mutex);
+        m_notFull.wait(lock, [this] { return m_queue.size() < kMaxBatches; });
+        m_queue.push_back(std::move(m_batch));
+        m_batch = {};
+        m_batch.reserve(kBatch);
+        m_notEmpty.notify_one();
+    }
+    static void deliver(TraceSink &s, const ReadProgress &, const MpiCall &r) { s.addCall(r); }
+    static void deliver(TraceSink &s, const ReadProgress &, const P2PSend &r) { s.addSend(r); }
+    static void deliver(TraceSink &s, const ReadProgress &, const P2PRecv &r) { s.addRecv(r); }
+    static void deliver(TraceSink &s, const ReadProgress &, const Collective &r) { s.addCollective(r); }
+    static void deliver(TraceSink &s, const ReadProgress &, const UserRegion &r) { s.addUserRegion(r); }
+    static void deliver(TraceSink &s, const ReadProgress &, const SaveMatch &r) { s.saveMatchStateInto(r.target); }
+    static void deliver(TraceSink &, const ReadProgress &p, const Progress &r)
+    {
+        if (p)
+            p(r.done, r.total);
+    }
+
+    const std::atomic_bool *m_cancel;
+    std::vector<Record> m_batch;
+    std::mutex m_mutex;
+    std::condition_variable m_notEmpty;
+    std::condition_variable m_notFull;
+    std::deque<std::vector<Record>> m_queue;
+    bool m_closed = false;
+};
 
 bool fail(QString *error, const QString &msg)
 {
@@ -766,8 +1130,18 @@ bool fail(QString *error, const QString &msg)
 } // namespace
 
 bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QString *error,
-              const std::atomic_bool *cancel)
+              const std::atomic_bool *cancel, const ReadProgress &progress)
 {
+    ReadOptions options;
+    options.cancel = cancel;
+    options.progress = progress;
+    return readOtf2(anchorFile, sink, meta, error, options);
+}
+
+bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QString *error,
+              const ReadOptions &options)
+{
+    const std::atomic_bool *cancel = options.cancel;
     const QFileInfo anchor(anchorFile);
     if (!anchor.isFile())
         return fail(error, QStringLiteral("File not found: %1").arg(anchorFile));
@@ -794,7 +1168,15 @@ bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QStri
     for (auto it = ranks.cbegin(); it != ranks.cend(); ++it)
         sink.addRank(it.value(), nodeNameOf(defs, defs.locationGroups.value(it.key()).parent));
 
-    EventTranslator tr(sink, defs, cancel);
+    // Pipelined: only whole-trace reads (no resume, no early stop).
+    const qint64 stopAfter = sink.stopAfterNs();
+    const bool pipelined = options.pipelined && !options.resumeFrom
+        && (stopAfter < 0 || stopAfter == std::numeric_limits<qint64>::max());
+    std::optional<RecordPipe> pipe;
+    if (pipelined)
+        pipe.emplace(cancel);
+
+    EventTranslator tr(pipe ? static_cast<TraceSink &>(*pipe) : sink, defs, cancel);
     QList<OTF2_LocationRef> selected;
     TraceMeta m;
     for (auto it = defs.locations.cbegin(); it != defs.locations.cend(); ++it) {
@@ -818,19 +1200,75 @@ bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QStri
         ? QDateTime()
         : QDateTime::fromMSecsSinceEpoch(qint64(defs.realtime / 1'000'000), QTimeZone::UTC);
     sink.begin(m);
+    tr.setStopAfter(pipelined ? -1 : stopAfter);
 
-    if (!selected.isEmpty()) {
-        if (!prepareLocations(reader.get(), selected, &err))
-            return fail(error, err);
-        const OTF2_ErrorCode rc = readEvents(reader.get(), tr);
-        if (tr.cancelled())
-            return fail(error, QStringLiteral("Cancelled"));
-        if (rc != OTF2_SUCCESS)
-            return fail(error, QStringLiteral("Cannot read OTF2 events: %1").arg(Otf2ErrorCapture::message(rc)));
+    // Resuming: locations that delivered all their events before the checkpoint are not read.
+    QList<OTF2_LocationRef> toRead = selected;
+    const ReadCheckpoint *resume = options.resumeFrom.get();
+    quint64 total = m.eventCount;
+    if (resume) {
+        toRead.clear();
+        for (OTF2_LocationRef loc : std::as_const(selected)) {
+            const uint64_t next = resume->positions.value(loc, 1);
+            total -= std::min<quint64>(total, next - 1);
+            if (next <= defs.locations.value(loc).events)
+                toRead.append(loc);
+        }
+        tr.resume(*resume);
     }
 
-    m.traceLengthNs = std::max(m.traceLengthNs, tr.maxEventNs());
-    tr.closeAll(m.traceLengthNs);
+    // The event part: on the calling thread, or (pipelined) on a worker thread whose records the
+    // calling thread passes on to the sink meanwhile. Error texts are made on the reading thread
+    // (Otf2ErrorCapture is per thread).
+    const auto readPart = [&](const ReadProgress &progress, QString *readError) -> bool {
+        if (!toRead.isEmpty()) {
+            if (!prepareLocations(reader.get(), toRead, readError))
+                return false;
+            if (resume) {
+                for (OTF2_LocationRef loc : std::as_const(toRead)) {
+                    const uint64_t next = resume->positions.value(loc, 1);
+                    if (next <= 1)
+                        continue;
+                    OTF2_EvtReader *er = OTF2_Reader_GetEvtReader(reader.get(), loc);
+                    if (!er || OTF2_EvtReader_Seek(er, next) != OTF2_SUCCESS) {
+                        *readError = QStringLiteral("Cannot seek in the trace (location %1)").arg(loc);
+                        return false;
+                    }
+                }
+            }
+            if (options.buildIndex) {
+                options.buildIndex->clear();
+                tr.setIndex(options.buildIndex, selected, options.indexCheckpoints, m.traceLengthNs);
+            }
+            const OTF2_ErrorCode rc = readEvents(reader.get(), tr, total, progress);
+            if (tr.cancelled()) {
+                *readError = QStringLiteral("Cancelled");
+                return false;
+            }
+            if (rc != OTF2_SUCCESS) {
+                *readError = QStringLiteral("Cannot read OTF2 events: %1").arg(Otf2ErrorCapture::message(rc));
+                return false;
+            }
+        }
+        m.traceLengthNs = std::max(m.traceLengthNs, tr.maxEventNs());
+        tr.closeAll(m.traceLengthNs);
+        return true;
+    };
+
+    bool ok = false;
+    if (pipe) {
+        std::thread worker([&] {
+            Otf2ErrorCapture workerCapture;
+            ok = readPart([&](quint64 done, quint64 all) { pipe->progress(done, all); }, &err);
+            pipe->close();
+        });
+        pipe->drainInto(sink, options.progress);
+        worker.join();
+    } else {
+        ok = readPart(options.progress, &err);
+    }
+    if (!ok)
+        return fail(error, err);
 
     if (meta)
         *meta = m;

@@ -27,6 +27,8 @@ private slots:
         QSignalSpy info(&ca, &Cluster_Architecture::traceInfoReady);
         QSignalSpy dataIn(&ca, &Cluster_Architecture::dataIn);
         QSignalSpy failed(&ca, &Cluster_Architecture::traceLoadFailed);
+        QSignalSpy progress(&ca, &Cluster_Architecture::traceLoadProgress);
+        QSignalSpy memory(&ca, &Cluster_Architecture::traceMemoryInfo);
 
         QVERIFY(ca.startTraceSource(m_anchor));
         // A second source cannot be started while one is running.
@@ -34,6 +36,15 @@ private slots:
 
         QTRY_COMPARE(built.count(), 1);
         QVERIFY(failed.isEmpty());
+
+        // The load reported its progress up to 100 % before the components were built.
+        QVERIFY(!progress.isEmpty());
+        QCOMPARE(progress.last().at(0).toInt(), 100);
+        // Budget / mode of the load reach QML (the ring4 trace fits any budget).
+        QCOMPARE(memory.count(), 1);
+        QVERIFY(memory.first().at(0).toLongLong() > 0);
+        QVERIFY(!memory.first().at(1).toString().isEmpty());
+        QCOMPARE(memory.first().at(3).toBool(), true);
 
         QCOMPARE(info.count(), 1);
         QCOMPARE(info.first().at(1).toInt(), 4);
@@ -190,6 +201,11 @@ private slots:
         QVERIFY(!model->detail());
 
         QSignalSpy forwarded(model, &TraceTimelineModel::detailRequested);
+        // Loading state at the moment of forwarding: the (early-stopping) read can be answered
+        // before QTRY_COMPARE below returns, so it is not checked afterwards.
+        bool loadingWhenForwarded = false;
+        connect(model, &TraceTimelineModel::detailRequested, this,
+                [&] { loadingWhenForwarded = model->loadingDetail(); });
         const qint64 ms = 1000 * 1000;
         model->requestDetail(100 * ms, 101 * ms);
         model->requestDetail(200 * ms, 201 * ms);
@@ -197,7 +213,7 @@ private slots:
         QCOMPARE(forwarded.count(), 0); // debounced
         QTRY_COMPARE(forwarded.count(), 1);
         QCOMPARE(forwarded.first().at(0).toLongLong(), 300 * ms);
-        QVERIFY(model->loadingDetail());
+        QVERIFY(loadingWhenForwarded);
         QTRY_VERIFY_WITH_TIMEOUT(!model->loadingDetail(), 20000);
         const auto detail = model->detail();
         QVERIFY(detail);

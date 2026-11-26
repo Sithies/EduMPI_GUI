@@ -49,8 +49,12 @@ void TimelineBuilder::setByteCap(quint64 capBytes, std::atomic_bool *cancel)
 
 bool TimelineBuilder::reserve(quint64 bytes)
 {
-    if (m_overBudget)
+    if (m_overBudget || !m_keep)
         return false;
+    if (m_downgradeCap > 0 && m_keptBytes + bytes > m_downgradeCap) {
+        downgrade();
+        return false;
+    }
     if (m_byteCap > 0 && m_keptBytes + bytes > m_byteCap) {
         m_overBudget = true;
         if (m_capCancel)
@@ -59,6 +63,49 @@ bool TimelineBuilder::reserve(quint64 bytes)
     }
     m_keptBytes += bytes;
     return true;
+}
+
+void TimelineBuilder::downgrade()
+{
+    m_keep = false;
+    m_downgraded = true;
+    m_keptAtDowngrade = m_keptBytes;
+    m_keptBytes = 0;
+    for (int r = 0; r < m_store->rows.size(); ++r) {
+        RankRow &row = m_store->rows[r];
+        RowState &st = m_rowState[r];
+        // Waits patched so far live in the activities; an overview build remembers the last
+        // receive-completing calls instead (patchWait), so later matches of the same call
+        // (MPI_Waitall) only add the difference.
+        st.recentWaits.clear();
+        st.recentNext = 0;
+        QVector<RecentWait> recent;
+        for (qsizetype i = row.activities.size() - 1; i >= 0 && recent.size() < kRecentWaits; --i) {
+            const Activity &a = row.activities[i];
+            if (a.waitNs > 0)
+                recent.prepend({a.startNs, a.endNs, a.waitNs});
+        }
+        st.recentWaits = recent;
+        st.recentNext = int(recent.size()) % kRecentWaits;
+        st.links = {};
+        row.activities = {};
+        row.links = {};
+        row.messages = {};
+        // Spans an overview would not have kept (shorter than a level-1 bin).
+        QVector<UserSpan> spans;
+        quint8 maxDepth = 0;
+        for (const UserSpan &u : std::as_const(row.userSpans)) {
+            if (u.endNs - u.startNs < m_minOverviewSpanNs)
+                continue;
+            spans.append(u);
+            maxDepth = std::max(maxDepth, u.depth);
+        }
+        row.userSpans = std::move(spans);
+        row.maxDepth = maxDepth;
+    }
+    m_store->messages = {};
+    m_store->collectives = {};
+    m_commMembers.clear();
 }
 
 // ---------------------------------------------------------------------------------------
@@ -99,6 +146,19 @@ quint16 TimelineBuilder::functionIndex(const QString &name)
     m_store->functions.append(name);
     m_functionIndex.insert(name, idx);
     return idx;
+}
+
+Category TimelineBuilder::categoryOf(const QString &function, CallKind kind)
+{
+    const int k = int(kind);
+    if (k < 0 || k >= 3)
+        return categorize(function, kind);
+    CategorySlot &slot = m_categories[function];
+    if (!(slot.known & (1u << k))) {
+        slot.category[k] = categorize(function, kind);
+        slot.known |= quint8(1u << k);
+    }
+    return slot.category[k];
 }
 
 bool TimelineBuilder::overlapsWindow(qint64 start, qint64 end) const
@@ -224,7 +284,7 @@ void TimelineBuilder::addCall(const MpiCall &call)
     const int row = rowIndex(call.rank);
     if (row < 0)
         return;
-    const Category cat = categorize(call.function, call.kind);
+    const Category cat = categoryOf(call.function, call.kind);
     addToPyramid(row, start, end, cat, false);
     if (!m_keep || !overlapsWindow(start, end) || !reserve(sizeof(Activity)))
         return;
@@ -272,8 +332,11 @@ void TimelineBuilder::addUserRegion(const UserRegion &region)
     if (row < 0)
         return;
     // Span + its entries in the span indices (finish()).
-    if (m_keep && !reserve(sizeof(UserSpan) + 2 * sizeof(qint32)))
-        return;
+    if (m_keep && !reserve(sizeof(UserSpan) + 2 * sizeof(qint32))) {
+        // Downgraded by this span: kept like in an overview if long enough.
+        if (m_keep || !m_downgraded || end - region.enterNs < m_minOverviewSpanNs)
+            return;
+    }
     RankRow &r = m_store->rows[row];
     const quint8 depth = quint8(std::clamp(region.depth, 0, kMaxUserDepth));
     r.userSpans.append({region.enterNs, end, functionIndex(region.function), depth});

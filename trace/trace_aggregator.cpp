@@ -57,6 +57,17 @@ bool TraceAggregator::DetailKey::operator<(const DetailKey &o) const
          < std::tie(o.collective, o.rank, o.function, o.partner, o.collPartners, o.comm);
 }
 
+bool TraceAggregator::DetailKey::operator==(const DetailKey &o) const
+{
+    return collective == o.collective && rank == o.rank && partner == o.partner && comm == o.comm
+        && function == o.function && collPartners == o.collPartners;
+}
+
+size_t qHash(const TraceAggregator::DetailKey &k, size_t seed)
+{
+    return qHashMulti(seed, k.collective, k.rank, k.partner, k.comm, k.function, k.collPartners);
+}
+
 int TraceAggregator::secondOf(qint64 ns)
 {
     return ns <= 0 ? 0 : int(ns / kNsPerSecond);
@@ -161,12 +172,27 @@ void TraceAggregator::completeCollective(const PendingCollective &inst)
         m_listener->onCollective(done);
 }
 
+QByteArray TraceAggregator::partnerMaskOf(const Collective &coll)
+{
+    CommMask &cm = m_commMasks[coll.comm];
+    if (cm.members.constData() != coll.members.constData() && cm.members != coll.members) {
+        cm.members = coll.members;
+        cm.mask = partnerMask(coll.members, -1);
+    }
+    // = partnerMask(coll.members, coll.rank): the full mask without the rank's own bit.
+    QByteArray mask = cm.mask;
+    const int self = coll.rank;
+    if (self >= 0 && self / 8 < mask.size())
+        mask[self / 8] = char(uchar(mask[self / 8]) & ~(1u << (self % 8)));
+    return mask;
+}
+
 void TraceAggregator::addCollective(const Collective &coll)
 {
     Bucket &b = bucket(coll.enterNs, coll.rank, true);
     b.sendBytes += qint64(coll.bytesSent);
     b.recvBytes += qint64(coll.bytesRecv);
-    addDetail(coll.enterNs, {true, coll.function, coll.rank, -1, partnerMask(coll.members, coll.rank), coll.comm},
+    addDetail(coll.enterNs, {true, coll.function, coll.rank, -1, partnerMaskOf(coll), coll.comm},
               qint64(coll.bytesSent), qint64(coll.bytesRecv));
 
     const quint64 index = m_collSeq[qMakePair(coll.rank, coll.comm)]++;
@@ -180,6 +206,48 @@ void TraceAggregator::addCollective(const Collective &coll)
     }
 }
 
+struct MatchState {
+    QHash<TraceAggregator::MatchKey, TraceAggregator::MatchQueues> pending;
+    QHash<QPair<quint64, quint64>, TraceAggregator::PendingCollective> pendingColl;
+    QHash<QPair<int, quint64>, quint64> collSeq;
+};
+
+std::shared_ptr<const MatchState> TraceAggregator::saveMatchState() const
+{
+    auto s = std::make_shared<MatchState>();
+    s->pending = m_pending;
+    s->pendingColl = m_pendingColl;
+    s->collSeq = m_collSeq;
+    return s;
+}
+
+void TraceAggregator::restoreMatchState(const std::shared_ptr<const MatchState> &state)
+{
+    if (!state)
+        return;
+    m_pending = state->pending;
+    m_pendingColl = state->pendingColl;
+    m_collSeq = state->collSeq;
+}
+
+bool TraceAggregator::waitingFor(qint64 fromNs, qint64 toNs) const
+{
+    const auto overlaps = [fromNs, toNs](qint64 enter, qint64 leave) { return leave >= fromNs && enter <= toNs; };
+    for (const MatchQueues &q : m_pending) {
+        for (const P2PSend &s : q.sends)
+            if (overlaps(s.enterNs, s.leaveNs))
+                return true;
+        for (const P2PRecv &r : q.recvs)
+            if (overlaps(r.enterNs, r.leaveNs))
+                return true;
+    }
+    for (const PendingCollective &inst : m_pendingColl)
+        for (const Collective &c : inst.arrived)
+            if (overlaps(c.enterNs, c.leaveNs))
+                return true;
+    return false;
+}
+
 TraceSummary TraceAggregator::finish(qint64 traceLengthNs)
 {
     TraceSummary s;
@@ -188,6 +256,7 @@ TraceSummary TraceAggregator::finish(qint64 traceLengthNs)
         completeCollective(it.value());
     m_pendingColl.clear();
     m_collSeq.clear();
+    m_commMasks.clear();
 
     for (const MatchQueues &q : std::as_const(m_pending)) {
         s.unmatchedMessages += int(q.sends.size() + q.recvs.size());
@@ -211,22 +280,35 @@ TraceSummary TraceAggregator::finish(qint64 traceLengthNs)
     s.rows.resize(s.seconds);
     s.details.resize(s.seconds);
 
+    const QString p2p = QStringLiteral("p2p");
+    const QString collective = QStringLiteral("collective");
     for (int sec = 0; sec < m_buckets.size(); ++sec) {
-        for (auto it = m_buckets[sec].cbegin(); it != m_buckets[sec].cend(); ++it) {
-            const Bucket &b = it.value();
-            const int rank = it.key().first;
-            s.rows[sec].append({m_rankNodes.value(rank), rank,
-                                it.key().second ? QStringLiteral("collective") : QStringLiteral("p2p"),
+        const QHash<BucketKey, Bucket> &buckets = m_buckets[sec];
+        QVector<BucketKey> keys = buckets.keys();
+        std::sort(keys.begin(), keys.end());
+        s.rows[sec].reserve(keys.size());
+        for (const BucketKey &key : std::as_const(keys)) {
+            const Bucket &b = buckets[key];
+            s.rows[sec].append({m_rankNodes.value(key.first), key.first, key.second ? collective : p2p,
                                 b.sendBytes, b.recvBytes, b.lateSender, b.lateReceiver, b.timeDiff});
         }
+        m_buckets[sec] = {}; // released second by second: lower peak while the rows grow
     }
     for (int sec = 0; sec < m_details.size(); ++sec) {
-        for (auto it = m_details[sec].cbegin(); it != m_details[sec].cend(); ++it) {
-            const DetailKey &k = it.key();
-            s.details[sec].append({k.collective ? QStringLiteral("collective") : QStringLiteral("p2p"),
-                                   k.function, k.rank, k.partner, k.collPartners,
-                                   it.value().sendBytes, it.value().recvBytes, k.comm});
+        const QHash<DetailKey, DetailSums> &details = m_details[sec];
+        QVector<const DetailKey *> keys;
+        keys.reserve(details.size());
+        for (auto it = details.cbegin(); it != details.cend(); ++it)
+            keys.append(&it.key());
+        std::sort(keys.begin(), keys.end(), [](const DetailKey *a, const DetailKey *b) { return *a < *b; });
+        s.details[sec].reserve(keys.size());
+        for (const DetailKey *k : std::as_const(keys)) {
+            const DetailSums &d = details[*k];
+            s.details[sec].append({k->collective ? collective : p2p, k->function, k->rank, k->partner,
+                                   k->collPartners, d.sendBytes, d.recvBytes, k->comm});
         }
+        keys = {};
+        m_details[sec] = {};
     }
     m_buckets.clear();
     m_details.clear();

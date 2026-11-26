@@ -25,11 +25,18 @@ public:
     void addRecv(const P2PRecv &recv) override;
     void addCollective(const Collective &coll) override;
     TraceSummary finish(qint64 traceLengthNs);
+    // A pending (unmatched so far) p2p record or incomplete collective instance has a record
+    // whose [enter, leave] overlaps [fromNs, toNs].
+    bool waitingFor(qint64 fromNs, qint64 toNs) const;
+
+    std::shared_ptr<const MatchState> saveMatchState() const override;
+    void restoreMatchState(const std::shared_ptr<const MatchState> &state) override;
 
     // Not owned; may be null. Set before the first record.
     void setListener(TraceListener *listener) { m_listener = listener; }
 
 private:
+    friend struct MatchState;
     struct Bucket {
         qint64 sendBytes = 0;
         qint64 recvBytes = 0;
@@ -37,7 +44,7 @@ private:
         double lateReceiver = 0.0;
         double timeDiff = 0.0;
     };
-    // (rank, isCollective) -> bucket; QMap keeps output ordered by rank, p2p first.
+    // (rank, isCollective) -> bucket; finish() orders the rows by rank, p2p first.
     using BucketKey = QPair<int, bool>;
 
     struct DetailKey {
@@ -48,7 +55,9 @@ private:
         QByteArray collPartners;
         quint64 comm; // the DB groups by communicator (communicationarea), too
         bool operator<(const DetailKey &o) const;
+        bool operator==(const DetailKey &o) const;
     };
+    friend size_t qHash(const DetailKey &k, size_t seed);
     struct DetailSums {
         qint64 sendBytes = 0;
         qint64 recvBytes = 0;
@@ -70,6 +79,14 @@ private:
         QQueue<P2PRecv> recvs;
     };
 
+    // Bitmask of all members of a communicator (partnerMask without clearing a rank), built
+    // once per member list instead of once per participation.
+    struct CommMask {
+        QVector<int> members;
+        QByteArray mask;
+    };
+    QByteArray partnerMaskOf(const Collective &coll);
+
     struct PendingCollective {
         int expected = 0;
         QVector<Collective> arrived;
@@ -83,11 +100,13 @@ private:
 
     TraceListener *m_listener = nullptr;
     QMap<int, QString> m_rankNodes;
-    QVector<QMap<BucketKey, Bucket>> m_buckets;
-    QVector<QMap<DetailKey, DetailSums>> m_details;
+    // Per second; hashed while reading, sorted once in finish() (same order as a QMap).
+    QVector<QHash<BucketKey, Bucket>> m_buckets;
+    QVector<QHash<DetailKey, DetailSums>> m_details;
     QHash<MatchKey, MatchQueues> m_pending;
     QHash<QPair<int, quint64>, quint64> m_collSeq; // (rank, comm) -> next instance index
     QHash<QPair<quint64, quint64>, PendingCollective> m_pendingColl; // (comm, index)
+    QHash<quint64, CommMask> m_commMasks;
 };
 
 } // namespace trace

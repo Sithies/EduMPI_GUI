@@ -2,6 +2,9 @@
 
 #include "memory_budget.h"
 #include "otf2_fixture.h"
+#include "otf2_trace_reader.h"
+#include "timeline_builder.h"
+#include "timeline_store.h"
 #include "timeline_snapshot.h"
 #include "trace_data_source.h"
 #include "trace_timeline_model.h"
@@ -92,6 +95,62 @@ private slots:
         trace::setMemoryBudgetSettingMB(-5);
         QCOMPARE(trace::memoryBudgetSettingMB(), 0);
         QVERIFY(trace::memoryBudgetBytes() >= 1); // automatic
+    }
+
+    // resolveMemoryBudget: the budget and where it came from (environment > setting > automatic).
+    void memoryBudgetReportsSource()
+    {
+        QSettings settings(QStringLiteral("EduMPI"), QStringLiteral("EduMPI_GUI"));
+        const QString key = QStringLiteral("trace/memoryBudgetMB");
+        const QVariant saved = settings.value(key);
+        auto restore = qScopeGuard([&] {
+            QSettings s(QStringLiteral("EduMPI"), QStringLiteral("EduMPI_GUI"));
+            if (saved.isValid())
+                s.setValue(key, saved);
+            else
+                s.remove(key);
+        });
+        const quint64 mib = 1024 * 1024;
+        trace::setMemoryBudgetSettingMB(0);
+        trace::MemoryBudget b = trace::resolveMemoryBudget();
+        QCOMPARE(b.source, trace::MemoryBudget::Automatic);
+        QVERIFY(b.availableBytes > 0);
+        QCOMPARE(b.bytes, std::max<quint64>(b.availableBytes / 2, 1));
+
+        trace::setMemoryBudgetSettingMB(300);
+        b = trace::resolveMemoryBudget();
+        QCOMPARE(b.source, trace::MemoryBudget::Setting);
+        QCOMPARE(b.bytes, 300 * mib);
+
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "77");
+        b = trace::resolveMemoryBudget();
+        QCOMPARE(b.source, trace::MemoryBudget::Environment);
+        QCOMPARE(b.bytes, 77 * mib);
+        QCOMPARE(trace::memoryBudgetBytes(), 77 * mib);
+    }
+
+    // memoryInfoReady after the load (before timelineReady): budget in MB, its source and
+    // whether the whole timeline fits (complete) or details are loaded on demand.
+    void reportsMemoryInfo()
+    {
+        for (const auto &[mb, complete] : {std::pair{256, true}, std::pair{1, false}}) {
+            qputenv("EDUMPI_TRACE_BUDGET_MB", QByteArray::number(mb));
+            Trace_Data_Source src(m_many);
+            QSignalSpy info(&src, &Trace_Data_Source::memoryInfoReady);
+            QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+            int infoBeforeTimeline = -1;
+            connect(&src, &Trace_Data_Source::timelineReady, this,
+                    [&] { if (infoBeforeTimeline < 0) infoBeforeTimeline = int(info.count()); });
+            load(src);
+            if (QTest::currentTestFailed())
+                return;
+            QCOMPARE(info.count(), 1);
+            QCOMPARE(infoBeforeTimeline, 1);
+            QCOMPARE(info.first().at(0).toLongLong(), qint64(mb));
+            QCOMPARE(info.first().at(1).toString(), QStringLiteral("environment"));
+            QVERIFY(info.first().at(2).toLongLong() > 0); // available memory at the load
+            QCOMPARE(info.first().at(3).toBool(), complete);
+        }
     }
 
     void connectsAndClears()
@@ -507,6 +566,62 @@ private slots:
         QVERIFY(cap < store->traceLengthNs);
     }
 
+    // The decision is made from the bytes actually kept, not from the (pessimistic) estimate:
+    // a budget the estimate rejects but the real store fits loads the complete store.
+    void budgetAboveRealSizeLoadsFullStore()
+    {
+        trace::TraceMeta meta;
+        quint64 kept = 0;
+        {
+            trace::TraceAggregator agg;
+            trace::TimelineBuilder builder(agg, 0, std::numeric_limits<qint64>::max(), true, 0);
+            QString error;
+            QVERIFY2(trace::readOtf2(m_many, builder, &meta, &error), qPrintable(error));
+            kept = builder.keptBytes();
+        }
+        const quint64 mib = 1024 * 1024;
+        const quint64 pyramid = trace::pyramidBytes(8, trace::kDefaultPyramidLevels);
+        const quint64 budgetMb = (kept * 2 + pyramid) / mib + 1; // planTimelineLoad: (budget - pyramid) / 2
+        const double estimate = double(trace::estimateTimelineBytes(meta.eventCount, meta.hasMetrics, 8,
+                                                                    trace::kDefaultPyramidLevels));
+        QVERIFY2(estimate * 1.5 > double(budgetMb * mib),
+                 qPrintable(QStringLiteral("estimate %1, budget %2 MB").arg(estimate).arg(budgetMb)));
+
+        qputenv("EDUMPI_TRACE_BUDGET_MB", QByteArray::number(budgetMb));
+        Trace_Data_Source src(m_many);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        const auto store = lastStore(timeline);
+        QVERIFY(store);
+        QVERIFY(store->complete);
+    }
+
+    // Windowed after a downgrade: the detail-window cap comes from the bytes per event measured
+    // before the downgrade, which are below the estimate, so the cap is at least the estimate's.
+    void downgradedLoadMeasuresDetailWindowCap()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "8");
+        Trace_Data_Source src(m_many);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        const trace::TimelineSnapshot overview = timeline.last().at(0).value<trace::TimelineSnapshot>();
+        QVERIFY(overview.store && !overview.store->complete);
+        trace::TraceMeta meta;
+        {
+            trace::TraceAggregator agg;
+            QString error;
+            QVERIFY(trace::readOtf2(m_many, agg, &meta, &error));
+        }
+        const qint64 estimated = trace::maxDetailWindowNs(meta, 8, 8 * 1024 * 1024);
+        QVERIFY2(overview.maxDetailWindowNs > estimated,
+                 qPrintable(QStringLiteral("%1 <= %2").arg(overview.maxDetailWindowNs).arg(estimated)));
+        QVERIFY(overview.maxDetailWindowNs < overview.store->traceLengthNs);
+    }
+
     // A stopped source still answers a detail request (null store), so that the model's
     // loadingDetail does not stay true.
     void detailRequestAfterStopIsAnswered()
@@ -524,6 +639,111 @@ private slots:
         QVERIFY(!snap.store);
         QCOMPARE(snap.requestFromNs, 1000 * kMs);
         QCOMPARE(snap.requestToNs, 1001 * kMs);
+    }
+
+    // loadProgress(percent, detail): the load reports 0 .. 100 (non-decreasing, each percent at
+    // most once, detail = false) before timelineReady; a detail read reports with detail = true.
+    void reportsLoadProgress()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        Trace_Data_Source src(m_many);
+        QSignalSpy progress(&src, &Trace_Data_Source::loadProgress);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        int progressBeforeTimeline = -1;
+        connect(&src, &Trace_Data_Source::timelineReady, this,
+                [&] { if (progressBeforeTimeline < 0) progressBeforeTimeline = int(progress.count()); });
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        QVERIFY2(progress.count() >= 5, qPrintable(QString::number(progress.count())));
+        QCOMPARE(progressBeforeTimeline, int(progress.count()));
+        int last = -1;
+        for (const QList<QVariant> &args : std::as_const(progress)) {
+            const int percent = args.at(0).toInt();
+            QVERIFY(percent > last);
+            QVERIFY(percent >= 0 && percent <= 100);
+            QCOMPARE(args.at(1).toBool(), false);
+            last = percent;
+        }
+        QCOMPARE(last, 100);
+
+        progress.clear();
+        src.requestDetail(1000 * kMs, 1001 * kMs);
+        QCOMPARE(timeline.count(), 2);
+        QVERIFY(!progress.isEmpty());
+        for (const QList<QVariant> &args : std::as_const(progress))
+            QCOMPARE(args.at(1).toBool(), true);
+    }
+
+    // TraceTimelineModel::detailProgress: 0 when a request is forwarded, follows
+    // setDetailProgress while loading, ignored when no load is pending.
+    void modelTracksDetailProgress()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        Trace_Data_Source src(m_many);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        TraceTimelineModel model;
+        model.addSnapshot(timeline.last().at(0).value<trace::TimelineSnapshot>());
+        QVERIFY(model.windowed());
+        model.setDetailProgress(50); // no load pending
+        QCOMPARE(model.detailProgress(), 0);
+
+        QSignalSpy requested(&model, &TraceTimelineModel::detailRequested);
+        QSignalSpy progressChanged(&model, &TraceTimelineModel::detailProgressChanged);
+        QVERIFY(model.requestDetail(1000 * kMs, 1001 * kMs));
+        QTRY_COMPARE(requested.count(), 1);
+        QVERIFY(model.loadingDetail());
+        QCOMPARE(model.detailProgress(), 0);
+        model.setDetailProgress(40);
+        QCOMPARE(model.detailProgress(), 40);
+        QVERIFY(progressChanged.count() >= 1);
+    }
+
+    // Detail reads resume at the load's checkpoints: the windows (early, middle, late) equal
+    // window builds read from the start.
+    void detailWindowsFromIndexEqualReadFromStart()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        Trace_Data_Source src(m_many);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        const auto overview = lastStore(timeline);
+        QVERIFY(overview && !overview->complete);
+        const qint64 len = overview->traceLengthNs;
+        for (const double at : {0.1, 0.5, 0.9}) {
+            const qint64 a = qint64(at * double(len));
+            src.requestDetail(a, a + kMs);
+            const auto got = lastStore(timeline);
+            QVERIFY2(got, qPrintable(QString::number(at)));
+            trace::TraceAggregator agg;
+            trace::TimelineBuilder builder(agg, got->fromNs, got->toNs, true, 0);
+            trace::TraceMeta meta;
+            QString error;
+            QVERIFY(trace::readOtf2(m_many, builder, &meta, &error));
+            agg.finish(meta.traceLengthNs);
+            const auto want = builder.finish();
+            QCOMPARE(got->rows.size(), want->rows.size());
+            for (int r = 0; r < want->rows.size(); ++r) {
+                QCOMPARE(got->rows[r].activities.size(), want->rows[r].activities.size());
+                for (int i = 0; i < want->rows[r].activities.size(); ++i) {
+                    QCOMPARE(got->rows[r].activities[i].startNs, want->rows[r].activities[i].startNs);
+                    QCOMPARE(got->rows[r].activities[i].endNs, want->rows[r].activities[i].endNs);
+                    QCOMPARE(got->rows[r].activities[i].waitNs, want->rows[r].activities[i].waitNs);
+                }
+                QCOMPARE(got->rows[r].links, want->rows[r].links);
+            }
+            QCOMPARE(got->messages.size(), want->messages.size());
+            for (int i = 0; i < want->messages.size(); ++i) {
+                QCOMPARE(got->messages[i].sendNs, want->messages[i].sendNs);
+                QCOMPARE(got->messages[i].recvNs, want->messages[i].recvNs);
+                QCOMPARE(got->messages[i].lateSender, want->messages[i].lateSender);
+            }
+        }
     }
 
     void detailRequestLoadsOnlyWindow()

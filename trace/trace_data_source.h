@@ -76,6 +76,15 @@ signals:
 
     void loadFailed(QString message);
     void traceInfoReady(QString name, int ranks, double durationSeconds, int unmatched);
+    // Share of the trace read so far (0 .. 100), each value at most once per read: the load
+    // (detail = false, ends with 100 before timelineReady) and each detail read (detail = true;
+    // a read that is superseded or cancelled stops early).
+    void loadProgress(int percent, bool detail);
+    // After the load, before timelineReady: the memory budget used (MB), where it came from
+    // ("environment" = EDUMPI_TRACE_BUDGET_MB, "setting" = the Memory budget field,
+    // "automatic" = half of availableMB), the memory available at the load (MB) and whether
+    // the whole timeline fits (complete) or details are loaded on demand when zooming in.
+    void memoryInfoReady(qint64 budgetMB, QString source, qint64 availableMB, bool complete);
 
     // After the load (before clusterComponentsReady) and after each detail load.
     void timelineReady(trace::TimelineSnapshot snapshot);
@@ -89,6 +98,8 @@ private:
     void emitBucketRows(const QVector<const trace::BucketRow *> &rows);
     void emitDetailRows(const QVector<const trace::DetailRow *> &details);
     void processDetailRequest();
+    // readOtf2 progress callback emitting loadProgress whenever the percentage changes.
+    trace::ReadProgress progressReporter(bool detail);
 
     QString m_input;
     trace::TraceSummary m_summary;
@@ -109,6 +120,10 @@ private:
     qint64 m_maxDetailWindowNs = 0; // trace::maxDetailWindowNs for this trace and budget
     std::shared_ptr<const trace::TimelineStore> m_overview; // complete in full mode
     std::shared_ptr<const trace::TimelineStore> m_detailStore; // latest detail window
+    // Windowed mode: checkpoints of the load, detail reads resume at the last one before
+    // their window (empty in full mode).
+    static constexpr int kIndexCheckpoints = 64;
+    trace::TraceIndex m_index;
     std::atomic_bool m_windowed{false};
 
     // Detail requests (requestDetail may run on another thread).

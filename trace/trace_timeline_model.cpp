@@ -91,8 +91,19 @@ void TraceTimelineModel::forwardRequest()
     m_forwardedFrom = m_requestFrom;
     m_forwardedTo = m_requestTo;
     m_loading = true;
+    m_detailProgress = 0;
+    emit detailProgressChanged();
     emit detailRequested(m_requestFrom, m_requestTo);
     emit changed();
+}
+
+void TraceTimelineModel::setDetailProgress(int percent)
+{
+    percent = std::clamp(percent, 0, 100);
+    if (!m_loading || percent == m_detailProgress)
+        return;
+    m_detailProgress = percent;
+    emit detailProgressChanged();
 }
 
 void TraceTimelineModel::addSnapshot(const TimelineSnapshot &snapshot)

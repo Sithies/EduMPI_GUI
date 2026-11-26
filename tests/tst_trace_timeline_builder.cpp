@@ -68,6 +68,80 @@ const Message *findMessage(const TimelineStore &s, int sender, int receiver, qui
     return nullptr;
 }
 
+// Forwards everything to a builder and counts the records the reader delivered.
+struct CountingSink : TraceSink {
+    TraceSink &target;
+    int records = 0;
+    explicit CountingSink(TraceSink &t) : target(t) {}
+    void begin(const TraceMeta &meta) override { target.begin(meta); }
+    void addRank(int rank, const QString &node) override { target.addRank(rank, node); }
+    void addCall(const MpiCall &c) override { ++records; target.addCall(c); }
+    void addSend(const P2PSend &s) override { ++records; target.addSend(s); }
+    void addRecv(const P2PRecv &r) override { ++records; target.addRecv(r); }
+    void addCollective(const Collective &c) override { ++records; target.addCollective(c); }
+    void addUserRegion(const UserRegion &u) override { ++records; target.addUserRegion(u); }
+    qint64 stopAfterNs() const override { return target.stopAfterNs(); }
+    bool waitingForPartners() const override { return target.waitingForPartners(); }
+    std::shared_ptr<const MatchState> saveMatchState() const override { return target.saveMatchState(); }
+    void restoreMatchState(const std::shared_ptr<const MatchState> &s) override { target.restoreMatchState(s); }
+};
+
+// Two builds of the same window must be equal (activities with links, messages, collectives,
+// user spans); a user span still open where a read stopped early may end later in one of them,
+// but not inside the window (both ends >= to).
+void compareWindowStores(const TimelineStore &got, const TimelineStore &want, qint64 to, const QString &label)
+{
+    QVERIFY2(got.traceLengthNs == want.traceLengthNs, qPrintable(label));
+    QCOMPARE(got.fromNs, want.fromNs);
+    QCOMPARE(got.toNs, want.toNs);
+    QCOMPARE(got.rows.size(), want.rows.size());
+    for (int r = 0; r < want.rows.size(); ++r) {
+        const RankRow &a = want.rows[r];
+        const RankRow &e = got.rows[r];
+        QVERIFY2(e.activities.size() == a.activities.size(),
+                 qPrintable(QStringLiteral("%1: rank %2 activities %3 vs %4").arg(label).arg(a.rank)
+                                .arg(e.activities.size()).arg(a.activities.size())));
+        for (int i = 0; i < a.activities.size(); ++i) {
+            QVERIFY2(e.activities[i].startNs == a.activities[i].startNs, qPrintable(label));
+            QCOMPARE(e.activities[i].endNs, a.activities[i].endNs);
+            QVERIFY2(e.activities[i].waitNs == a.activities[i].waitNs,
+                     qPrintable(QStringLiteral("%1: rank %2 activity %3 wait").arg(label).arg(a.rank).arg(i)));
+            QCOMPARE(e.activities[i].linkCount, a.activities[i].linkCount);
+            QCOMPARE(e.activities[i].category, a.activities[i].category);
+            QCOMPARE(got.functions.value(e.activities[i].function), want.functions.value(a.activities[i].function));
+        }
+        QCOMPARE(e.links, a.links);
+        QCOMPARE(e.messages, a.messages);
+        QCOMPARE(e.userSpans.size(), a.userSpans.size());
+        for (int i = 0; i < a.userSpans.size(); ++i) {
+            QCOMPARE(e.userSpans[i].startNs, a.userSpans[i].startNs);
+            QCOMPARE(e.userSpans[i].depth, a.userSpans[i].depth);
+            if (e.userSpans[i].endNs != a.userSpans[i].endNs)
+                QVERIFY2(e.userSpans[i].endNs >= to && a.userSpans[i].endNs >= to, qPrintable(label));
+        }
+    }
+    QVERIFY2(got.messages.size() == want.messages.size(),
+             qPrintable(QStringLiteral("%1: messages %2 vs %3").arg(label).arg(got.messages.size()).arg(want.messages.size())));
+    for (int i = 0; i < want.messages.size(); ++i) {
+        const Message &a = want.messages[i];
+        const Message &e = got.messages[i];
+        QCOMPARE(e.sender, a.sender);
+        QCOMPARE(e.receiver, a.receiver);
+        QCOMPARE(e.sendNs, a.sendNs);
+        QCOMPARE(e.recvNs, a.recvNs);
+        QCOMPARE(e.bytes, a.bytes);
+        QCOMPARE(e.lateSender, a.lateSender);
+        QCOMPARE(e.lateReceiver, a.lateReceiver);
+    }
+    QVERIFY2(got.collectives.size() == want.collectives.size(),
+             qPrintable(QStringLiteral("%1: collectives %2 vs %3").arg(label).arg(got.collectives.size()).arg(want.collectives.size())));
+    for (int i = 0; i < want.collectives.size(); ++i) {
+        QCOMPARE(got.collectives[i].rank, want.collectives[i].rank);
+        QCOMPARE(got.collectives[i].comm, want.collectives[i].comm);
+        QCOMPARE(got.collectives[i].lateSender, want.collectives[i].lateSender);
+    }
+}
+
 quint16 pyramidValue(const TimelineStore &s, int level, int rank, qint64 ns, Category c)
 {
     const Pyramid &p = s.pyramid;
@@ -732,6 +806,202 @@ private slots:
             agg.finish(meta.traceLengthNs);
             QVERIFY(builder.finish()->complete);
         }
+    }
+
+    // Index: a whole-trace read records checkpoints (positions + reader / matching state); a
+    // window build resumed from the last checkpoint before the window equals one read from the
+    // start and reads fewer records for windows late in the run.
+    void resumeFromCheckpointEqualsReadFromStart()
+    {
+        QTemporaryDir tmp;
+        const QStringList anchors{writeManyMessagesOtf2(tmp.filePath(QStringLiteral("many")), 4, 3000),
+                                  writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))),
+                                  writeWaitallOtf2(tmp.filePath(QStringLiteral("wa"))),
+                                  writeNonblockingOtf2(tmp.filePath(QStringLiteral("nb"))),
+                                  writePhasesOtf2(tmp.filePath(QStringLiteral("ph")))};
+        const double windows[][2] = {{0.0, 0.05}, {0.1, 0.12}, {0.3, 0.35}, {0.5, 0.52}, {0.62, 0.7}, {0.9, 1.0}};
+        for (const bool pipelined : {false, true})
+        for (const QString &anchor : anchors) {
+            TraceIndex index;
+            TraceMeta meta;
+            {
+                TraceAggregator agg;
+                TimelineBuilder builder(agg, 0, kAll, false, 1);
+                ReadOptions opt;
+                opt.buildIndex = &index;
+                opt.indexCheckpoints = 32;
+                opt.pipelined = pipelined; // checkpoints' matching state saved through the queue
+                QString error;
+                QVERIFY2(readOtf2(anchor, builder, &meta, &error, opt), qPrintable(error));
+            }
+            // Checkpoints sit at the first event at or after each of the 31 times; sparse traces
+            // have fewer (several times fall into one gap between events).
+            QVERIFY2(index.size() >= 2, qPrintable(QStringLiteral("%1: %2 checkpoints").arg(anchor).arg(index.size())));
+            for (int i = 1; i < index.size(); ++i)
+                QVERIFY(index.timeNs(i) >= index.timeNs(i - 1));
+            const qint64 len = meta.traceLengthNs;
+            for (const auto &w : windows) {
+                const qint64 from = qint64(w[0] * double(len));
+                const qint64 to = qint64(w[1] * double(len));
+                const QString label = QStringLiteral("%1 [%2, %3]").arg(anchor).arg(from).arg(to);
+                const auto run = [&](const std::shared_ptr<const ReadCheckpoint> &resume, int *records) {
+                    TraceAggregator agg;
+                    TimelineBuilder builder(agg, from, to, true, 0);
+                    CountingSink counter(builder);
+                    ReadOptions opt;
+                    opt.resumeFrom = resume;
+                    TraceMeta m;
+                    QString error;
+                    const bool ok = readOtf2(anchor, counter, &m, &error, opt);
+                    if (!ok)
+                        qWarning("%s: %s", qPrintable(label), qPrintable(error));
+                    agg.finish(m.traceLengthNs);
+                    *records = counter.records;
+                    return ok ? builder.finish() : nullptr;
+                };
+                int recordsStart = 0;
+                int recordsResumed = 0;
+                const auto cp = index.before(from);
+                const auto fromStart = run(nullptr, &recordsStart);
+                const auto resumed = run(cp, &recordsResumed);
+                QVERIFY2(fromStart && resumed, qPrintable(label));
+                if (cp && w[0] >= 0.5)
+                    QVERIFY2(recordsResumed < recordsStart,
+                             qPrintable(QStringLiteral("%1: %2 vs %3 records").arg(label).arg(recordsResumed).arg(recordsStart)));
+                compareWindowStores(*resumed, *fromStart, to, label);
+                if (QTest::currentTestFailed())
+                    return;
+            }
+        }
+    }
+
+    // A window build stops reading once the window is over and nothing in it waits for a
+    // partner any more: same store as a build that reads to the end (user spans still open at
+    // the stop may end later than recorded, but not inside the window), fewer records read.
+    void windowBuildStopsAfterWindow()
+    {
+        QTemporaryDir tmp;
+        struct Case {
+            QString anchor;
+            qint64 from;
+            qint64 to;
+            bool expectEarly;
+        };
+        const QString many = writeManyMessagesOtf2(tmp.filePath(QStringLiteral("many")), 4, 3000);
+        const QString r4 = writeRing4Otf2(tmp.filePath(QStringLiteral("r4")));
+        const QString wa = writeWaitallOtf2(tmp.filePath(QStringLiteral("wa")));
+        const QString nb = writeNonblockingOtf2(tmp.filePath(QStringLiteral("nb")));
+        const QVector<Case> cases{
+            {many, 10 * kMs, 12 * kMs, true},
+            {many, 50 * kMs, 80 * kMs, true}, // trace ~301 ms long: stops at about a third
+            {many, 0, 1 * kMs, true},
+            // R0's MPI_Recv [101, 402] enters inside the window, its send (R3) enters at 400 ms.
+            {r4, 0, 300 * kMs, false},
+            {r4, 100 * kMs, 300 * kMs, false},
+            {wa, 0, 50 * kMs, false},
+            {nb, 0, 50 * kMs, false},
+        };
+        for (const Case &c : cases) {
+            const QString label = QStringLiteral("%1 [%2, %3]").arg(c.anchor).arg(c.from).arg(c.to);
+            int recordsAll = 0;
+            int recordsEarly = 0;
+            const auto run = [&](bool early, int *records) {
+                TraceAggregator agg;
+                TimelineBuilder builder(agg, c.from, c.to, true, 0);
+                builder.setEarlyStop(early);
+                CountingSink counter(builder);
+                TraceMeta meta;
+                QString error;
+                const bool ok = readOtf2(c.anchor, counter, &meta, &error);
+                if (!ok)
+                    qWarning("%s: %s", qPrintable(label), qPrintable(error));
+                agg.finish(meta.traceLengthNs);
+                *records = counter.records;
+                return ok ? builder.finish() : nullptr;
+            };
+            const auto all = run(false, &recordsAll);
+            const auto early = run(true, &recordsEarly);
+            QVERIFY2(all && early, qPrintable(label));
+            QVERIFY2(recordsEarly <= recordsAll, qPrintable(label));
+            if (c.expectEarly)
+                QVERIFY2(recordsEarly < recordsAll / 2,
+                         qPrintable(QStringLiteral("%1: %2 of %3 records").arg(label).arg(recordsEarly).arg(recordsAll)));
+            compareWindowStores(*early, *all, c.to, label);
+            if (QTest::currentTestFailed())
+                return;
+        }
+    }
+
+    // Downgrade cap: a full build that crosses the cap drops everything kept so far and
+    // continues as a pyramid-only overview; the result equals an overview built as such from
+    // the start (pyramid, long user spans, unmatched count) and the read is not cancelled.
+    void downgradeCapSwitchesToOverview()
+    {
+        QTemporaryDir tmp;
+        const QStringList anchors{writeWaitallOtf2(tmp.filePath(QStringLiteral("wa"))),
+                                  writeNonblockingOtf2(tmp.filePath(QStringLiteral("nb"))),
+                                  writePhasesOtf2(tmp.filePath(QStringLiteral("ph"))),
+                                  writeManyMessagesOtf2(tmp.filePath(QStringLiteral("many")), 4, 3000)};
+        for (const QString &a : anchors) {
+            const Built full = build(a);
+            QVERIFY(full.store && full.store->complete);
+            const Built overview = build(a, 0, kAll, false, 4);
+            QVERIFY(overview.store);
+
+            TraceAggregator agg;
+            TimelineBuilder builder(agg, 0, kAll, true, 4);
+            std::atomic_bool cancel{false};
+            const quint64 cap = std::max<quint64>(64, (full.store->bytesUsed() - pyramidBytes(int(full.store->rows.size()), 4)) / 3);
+            builder.setDowngradeCap(cap);
+            TraceMeta meta;
+            QString error;
+            QVERIFY2(readOtf2(a, builder, &meta, &error, &cancel), qPrintable(error));
+            QVERIFY(!cancel.load());
+            QVERIFY2(builder.downgraded(), qPrintable(a));
+            QVERIFY(!builder.overBudget());
+            QVERIFY(builder.keptBytesAtDowngrade() > 0);
+            QVERIFY(builder.keptBytesAtDowngrade() <= cap);
+            agg.finish(meta.traceLengthNs);
+            const auto store = builder.finish();
+            QVERIFY(store);
+            QVERIFY(!store->complete);
+            QVERIFY(store->messages.isEmpty());
+            QVERIFY(store->collectives.isEmpty());
+            QCOMPARE(store->unmatchedMessages, overview.store->unmatchedMessages);
+            QCOMPARE(store->rows.size(), overview.store->rows.size());
+            for (int r = 0; r < store->rows.size(); ++r) {
+                const RankRow &got = store->rows[r];
+                const RankRow &want = overview.store->rows[r];
+                QVERIFY(got.activities.isEmpty());
+                QVERIFY(got.links.isEmpty());
+                QCOMPARE(got.userSpans.size(), want.userSpans.size());
+                for (int i = 0; i < got.userSpans.size(); ++i) {
+                    QCOMPARE(got.userSpans[i].startNs, want.userSpans[i].startNs);
+                    QCOMPARE(got.userSpans[i].endNs, want.userSpans[i].endNs);
+                    QCOMPARE(store->functions.value(got.userSpans[i].function),
+                             overview.store->functions.value(want.userSpans[i].function));
+                }
+            }
+            QCOMPARE(store->pyramid.levels, overview.store->pyramid.levels);
+            QVERIFY2(store->pyramid.data == overview.store->pyramid.data, qPrintable(a));
+        }
+    }
+
+    // Below the downgrade cap the build stays complete.
+    void downgradeCapNotReachedKeepsFullStore()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeWaitallOtf2(tmp.path());
+        TraceAggregator agg;
+        TimelineBuilder builder(agg, 0, kAll, true, 4);
+        builder.setDowngradeCap(256 * 1024 * 1024);
+        TraceMeta meta;
+        QString error;
+        QVERIFY(readOtf2(anchor, builder, &meta, &error));
+        QVERIFY(!builder.downgraded());
+        QCOMPARE(builder.keptBytesAtDowngrade(), quint64(0));
+        agg.finish(meta.traceLengthNs);
+        QVERIFY(builder.finish()->complete);
     }
 
     void estimateIsUpperBound()
