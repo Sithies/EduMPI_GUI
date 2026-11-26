@@ -23,6 +23,10 @@
 #include <memory>
 #include <mutex>
 
+#ifdef Q_OS_UNIX
+#include <sys/resource.h>
+#endif
+
 namespace trace {
 
 QString resolveTracePath(const QString &urlOrPath, QString *error)
@@ -61,12 +65,14 @@ constexpr qint64 kNsPerSecond = 1'000'000'000;
 // restored by the last one, so overlapping reads never restore each other's state.
 
 thread_local QString tLastOtf2Error;
+thread_local OTF2_ErrorCode tLastOtf2Code = OTF2_SUCCESS;
 
 OTF2_ErrorCode captureOtf2Error(void *, const char *, uint64_t, const char *, OTF2_ErrorCode code,
                                 const char *fmt, va_list va)
 {
     char buf[512];
     std::vsnprintf(buf, sizeof(buf), fmt, va);
+    tLastOtf2Code = code;
     tLastOtf2Error = QStringLiteral("%1 (%2)").arg(QString::fromUtf8(buf),
                                                    QString::fromUtf8(OTF2_Error_GetName(code)));
     return code;
@@ -78,6 +84,7 @@ public:
     Otf2ErrorCapture()
     {
         tLastOtf2Error.clear();
+        tLastOtf2Code = OTF2_SUCCESS;
         const std::lock_guard<std::mutex> lock(s_mutex);
         if (s_active++ == 0)
             s_previous = OTF2_Error_RegisterCallback(&captureOtf2Error, nullptr);
@@ -849,6 +856,29 @@ void countWith(OTF2_ErrorCode (*set)(OTF2_GlobalEvtReaderCallbacks *, Fn), OTF2_
     set(cb, &EventCounter<Fn>::count);
 }
 
+// OTF2 keeps one event file per location open while reading. With more locations than the
+// process may open files (macOS: 256 for apps started from the Finder, Linux: often 1024), the
+// read fails with EMFILE: say so instead of calling the trace damaged.
+QString tooManyOpenFiles(qsizetype locations)
+{
+    QString limit = QStringLiteral("unknown");
+#ifdef Q_OS_UNIX
+    struct rlimit rl {};
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
+        limit = QString::number(quint64(rl.rlim_cur));
+#endif
+    return QStringLiteral("Too many open files: the trace has %1 locations (one event file each), "
+                          "but this process may only open %2 files at once. Raise the limit, e.g. "
+                          "start the GUI from a shell after `ulimit -n 10240`.")
+        .arg(locations)
+        .arg(limit);
+}
+
+bool lastErrorWasTooManyFiles()
+{
+    return tLastOtf2Code == OTF2_ERROR_EMFILE || tLastOtf2Code == OTF2_ERROR_ENFILE;
+}
+
 QString incompleteTrace(const char *what, OTF2_LocationRef loc, OTF2_ErrorCode rc)
 {
     return QStringLiteral("Trace is incomplete or damaged: could not read %1 of location %2 — %3")
@@ -869,7 +899,9 @@ bool prepareLocations(OTF2_Reader *reader, const QList<OTF2_LocationRef> &locati
     const bool haveDefFiles = OTF2_Reader_OpenDefFiles(reader) == OTF2_SUCCESS;
     const OTF2_ErrorCode rc = OTF2_Reader_OpenEvtFiles(reader);
     if (rc != OTF2_SUCCESS) {
-        *error = QStringLiteral("Cannot open OTF2 event files: %1").arg(Otf2ErrorCapture::message(rc));
+        *error = lastErrorWasTooManyFiles()
+            ? tooManyOpenFiles(locations.size())
+            : QStringLiteral("Cannot open OTF2 event files: %1").arg(Otf2ErrorCapture::message(rc));
         return false;
     }
     for (OTF2_LocationRef loc : locations) {
@@ -886,7 +918,8 @@ bool prepareLocations(OTF2_Reader *reader, const QList<OTF2_LocationRef> &locati
             }
         }
         if (!OTF2_Reader_GetEvtReader(reader, loc)) {
-            *error = incompleteTrace("events", loc, OTF2_ERROR_INVALID);
+            *error = lastErrorWasTooManyFiles() ? tooManyOpenFiles(locations.size())
+                                                : incompleteTrace("events", loc, OTF2_ERROR_INVALID);
             if (haveDefFiles)
                 OTF2_Reader_CloseDefFiles(reader);
             return false;

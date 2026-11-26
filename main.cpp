@@ -20,6 +20,17 @@
 #include <QFile>
 #include <QStandardPaths>
 #include <QVariantMap>
+#include <QDebug>
+
+#include <algorithm>
+#include <climits>
+
+#ifdef Q_OS_UNIX
+#include <sys/resource.h>
+#endif
+#ifdef Q_OS_MACOS
+#include <sys/sysctl.h>
+#endif
 
 // Dev-Modus (CMake-Option EDUMPI_DEV_MODE): Verbindungswerte des lokalen Dev-Clusters aus der
 // Datei in EDUMPI_DEV_ENV (EduMPI/dev/gui.env). Ohne Flag oder Datei: enabled = false.
@@ -53,8 +64,37 @@ static QVariantMap loadDevConfig()
     return config;
 }
 
+// Raises the soft limit of open files to the hard limit. Loading an OTF2 trace keeps one event
+// file per rank open; apps started from the macOS Finder get only 256 (Linux often 1024), too few
+// for traces with many ranks. macOS refuses limits above kern.maxfilesperproc, hence the cap.
+static void raiseOpenFileLimit()
+{
+#ifdef Q_OS_UNIX
+    struct rlimit rl {};
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0)
+        return;
+    rlim_t target = rl.rlim_max;
+#ifdef Q_OS_MACOS
+    int perProc = 0;
+    size_t size = sizeof(perProc);
+    if (sysctlbyname("kern.maxfilesperproc", &perProc, &size, nullptr, 0) == 0 && perProc > 0)
+        target = std::min<rlim_t>(target, rlim_t(perProc));
+    target = std::min<rlim_t>(target, OPEN_MAX);
+#endif
+    if (target <= rl.rlim_cur)
+        return;
+    const rlim_t previous = rl.rlim_cur;
+    rl.rlim_cur = target;
+    if (setrlimit(RLIMIT_NOFILE, &rl) != 0)
+        qWarning() << "Cannot raise the open file limit from" << quint64(previous) << "to"
+                   << quint64(target) << "- large traces may fail to load";
+#endif
+}
+
 int main(int argc, char *argv[])
 {
+    raiseOpenFileLimit();
+
     qputenv("QT_IM_MODULE", QByteArray());
     qputenv("QT_WAYLAND_DISABLE_TEXT_INPUT", "1");
     qputenv("QT_LOGGING_RULES", "qt.qpa.wayland.textinput=false");

@@ -6,6 +6,11 @@
 #include <cstdarg>
 #include <thread>
 
+#ifdef Q_OS_UNIX
+#include <fcntl.h>
+#include <sys/resource.h>
+#endif
+
 #include "otf2_fixture.h"
 #include "otf2_trace_reader.h"
 #include "ring4_scenario.h"
@@ -390,6 +395,41 @@ private slots:
         QVERIFY(!readOtf2(anchor, agg, &meta, &error));
         QVERIFY2(error.contains(QStringLiteral("incomplete or damaged")), qPrintable(error));
         QVERIFY2(error.contains(QStringLiteral("events of location 1")), qPrintable(error));
+    }
+
+    // More locations than the process may open files: a clear message (limit, hint), not
+    // "incomplete or damaged".
+    void reportsTooManyOpenFiles()
+    {
+#ifndef Q_OS_UNIX
+        QSKIP("needs setrlimit");
+#else
+        QTemporaryDir tmp;
+        const QString anchor = writeManyMessagesOtf2(tmp.path(), 64, 2);
+        QVERIFY(!anchor.isEmpty());
+
+        struct rlimit saved {};
+        QVERIFY(getrlimit(RLIMIT_NOFILE, &saved) == 0);
+        int highestOpen = 0; // file descriptors already open (Qt, test framework)
+        for (int fd = 0; fd < 4096; ++fd)
+            if (fcntl(fd, F_GETFD) != -1)
+                highestOpen = fd;
+        struct rlimit low = saved;
+        low.rlim_cur = rlim_t(highestOpen + 16); // room for the anchor / definitions, not for 64 event files
+        QVERIFY(setrlimit(RLIMIT_NOFILE, &low) == 0);
+
+        TraceAggregator agg;
+        TraceMeta meta;
+        QString error;
+        const bool ok = readOtf2(anchor, agg, &meta, &error);
+        QVERIFY(setrlimit(RLIMIT_NOFILE, &saved) == 0);
+
+        QVERIFY(!ok);
+        QVERIFY2(error.contains(QStringLiteral("Too many open files")), qPrintable(error));
+        QVERIFY2(error.contains(QStringLiteral("64 locations")), qPrintable(error));
+        QVERIFY2(error.contains(QStringLiteral("ulimit -n")), qPrintable(error));
+        QVERIFY2(!error.contains(QStringLiteral("damaged")), qPrintable(error));
+#endif
     }
 
     // Traces without local definition files are still read.
