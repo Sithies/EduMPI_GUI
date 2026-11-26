@@ -1,5 +1,7 @@
 #include "otf2_trace_reader.h"
 
+#include "evt_prefetch.h"
+
 #include <QDir>
 #include <QFileInfo>
 #include <QHash>
@@ -1290,9 +1292,18 @@ bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QStri
 
     bool ok = false;
     if (pipe) {
+        // Whole-trace read: the event files are read ahead in the background.
+        QStringList evtFiles;
+        for (OTF2_LocationRef loc : std::as_const(toRead))
+            evtFiles.append(EvtPrefetcher::evtFile(anchor.absoluteFilePath(), loc));
+        EvtPrefetcher prefetch(evtFiles);
         std::thread worker([&] {
             Otf2ErrorCapture workerCapture;
-            ok = readPart([&](quint64 done, quint64 all) { pipe->progress(done, all); }, &err);
+            ok = readPart([&](quint64 done, quint64 all) {
+                prefetch.setProgress(all > 0 ? double(done) / double(all) : 1.0);
+                pipe->progress(done, all);
+            }, &err);
+            prefetch.stop();
             pipe->close();
         });
         pipe->drainInto(sink, options.progress);
