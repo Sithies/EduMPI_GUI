@@ -80,7 +80,9 @@ class TraceGraphItem : public QQuickPaintedItem
     // "size" (average message size), "locality" (inside / between compute nodes), "change"
     // (waiting against the reference window). Edges inside a compute node are drawn lighter.
     Q_PROPERTY(QString edgeColor READ edgeColor WRITE setEdgeColor NOTIFY displayChanged)
-    // Node fill: "wait" (default, white -> blue) or "compute" (time outside MPI, white -> orange).
+    // Node fill: "wait" (default, white -> blue), "compute" (time outside MPI, white -> orange),
+    // "ratio" (share of sent bytes: blue = receives, white = balanced, orange = sends) or
+    // "arrival" (arrival at the collective stepped to: white = first, red = last).
     Q_PROPERTY(QString nodeColor READ nodeColor WRITE setNodeColor NOTIFY displayChanged)
     // Legend of the colours: maps with label, low, high (texts), colors (list of colour names).
     Q_PROPERTY(QVariantMap edgeLegend READ edgeLegend NOTIFY graphChanged)
@@ -92,6 +94,8 @@ class TraceGraphItem : public QQuickPaintedItem
     Q_PROPERTY(bool hasReference READ hasReference NOTIFY referenceChanged)
     // Collective calls in the window (stepCollective).
     Q_PROPERTY(int collectiveCount READ collectiveCount NOTIFY graphChanged)
+    // The critical path of the window drawn in gold (ranks and hand-overs).
+    Q_PROPERTY(bool showCriticalPath READ showCriticalPath WRITE setShowCriticalPath NOTIFY displayChanged)
     Q_PROPERTY(QString referenceLabel READ referenceLabel NOTIFY referenceChanged)
     // Finding whose ranks / link are highlighted (-1 = none); the rest of the graph is dimmed.
     Q_PROPERTY(int highlightedFinding READ highlightedFinding WRITE setHighlightedFinding NOTIFY highlightChanged)
@@ -162,6 +166,11 @@ public:
     // when the window has no further one (the caller then moves the window on).
     Q_INVOKABLE QVariantMap stepCollective(int direction);
     int collectiveCount() const { return int(m_collInstances.size()); }
+    bool showCriticalPath() const { return m_showCritical; }
+    void setShowCriticalPath(bool on);
+    const trace::CriticalPath &criticalPathOfWindow() const { return m_critical; }
+    // Arrival offset of a rank at the collective stepped to (seconds after the first; -1 = not in it).
+    double arrivalSeconds(int rank) const;
     // The current window (ranks) as the reference for comparisons; clearReference drops it.
     Q_INVOKABLE void setReference();
     Q_INVOKABLE void clearReference();
@@ -262,6 +271,8 @@ private:
     void setStatus(const QString &status);
     void paintHint(QPainter *painter);
     QColor waitColor(double seconds) const;
+    QColor ratioColor(int node) const;
+    QColor arrivalColor(int node) const;
 
     QPointer<TraceTimelineModel> m_model;
     qint64 m_viewStart = 0;
@@ -311,6 +322,12 @@ private:
     QString m_referenceLabel;
     QHash<quint64, double> m_referenceLinkWait; // (sender << 32 | receiver) -> waiting per second
     QVector<trace::CollectiveInstance> m_collInstances; // of the window, by first enter
+    QPair<quint64, qint64> m_focusKey{0, -1};           // collective stepped to: (comm, last enter)
+    int m_focusCollective = -1;                          // its index in m_collInstances
+    trace::CriticalPath m_critical;
+    bool m_showCritical = false;
+    QVector<bool> m_criticalNodes;
+    QVector<int> m_criticalEdges;
     qint64 m_navFirst = -1;    // first enter of the collective stepped to last
     qint64 m_navViewFrom = -1; // the view start set for it (a changed view resets the anchor)
     QVector<QVariantList> m_findingSeries;      // per finding: waiting over time of its ranks

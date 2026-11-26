@@ -556,7 +556,7 @@ private slots:
         item.setModel(&model);
         item.setLevel(QStringLiteral("ranks"));
         QTRY_VERIFY(!item.layoutBusy());
-        QCOMPARE(item.effectiveLayout(), QStringLiteral("stress"));
+        QCOMPARE(item.effectiveLayout(), QStringLiteral("tree")); // a binomial tree
     }
 
     // Reference window: comparison findings and the "change" line colour.
@@ -657,6 +657,19 @@ private slots:
         QVERIFY(next.value(QStringLiteral("fromNs")).toLongLong() < 1200 * kMs);
         QVERIFY(next.value(QStringLiteral("toNs")).toLongLong() > 1200 * kMs);
         QVERIFY(next.value(QStringLiteral("label")).toString().contains(QStringLiteral("MPI_Allreduce")));
+        // Arrival colours: rank 2 (last) red, the first white.
+        item.setNodeColor(QStringLiteral("arrival"));
+        QCOMPARE(item.nodeColor(), QStringLiteral("arrival"));
+        QVERIFY(item.arrivalSeconds(2) > 0.1);
+        QVERIFY(item.nodeLegend().value(QStringLiteral("high")).toString().contains(QStringLiteral("ms")));
+        item.setNodeColor(QStringLiteral("ratio"));
+        QCOMPARE(item.nodeLegend().value(QStringLiteral("low")).toString(), QStringLiteral("receives"));
+        // Critical path in gold.
+        item.setShowCriticalPath(true);
+        QVERIFY(item.showCriticalPath());
+        QVERIFY(!item.criticalPathOfWindow().ranks.isEmpty());
+        QVERIFY(!render(item).isNull());
+        item.setShowCriticalPath(false);
         // The view follows (as TraceGraph.qml does); from there no earlier / later one.
         item.setViewStartNs(next.value(QStringLiteral("fromNs")).toLongLong());
         item.setViewEndNs(next.value(QStringLiteral("toNs")).toLongLong());

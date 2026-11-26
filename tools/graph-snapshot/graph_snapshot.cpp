@@ -253,12 +253,34 @@ int main(int argc, char **argv)
                     graph->zoomToFinding(kv.section(QLatin1Char('='), 1).toInt());
                     continue;
                 }
-                if (key == QLatin1String("pin") && graph) {
-                    // As a click on a card: opened, highlighted, zoomed.
-                    const int idx = kv.section(QLatin1Char('='), 1).toInt();
+                if ((key == QLatin1String("pin") || key == QLatin1String("pinKind")) && graph) {
+                    // As a click on a card: opened, highlighted, zoomed (by index or by kind).
+                    int idx = kv.section(QLatin1Char('='), 1).toInt();
+                    if (key == QLatin1String("pinKind")) {
+                        idx = -1;
+                        const QVariantList list = graph->findingMaps();
+                        for (int k = 0; k < list.size(); ++k)
+                            if (list[k].toMap().value(QStringLiteral("kind")).toString() == kv.section(QLatin1Char('='), 1))
+                                idx = k;
+                    }
                     if (QObject *panel = obj->findChild<QObject *>(QStringLiteral("findingsPanel")))
                         panel->setProperty("pinned", idx);
                     graph->zoomToFinding(idx);
+                    continue;
+                }
+                if (key == QLatin1String("critical") && graph) {
+                    graph->setShowCriticalPath(kv.section(QLatin1Char('='), 1) == QLatin1String("true"));
+                    continue;
+                }
+                if (key == QLatin1String("step") && graph) {
+                    const QVariantMap r = graph->stepCollective(kv.section(QLatin1Char('='), 1).toInt());
+                    if (r.value(QStringLiteral("found")).toBool()) {
+                        state->setProperty("viewStartNs", r.value(QStringLiteral("fromNs")).toDouble());
+                        state->setProperty("viewEndNs", r.value(QStringLiteral("toNs")).toDouble());
+                        state->setProperty("selectedRank", r.value(QStringLiteral("lastRank")).toInt());
+                        state->setProperty("graphNodeColor", QStringLiteral("arrival"));
+                        std::printf("step: %s\n", qPrintable(r.value(QStringLiteral("label")).toString()));
+                    }
                     continue;
                 }
                 if (key == QLatin1String("reference") && graph) {

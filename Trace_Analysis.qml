@@ -71,7 +71,7 @@ Window {
         property int graphLinkTo: -1
         // Trace Graph colours and edge filter.
         property string graphEdgeColor: "wait"   // "wait", "volume", "size", "locality", "change"
-        property string graphNodeColor: "wait"   // "wait" or "compute"
+        property string graphNodeColor: "wait"   // "wait", "compute", "ratio" or "arrival"
         property string graphEdgeFilter: "all"   // "all", "waiting", "between", "inside"
         property string name: ""
         // Loaded file or folder as a local path (the file dialog yields file:// URLs).

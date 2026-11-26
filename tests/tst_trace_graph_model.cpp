@@ -552,8 +552,8 @@ private slots:
         // Ring: a circle (stress or circle), every neighbour next to it.
         const CommGraph rg = handGraph(n, 32, ring);
         QVERIFY(neighbourhoodPreservation(rg, autoLayout(rg).positions) > 0.95);
-        // Tree and star: the stress layout (the circle would hide them).
-        QCOMPARE(autoLayout(handGraph(n, 32, tree)).layout, GraphLayout::Stress);
+        // Tree: the tree layout; star: the stress layout (the circle would hide them).
+        QCOMPARE(autoLayout(handGraph(n, 32, tree)).layout, GraphLayout::Tree);
         QCOMPARE(autoLayout(handGraph(n, 32, star)).layout, GraphLayout::Stress);
         // Without P2P edges: the circle.
         QCOMPARE(autoLayout(handGraph(n, 32, {})).layout, GraphLayout::Circle);
@@ -726,6 +726,61 @@ private slots:
         QCOMPARE(f[1].kind, QStringLiteral("collectiveops"));
         QVERIFY2(f[1].metric.startsWith(QStringLiteral("MPI_Allreduce")), qPrintable(f[1].metric));
         QVERIFY(analyzeCollectives({}, 1000 * kMs, 4).isEmpty());
+    }
+
+    // Tree-shaped communication: Auto takes the tree layout, root (most partners) at the top,
+    // children one level below their parent.
+    void treeLayoutRootOnTop()
+    {
+        QVector<std::tuple<int, int, quint64, double>> tree;
+        for (int r = 1; r < 32; ++r)
+            tree.append({r, r & (r - 1), 100, 0.0}); // binomial reduce to rank 0
+        const CommGraph g = handGraph(32, 16, tree);
+        const LayoutChoice c = autoLayout(g);
+        QCOMPARE(c.layout, GraphLayout::Tree);
+        const int root = g.indexOfRank(0);
+        for (int i = 0; i < 32; ++i)
+            if (i != root)
+                QVERIFY(c.positions[i].y() > c.positions[root].y());
+        // Rank 3's parent is 2, which is one level higher.
+        QVERIFY(c.positions[g.indexOfRank(3)].y() > c.positions[g.indexOfRank(2)].y());
+        QCOMPARE(layoutName(GraphLayout::Tree), QStringLiteral("tree"));
+        // A star (one level) is no tree layout case; a ring is not a tree.
+        QVector<std::tuple<int, int, quint64, double>> star, ring;
+        for (int r = 1; r < 16; ++r)
+            star.append({r, 0, 100, 0.0});
+        for (int r = 0; r < 16; ++r)
+            ring.append({r, (r + 1) % 16, 100, 0.0});
+        QVERIFY(autoLayout(handGraph(16, 8, star)).layout != GraphLayout::Tree);
+        QVERIFY(autoLayout(handGraph(16, 8, ring)).layout != GraphLayout::Tree);
+    }
+
+    // Critical path of ring4's window: ends at the rank finishing last, jumps at wait states
+    // to the late partner; time split adds up.
+    void criticalPathOfWindow()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeRing4Otf2(tmp.path());
+        QVERIFY(!anchor.isEmpty());
+        auto store = build(anchor);
+        QVERIFY(store);
+        const QVector<CollectiveInstance> inst = collectiveInstances(*store, 0, 2500 * kMs);
+        const CriticalPath p = criticalPath(*store, 0, 2500 * kMs, inst);
+        QVERIFY(!p.ranks.isEmpty());
+        QVERIFY(p.lengthSeconds > 0);
+        const double sum = p.computeSeconds + p.mpiSeconds + p.transferSeconds;
+        QVERIFY2(sum > 0 && sum <= p.lengthSeconds + 1e-6, qPrintable(QStringLiteral("%1 %2").arg(sum).arg(p.lengthSeconds)));
+        QCOMPARE(p.jumps.size() + 1 >= p.ranks.size(), true);
+        // The allreduce in second 1 waited for rank 2: the path passes rank 2.
+        QVERIFY(p.ranks.contains(2));
+        const GraphFinding f = criticalPathFinding(p);
+        QCOMPARE(f.kind, QStringLiteral("critical"));
+        QCOMPARE(f.category, QStringLiteral("critical"));
+        QVERIFY(f.metric.contains(QStringLiteral("computation")));
+        QVERIFY(!f.action.isEmpty());
+        QVERIFY(criticalPathFinding(CriticalPath()).title.isEmpty());
+        // Arrival times per member are kept.
+        QCOMPARE(inst[0].enters.size(), inst[0].ranks.size());
     }
 
     // The pattern of a real trace: the ring of writeManyMessagesOtf2 (r -> r + 1).

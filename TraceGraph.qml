@@ -29,6 +29,11 @@ Rectangle {
         if (r.found) {
             collectiveLabel.text = r.label
             traceState.selectedRank = r.lastRank
+            // Circles show the arrival at this call (white = first, red = last).
+            if (traceState.graphNodeColor !== undefined)
+                traceState.graphNodeColor = "arrival"
+            else
+                graph.nodeColor = "arrival"
             traceState.viewRequested(r.fromNs, r.toNs)
             return
         }
@@ -130,10 +135,10 @@ Rectangle {
                     implicitHeight: trace_graph_view.embedded ? 18 : 22
                     implicitWidth: 170
                     font.pointSize: 9
-                    readonly property var values: ["auto", "circle", "grid", "torus", "stress", "spectral", "spectral circle"]
+                    readonly property var values: ["auto", "circle", "grid", "torus", "tree", "stress", "spectral", "spectral circle"]
                     model: [
                         qsTr("Layout: Auto") + (graph.layout === "auto" ? " (" + graph.effectiveLayout + ")" : ""),
-                        qsTr("Layout: Circle"), qsTr("Layout: Grid"), qsTr("Layout: Torus"), qsTr("Layout: Stress"),
+                        qsTr("Layout: Circle"), qsTr("Layout: Grid"), qsTr("Layout: Torus"), qsTr("Layout: Tree"), qsTr("Layout: Stress"),
                         qsTr("Layout: Spectral"), qsTr("Layout: Spectral circle")
                     ]
                     currentIndex: Math.max(0, values.indexOf(graph.layout))
@@ -148,6 +153,7 @@ Rectangle {
                         + "• Grid: the process grid of a detected 2D stencil\n"
                         + "• Stress: distances in the picture follow the hops between ranks (grids become grids, rings rings, clusters clusters)\n"
                         + "• Torus: a periodic grid (edges wrap around) cut open flat, found from the data; links across the cut are short dotted stubs at the border\n"
+                        + "• Tree: root at the top, levels below – for tree-shaped communication (reductions, broadcast trees)\n"
                         + "• Spectral: from the eigenvectors of the communication graph\n"
                         + "• Spectral circle: a circle in which partners sit next to each other")
                 }
@@ -354,8 +360,8 @@ Rectangle {
                     }
                     Picker {
                         implicitWidth: 150
-                        values: ["wait", "compute"]
-                        model: [qsTr("fill: waiting"), qsTr("fill: compute time")]
+                        values: ["wait", "compute", "ratio", "arrival"]
+                        model: [qsTr("fill: waiting"), qsTr("fill: compute time"), qsTr("fill: sent / received"), qsTr("fill: arrival at collective")]
                         current: graph.nodeColor
                         onPicked: (v) => { if (trace_graph_view.traceState) trace_graph_view.traceState.graphNodeColor = v; else graph.nodeColor = v }
                     }
@@ -451,6 +457,16 @@ Rectangle {
                         ToolTip.visible: hovered
                         ToolTip.delay: 500
                         ToolTip.text: qsTr("Next collective call")
+                    }
+                    Button {
+                        implicitHeight: 22
+                        checkable: true
+                        checked: graph.showCriticalPath
+                        text: qsTr("Critical path")
+                        onToggled: graph.showCriticalPath = checked
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("Draws the critical path of the window in gold: the chain of work and hand-overs that determines its run time (time split in the finding “Critical path”)")
                     }
                     Text {
                         id: collectiveLabel
@@ -633,6 +649,7 @@ Rectangle {
             property int pinned: -1
             property var collapsed: ({})
             readonly property var categories: [
+                { key: "critical", label: qsTr("Critical path") },
                 { key: "waiting", label: qsTr("Waiting") },
                 { key: "collectives", label: qsTr("Collectives") },
                 { key: "load", label: qsTr("Load") },
@@ -785,6 +802,7 @@ Rectangle {
                                                         case "link": return "⇄"
                                                         case "size": return "✉"
                                                         case "lateatcollective": return "⏱"
+                                                        case "critical": return "★"
                                                         case "collectiveops": return "∑"
                                                         }
                                                         return "≠"

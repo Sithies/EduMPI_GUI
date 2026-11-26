@@ -285,6 +285,8 @@ void TraceGraphItem::setLayout(const QString &layout)
         fixed = trace::GraphLayout::SpectralCircle;
     else if (layout == QLatin1String("torus"))
         fixed = trace::GraphLayout::Torus;
+    else if (layout == QLatin1String("tree"))
+        fixed = trace::GraphLayout::Tree;
     else if (layout != QLatin1String("circle"))
         mode = LayoutMode::Auto;
     if (mode == m_layoutMode && (mode == LayoutMode::Auto || fixed == m_fixedLayout))
@@ -690,6 +692,7 @@ void TraceGraphItem::rebuild()
     std::shared_ptr<const TimelineStore> seriesStore;
     m_rankGraph = CommGraph();
     m_collInstances.clear();
+    m_critical = trace::CriticalPath();
     if (overview) {
         m_overviewRankHost.clear();
         for (const auto &row : overview->rows)
@@ -719,6 +722,10 @@ void TraceGraphItem::rebuild()
         seriesStore = detail;
         m_collInstances = trace::collectiveInstances(*detail, from, to);
         rankGraphFindings += trace::analyzeCollectives(m_collInstances, to - from, rankGraph.rankNodeCount);
+        m_critical = trace::criticalPath(*detail, from, to, m_collInstances);
+        const trace::GraphFinding cf = trace::criticalPathFinding(m_critical);
+        if (!cf.title.isEmpty())
+            rankGraphFindings.append(cf);
     } else {
         // Nodes without edges, so the layout is already in place.
         m_graph = trace::buildCommGraph(*overview, 0, 0, m_options);
@@ -751,6 +758,36 @@ void TraceGraphItem::rebuild()
     relayout();
     m_highlightFinding = -1;
     updateHighlight();
+    // The collective stepped to, if still in the window.
+    m_focusCollective = -1;
+    for (int i = 0; i < m_collInstances.size(); ++i)
+        if (m_collInstances[i].comm == m_focusKey.first && m_collInstances[i].lastEnterNs == m_focusKey.second)
+            m_focusCollective = i;
+    // Critical path in graph nodes / edges (ranks, or their hosts).
+    m_criticalNodes = QVector<bool>(m_graph.nodes.size(), false);
+    m_criticalEdges.clear();
+    {
+        QHash<int, int> nodeOfRank;
+        for (int i = 0; i < m_graph.rankNodeCount; ++i) {
+            const GraphNode &n = m_graph.nodes[i];
+            if (n.kind == GraphNode::Kind::Rank)
+                nodeOfRank.insert(n.rank, i);
+        }
+        for (int i = 0; i < m_graph.rankNodeCount; ++i)
+            if (m_graph.nodes[i].kind == GraphNode::Kind::Node)
+                for (int r : std::as_const(m_critical.ranks))
+                    if (m_overviewRankHost.value(r) == m_graph.nodes[i].node)
+                        nodeOfRank.insert(r, i);
+        for (int r : std::as_const(m_critical.ranks))
+            if (nodeOfRank.contains(r))
+                m_criticalNodes[nodeOfRank.value(r)] = true;
+        for (const auto &j : std::as_const(m_critical.jumps)) {
+            const int a = nodeOfRank.value(j.first, -1), b = nodeOfRank.value(j.second, -1);
+            for (int i = 0; i < m_graph.edges.size() && a >= 0 && b >= 0 && a != b; ++i)
+                if (m_graph.edges[i].kind == GraphEdge::Kind::P2P && m_graph.edges[i].from == a && m_graph.edges[i].to == b)
+                    m_criticalEdges.append(i);
+        }
+    }
     // Waiting of a rank (late sender): receiver of a P2P edge, caller of a collective.
     m_nodeWait = trace::nodeWaiting(m_graph);
     m_maxInternal = 0;
@@ -1260,11 +1297,22 @@ void TraceGraphItem::paint(QPainter *painter)
     }
 
     // The link of the highlighted finding, on top (also when not among the drawn edges).
-    for (int he : std::as_const(m_highlightEdges)) {
-        if (!highlight || he < 0 || he >= m_graph.edges.size())
+    const bool criticalFinding = m_highlightFinding >= 0 && m_highlightFinding < m_findings.size()
+        && m_findings[m_highlightFinding].kind == QLatin1String("critical");
+    QVector<int> goldEdges = m_showCritical ? m_criticalEdges : QVector<int>();
+    QVector<int> orangeEdges = highlight && !criticalFinding ? m_highlightEdges : QVector<int>();
+    if (highlight && criticalFinding)
+        goldEdges += m_highlightEdges;
+    QVector<std::pair<int, QColor>> topEdges;
+    for (int he : std::as_const(goldEdges))
+        topEdges.append({he, QColor(0xd4, 0xa0, 0x17)});
+    for (int he : std::as_const(orangeEdges))
+        topEdges.append({he, QColor(0xf9, 0x73, 0x16)});
+    for (const auto &[he, edgeColour] : std::as_const(topEdges)) {
+        if (he < 0 || he >= m_graph.edges.size())
             continue;
         const EdgePath path = edgePath(m_graph.edges[he]);
-        const QColor c(0xf9, 0x73, 0x16);
+        const QColor c = edgeColour;
         QPen pen(c, 5);
         pen.setCapStyle(Qt::RoundCap);
         painter->setPen(pen);
@@ -1301,9 +1349,10 @@ void TraceGraphItem::paint(QPainter *painter)
         const QPointF p = nodePosition(i);
         if (!visible.contains(p))
             continue;
-        if (highlight && m_highlightNodes[i]) {
-            // Halo of a highlighted rank / node.
-            QColor halo(0xf9, 0x73, 0x16);
+        const bool goldNode = (m_showCritical && m_criticalNodes.value(i)) || (highlight && criticalFinding && m_highlightNodes[i]);
+        if ((highlight && m_highlightNodes[i]) || goldNode) {
+            // Halo of a highlighted rank / node (gold: the critical path).
+            QColor halo = goldNode ? QColor(0xd4, 0xa0, 0x17) : QColor(0xf9, 0x73, 0x16);
             halo.setAlphaF(0.45);
             painter->setPen(Qt::NoPen);
             painter->setBrush(halo);
@@ -1314,6 +1363,8 @@ void TraceGraphItem::paint(QPainter *painter)
         // colour when the ranks of several hosts are shown, the selection colour when selected.
         QColor fill = n.kind == GraphNode::Kind::Communicator
             ? kCommunicatorColor
+            : m_nodeColor == QLatin1String("ratio") ? ratioColor(i)
+            : m_nodeColor == QLatin1String("arrival") ? arrivalColor(i)
             : m_nodeColor == QLatin1String("compute")
                 ? mix(kWaitLowColor, QColor(0xff, 0x7f, 0x0e),
                       m_maxCompute > m_minCompute ? (computeSeconds(i) - m_minCompute) / (m_maxCompute - m_minCompute) : 0)
@@ -1548,9 +1599,82 @@ QVariantMap TraceGraphItem::edgeLegend() const
     return m;
 }
 
+void TraceGraphItem::setShowCriticalPath(bool on)
+{
+    if (on == m_showCritical)
+        return;
+    m_showCritical = on;
+    emit displayChanged();
+    update();
+}
+
+double TraceGraphItem::arrivalSeconds(int rank) const
+{
+    if (m_focusCollective < 0 || m_focusCollective >= m_collInstances.size())
+        return -1;
+    const trace::CollectiveInstance &c = m_collInstances[m_focusCollective];
+    const int k = int(c.ranks.indexOf(rank));
+    return k < 0 ? -1 : (c.enters[k] - c.firstEnterNs) / 1e9;
+}
+
+QColor TraceGraphItem::ratioColor(int node) const
+{
+    // Share of the node's P2P bytes that it sends: blue = receives, white = balanced, orange = sends.
+    double sent = 0, recv = 0;
+    for (const GraphEdge &e : std::as_const(m_graph.edges)) {
+        if (e.kind != GraphEdge::Kind::P2P)
+            continue;
+        if (e.from == node)
+            sent += double(e.bytes);
+        if (e.to == node)
+            recv += double(e.bytes);
+    }
+    if (sent + recv <= 0)
+        return QColor(0xe5, 0xe7, 0xeb);
+    const double r = sent / (sent + recv);
+    return r < 0.5 ? mix(QColor(0x21, 0x66, 0xac), Qt::white, r * 2) : mix(Qt::white, QColor(0xe6, 0x61, 0x01), (r - 0.5) * 2);
+}
+
+QColor TraceGraphItem::arrivalColor(int node) const
+{
+    // Arrival at the collective stepped to: white = first, red = last; grey = not in it.
+    if (m_focusCollective < 0 || m_focusCollective >= m_collInstances.size() || node >= m_graph.rankNodeCount)
+        return QColor(0xe5, 0xe7, 0xeb);
+    const trace::CollectiveInstance &c = m_collInstances[m_focusCollective];
+    const double span = double(c.lastEnterNs - c.firstEnterNs);
+    const GraphNode &n = m_graph.nodes[node];
+    double latest = -1;
+    for (int k = 0; k < c.ranks.size(); ++k) {
+        const bool member = n.kind == GraphNode::Kind::Rank ? c.ranks[k] == n.rank
+                                                            : m_overviewRankHost.value(c.ranks[k]) == n.node;
+        if (member)
+            latest = std::max(latest, double(c.enters[k] - c.firstEnterNs));
+    }
+    if (latest < 0)
+        return QColor(0xe5, 0xe7, 0xeb);
+    return mix(Qt::white, QColor(0xc6, 0x28, 0x28), span > 0 ? latest / span : 0);
+}
+
 QVariantMap TraceGraphItem::nodeLegend() const
 {
     QVariantMap m;
+    if (m_nodeColor == QLatin1String("ratio")) {
+        m.insert(QStringLiteral("title"), tr("Fill: sent / received"));
+        m.insert(QStringLiteral("colors"), QStringList{QStringLiteral("#2166ac"), QStringLiteral("#ffffff"), QStringLiteral("#e66101")});
+        m.insert(QStringLiteral("low"), tr("receives"));
+        m.insert(QStringLiteral("high"), tr("sends"));
+        return m;
+    }
+    if (m_nodeColor == QLatin1String("arrival")) {
+        const bool has = m_focusCollective >= 0 && m_focusCollective < m_collInstances.size();
+        m.insert(QStringLiteral("title"), tr("Fill: arrival at the collective"));
+        m.insert(QStringLiteral("colors"), QStringList{QStringLiteral("#ffffff"), QStringLiteral("#c62828")});
+        m.insert(QStringLiteral("low"), has ? tr("first") : tr("step to a collective ▶"));
+        m.insert(QStringLiteral("high"), has ? tr("last +%1").arg(formatMs((m_collInstances[m_focusCollective].lastEnterNs
+                                                                            - m_collInstances[m_focusCollective].firstEnterNs) / 1e9))
+                                             : QString());
+        return m;
+    }
     if (m_nodeColor == QLatin1String("compute")) {
         m.insert(QStringLiteral("title"), tr("Fill: compute time (outside MPI)"));
         m.insert(QStringLiteral("colors"), QStringList{kWaitLowColor.name(), QColor(0xff, 0x7f, 0x0e).name()});
@@ -1582,7 +1706,8 @@ void TraceGraphItem::setEdgeColor(const QString &mode)
 
 void TraceGraphItem::setNodeColor(const QString &mode)
 {
-    const QString m = mode == QLatin1String("compute") ? mode : QStringLiteral("wait");
+    const QString m = (mode == QLatin1String("compute") || mode == QLatin1String("ratio") || mode == QLatin1String("arrival"))
+        ? mode : QStringLiteral("wait");
     if (m == m_nodeColor)
         return;
     m_nodeColor = m;
@@ -1663,6 +1788,8 @@ QVariantMap TraceGraphItem::stepCollective(int direction)
     const qint64 span = std::max<qint64>(c.endNs - c.firstEnterNs, 1000);
     const qint64 pad = std::max<qint64>(span / 5, 5000);
     m_navFirst = c.firstEnterNs;
+    m_focusKey = {c.comm, c.lastEnterNs};
+    m_focusCollective = pick;
     m_navViewFrom = std::max<qint64>(0, c.firstEnterNs - pad);
     const double meanWait = c.ranks.isEmpty() ? 0 : c.totalWaitSeconds / c.ranks.size();
     r.insert(QStringLiteral("found"), true);

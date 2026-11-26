@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 
 namespace trace {
@@ -1140,6 +1141,7 @@ QVector<CollectiveInstance> collectiveInstances(const TimelineStore &store, qint
             inst.endNs = std::max(inst.endNs, a.endNs);
             inst.totalWaitSeconds += c.lateSender;
             inst.ranks.append(r.rank);
+            inst.enters.append(a.startNs);
             // The last to arrive: the latest enter.
             if (inst.lastRank < 0 || a.startNs > lastSeen[*idx]) {
                 inst.lastRank = r.rank;
@@ -1151,6 +1153,154 @@ QVector<CollectiveInstance> collectiveInstances(const TimelineStore &store, qint
         return x.firstEnterNs != y.firstEnterNs ? x.firstEnterNs < y.firstEnterNs : x.comm < y.comm;
     });
     return out;
+}
+
+CriticalPath criticalPath(const TimelineStore &store, qint64 fromNs, qint64 toNs,
+                          const QVector<CollectiveInstance> &instances)
+{
+    CriticalPath p;
+    if (store.rows.isEmpty() || toNs <= fromNs)
+        return p;
+    // Last arrivals of collective calls: (comm, last enter µs) -> last rank.
+    QHash<QPair<quint64, qint64>, int> lastOf;
+    for (const CollectiveInstance &c : instances)
+        lastOf.insert({c.comm, c.lastEnterNs / 1000}, c.lastRank);
+    // Start: the rank whose last MPI call in the window ends latest.
+    int cur = -1;
+    qint64 t = fromNs;
+    for (int i = 0; i < store.rows.size(); ++i) {
+        const auto &acts = store.rows[i].activities;
+        auto it = std::lower_bound(acts.cbegin(), acts.cend(), toNs,
+                                   [](const Activity &a, qint64 x) { return a.startNs < x; });
+        if (it == acts.cbegin())
+            continue;
+        --it;
+        const qint64 end = std::min(it->endNs, toNs);
+        if (end > t) {
+            t = end;
+            cur = i;
+        }
+    }
+    if (cur < 0)
+        return p;
+    const qint64 endT = t;
+    p.ranks.append(store.rows[cur].rank);
+    // Waiting of a call: receives carry it (waitNs), collectives as late sender of the rank.
+    auto waitOf = [&](const RankRow &row, const Activity &a) -> qint64 {
+        qint64 w = a.waitNs;
+        if (a.category == Category::Collective && a.linkCount > 0) {
+            const qint32 link = row.links[a.firstLink];
+            if (link >= 0 && link < store.collectives.size())
+                w = std::max(w, qint64(std::llround(store.collectives[link].lateSender * 1e9)));
+        }
+        return std::min(w, std::max<qint64>(0, a.endNs - a.startNs));
+    };
+    for (int guard = 0; guard < 4096 && t > fromNs; ++guard) {
+        const RankRow &row = store.rows[cur];
+        // Latest activity starting before t with a wait state.
+        auto it = std::lower_bound(row.activities.cbegin(), row.activities.cend(), t,
+                                   [](const Activity &a, qint64 x) { return a.startNs < x; });
+        const Activity *wait = nullptr;
+        qint64 waitNs = 0;
+        double mpi = 0;
+        qint64 segEnd = t;
+        while (it != row.activities.cbegin()) {
+            --it;
+            if (it->endNs <= fromNs)
+                break;
+            const qint64 w = waitOf(row, *it);
+            if (w > 0 && it->startNs + w <= t) {
+                wait = &*it;
+                waitNs = w;
+                break;
+            }
+            mpi += double(std::min(it->endNs, t) - std::max(it->startNs, fromNs)) / 1e9;
+        }
+        const qint64 segStart = wait ? wait->startNs + waitNs : fromNs;
+        // MPI part of the wait call after its waiting, then the rest is computation.
+        if (wait)
+            mpi += double(std::min(wait->endNs, segEnd) - segStart) / 1e9;
+        const double seg = double(segEnd - segStart) / 1e9;
+        mpi = std::clamp(mpi, 0.0, std::max(0.0, seg));
+        p.mpiSeconds += mpi;
+        p.computeSeconds += std::max(0.0, seg - mpi);
+        if (!wait) {
+            t = fromNs; // the path covers the rest of the window on this rank
+            break;
+        }
+        // Whom it waited for.
+        int partner = -1;
+        qint64 partnerT = -1;
+        if (wait->category == Category::Collective && wait->linkCount > 0) {
+            const CollectiveEntry &c = store.collectives[row.links[wait->firstLink]];
+            const qint64 lastEnter = wait->startNs + qint64(std::llround(c.lateSender * 1e9));
+            partner = lastOf.value({c.comm, lastEnter / 1000}, -1);
+            partnerT = lastEnter;
+        } else {
+            double worst = -1;
+            for (int k = 0; k < wait->linkCount; ++k) {
+                const qint32 link = row.links[wait->firstLink + k];
+                if (link < 0 || link >= store.messages.size())
+                    continue;
+                const Message &m = store.messages[link];
+                if (m.receiver == row.rank && m.sender >= 0 && m.lateSender > worst) {
+                    worst = m.lateSender;
+                    partner = m.sender;
+                    partnerT = m.sendNs;
+                }
+            }
+        }
+        const int next = partner >= 0 ? store.rowIndexOfRank(partner) : -1;
+        if (next < 0 || next == cur || partnerT < fromNs) {
+            // The wait itself counts as MPI; stop here.
+            p.mpiSeconds += double(segStart - std::max(fromNs, wait->startNs)) / 1e9;
+            t = std::max(fromNs, wait->startNs);
+            break;
+        }
+        // Transfer: from the partner's send / arrival to the end of the wait.
+        p.transferSeconds += std::max(0.0, double(segStart - partnerT) / 1e9);
+        p.jumps.prepend({partner, row.rank});
+        p.ranks.prepend(partner);
+        cur = next;
+        t = partnerT;
+    }
+    p.lengthSeconds = double(endT - std::max(fromNs, t)) / 1e9;
+    // Ranks on the path once each, in time order.
+    QVector<int> unique;
+    for (int r : std::as_const(p.ranks))
+        if (!unique.contains(r))
+            unique.append(r);
+    p.ranks = unique;
+    return p;
+}
+
+GraphFinding criticalPathFinding(const CriticalPath &p)
+{
+    GraphFinding f;
+    f.kind = QStringLiteral("critical");
+    f.category = QStringLiteral("critical");
+    const double total = p.computeSeconds + p.mpiSeconds + p.transferSeconds;
+    if (total <= 0 || p.ranks.isEmpty())
+        return f;
+    f.ranks = p.ranks;
+    f.links = p.jumps;
+    f.rank = p.ranks.last();
+    f.value = total;
+    f.title = QStringLiteral("Critical path");
+    f.metric = QStringLiteral("%1: computation %2 %, MPI %3 %, transfer / waiting for partners %4 %")
+                   .arg(msText(total)).arg(qRound(100 * p.computeSeconds / total))
+                   .arg(qRound(100 * p.mpiSeconds / total)).arg(qRound(100 * p.transferSeconds / total));
+    f.detail = QStringLiteral("the chain of work that determines the run time of the window, over %1 ranks and %2 hand-overs: %3")
+                   .arg(p.ranks.size()).arg(p.jumps.size()).arg(rankList(p.ranks, 8));
+    if (p.computeSeconds / total > 0.6)
+        f.action = QStringLiteral("Mostly computation on the path: speeding up the work of these ranks shortens the run directly");
+    else if (p.transferSeconds / total > 0.3)
+        f.action = QStringLiteral("Much hand-over between ranks on the path: send earlier / overlap communication, fewer dependencies");
+    else
+        f.action = QStringLiteral("MPI calls on the path: fewer or cheaper calls (bundle messages, non-blocking collectives)");
+    f.severity = 1;
+    f.text = f.title + QStringLiteral(": ") + f.metric;
+    return f;
 }
 
 QVector<GraphFinding> analyzeCollectives(const QVector<CollectiveInstance> &inst, qint64 windowNs, int ranks)
@@ -1873,6 +2023,78 @@ QVector<QPointF> torusCoordinates(const Backbone &b, const std::atomic_bool *can
     return {};
 }
 
+// Tree shape: the backbone is connected and has n - 1 edges; depth of the BFS tree from the
+// node with the most partners (the root).
+bool isTreeShaped(const Backbone &b, int *rootOut = nullptr, int *depthOut = nullptr)
+{
+    if (b.n < 4 || b.edges != b.n - 1)
+        return false;
+    int root = 0;
+    for (int i = 1; i < b.n; ++i)
+        if (b.adj[i].size() > b.adj[root].size())
+            root = i;
+    QVector<int> dist(b.n), queue;
+    bfs(b, root, dist, queue);
+    if (dist.contains(-1))
+        return false;
+    if (rootOut)
+        *rootOut = root;
+    if (depthOut)
+        *depthOut = *std::max_element(dist.cbegin(), dist.cend());
+    return true;
+}
+
+// Tidy tree: root at the top, one row per depth, leaves spread evenly, parents centred over
+// their children (children in index order).
+QVector<QPointF> treeLayout(const Backbone &b)
+{
+    const int n = b.n;
+    QVector<QPointF> pos(n);
+    int root = 0, depth = 0;
+    if (!isTreeShaped(b, &root, &depth))
+        return {};
+    QVector<int> parent(n, -1), order;
+    QVector<int> level(n, 0);
+    QVector<QVector<int>> children(n);
+    {
+        QVector<bool> seen(n, false);
+        order.append(root);
+        seen[root] = true;
+        for (qsizetype h = 0; h < order.size(); ++h) {
+            const int u = order[h];
+            QVector<int> kids;
+            for (const auto &[v, w] : b.adj[u])
+                if (!seen[v]) {
+                    seen[v] = true;
+                    parent[v] = u;
+                    level[v] = level[u] + 1;
+                    kids.append(v);
+                }
+            std::sort(kids.begin(), kids.end());
+            children[u] = kids;
+            order += kids;
+        }
+    }
+    // x by a post-order walk: leaves get consecutive slots, parents the middle of their children.
+    QVector<double> x(n, 0.0);
+    double nextLeaf = 0;
+    std::function<void(int)> walk = [&](int u) {
+        if (children[u].isEmpty()) {
+            x[u] = nextLeaf;
+            nextLeaf += 1;
+            return;
+        }
+        for (int c : std::as_const(children[u]))
+            walk(c);
+        x[u] = (x[children[u].first()] + x[children[u].last()]) / 2;
+    };
+    walk(root);
+    const double width = std::max(1.0, nextLeaf - 1);
+    for (int i = 0; i < n; ++i)
+        pos[i] = QPointF(-0.95 + 1.9 * x[i] / width, -0.9 + 1.7 * (depth > 0 ? double(level[i]) / depth : 0.0));
+    return pos;
+}
+
 QVector<QPointF> circleInOrder(const QVector<int> &order, int n)
 {
     QVector<QPointF> p(n);
@@ -1911,6 +2133,16 @@ QVector<QPointF> dataLayout(const CommGraph &g, const Backbone &b, GraphLayout l
     }
     case GraphLayout::Spectral:
         return withCommunicators(g, normalised(spectralCoordinates(b, cancel)));
+    case GraphLayout::Tree: {
+        QVector<QPointF> p = treeLayout(b);
+        if (p.size() != n)
+            return basicLayout(g, GraphLayout::Circle, 0);
+        const int comms = int(g.nodes.size()) - n;
+        p.resize(g.nodes.size());
+        for (int k = 0; k < comms; ++k)
+            p[n + k] = QPointF(comms > 1 ? -0.9 + 1.8 * k / (comms - 1) : 0.9, comms > 1 ? 0.97 : -0.9);
+        return p;
+    }
     case GraphLayout::Torus: {
         // Communicators below the picture (the torus fills the square). No torus found: the
         // circle (scores low against the others).
@@ -2054,6 +2286,7 @@ QString layoutName(GraphLayout layout)
     case GraphLayout::Spectral: return QStringLiteral("spectral");
     case GraphLayout::SpectralCircle: return QStringLiteral("spectral circle");
     case GraphLayout::Torus: return QStringLiteral("torus");
+    case GraphLayout::Tree: return QStringLiteral("tree");
     }
     return {};
 }
@@ -2102,6 +2335,18 @@ LayoutChoice autoLayout(const CommGraph &graph, int gridColumns, const QVector<Q
     const bool regular4 = b.n >= 9 && four >= 0.9 * b.n;
     if (regular4)
         candidates << GraphLayout::Torus;
+    // Tree-shaped communication (reductions, broadcast trees) with at least two levels: the
+    // tree with its root at the top is taken directly (it is what one expects to see).
+    int treeDepth = 0;
+    if (isTreeShaped(b, nullptr, &treeDepth) && treeDepth >= 2) {
+        for (GraphLayout l : std::as_const(candidates))
+            best.scores.append({l, 0.0});
+        best.scores.append({GraphLayout::Tree, 1.0});
+        best.layout = GraphLayout::Tree;
+        best.positions = dataLayout(graph, b, GraphLayout::Tree, previous, cancel);
+        best.score = 1.0;
+        return best;
+    }
     candidates << GraphLayout::Circle << GraphLayout::SpectralCircle << GraphLayout::Spectral;
     // Each candidate: neighbourhood preservation (partners next to each other, crowding
     // penalised) and distance faithfulness (1 - normalised stress against the hop distances).

@@ -32,7 +32,9 @@ enum class GraphLevel { Ranks, Nodes };
 // Torus: a periodic grid (torus) cut open flat without knowing the numbering: the four
 // smallest non-trivial Laplacian eigenvectors of a torus form two circles; their two angles are
 // x and y (links across the cut are drawn as stubs at the border).
-enum class GraphLayout { Circle, Grid, Stress, Spectral, SpectralCircle, Torus };
+// Tree: root at the top, levels below (tidy tree), for tree-shaped communication (reductions,
+// broadcast trees); the root is the node with the most partners.
+enum class GraphLayout { Circle, Grid, Stress, Spectral, SpectralCircle, Torus, Tree };
 
 struct GraphOptions {
     bool p2p = true;
@@ -163,9 +165,27 @@ struct CollectiveInstance {
     int lastRank = -1;      // the rank that arrived last
     double totalWaitSeconds = 0; // waiting of all members (wait at collective)
     QVector<int> ranks;
+    QVector<qint64> enters;  // arrival (enter) of each rank in ranks
 };
 // Instances whose last arrival lies in [fromNs, toNs), sorted by first enter.
 QVector<CollectiveInstance> collectiveInstances(const TimelineStore &store, qint64 fromNs, qint64 toNs);
+
+// Simplified critical path of the window (as in Scalasca's backward replay): from the rank
+// that finishes last, backwards in time; at every wait state (a receive waiting for a late
+// sender, a collective waiting for the last arrival) the path jumps to the rank it waited
+// for. Time split into computation (outside MPI), MPI (inside calls, not waiting) and
+// transfer (from the send to the end of the wait).
+struct CriticalPath {
+    QVector<int> ranks;               // in time order
+    QVector<QPair<int, int>> jumps;   // (from rank, to rank) where the path changes rank
+    double computeSeconds = 0;
+    double mpiSeconds = 0;
+    double transferSeconds = 0;
+    double lengthSeconds = 0;         // covered time
+};
+CriticalPath criticalPath(const TimelineStore &store, qint64 fromNs, qint64 toNs,
+                          const QVector<CollectiveInstance> &instances);
+GraphFinding criticalPathFinding(const CriticalPath &path);
 
 // Findings about the collectives of the window (category "collectives"): which ranks arrive
 // last and make everyone wait, and which operations cost the most waiting.
