@@ -29,10 +29,14 @@ public:
     // whose [enter, leave] overlaps [fromNs, toNs].
     bool waitingFor(qint64 fromNs, qint64 toNs) const;
 
+    std::shared_ptr<const MatchState> saveMatchState() const override;
+    void restoreMatchState(const std::shared_ptr<const MatchState> &state) override;
+
     // Not owned; may be null. Set before the first record.
     void setListener(TraceListener *listener) { m_listener = listener; }
 
 private:
+    friend struct MatchState;
     struct Bucket {
         qint64 sendBytes = 0;
         qint64 recvBytes = 0;

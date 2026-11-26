@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include "trace_records.h"
 
 // Interfaces between trace stages: the OTF2 reader feeds a TraceSink (TraceAggregator, or a
@@ -7,6 +9,11 @@
 // completed collective instances to an optional TraceListener.
 
 namespace trace {
+
+// Matching state of a TraceAggregator (pending p2p records, incomplete collective instances,
+// collective instance counters); defined in trace_aggregator.cpp. Saved at the checkpoints of
+// a trace index and restored when a read resumes from one (otf2_trace_reader.h).
+struct MatchState;
 
 class TraceSink
 {
@@ -29,6 +36,12 @@ public:
     // Records overlapping the needed range still wait for their partner (p2p match or the
     // rest of a collective instance), which may come after stopAfterNs().
     virtual bool waitingForPartners() const { return false; }
+
+    // Checkpoints (TraceIndex): the matching state at this point of the read, and restoring it
+    // before a read that resumes from a checkpoint (after begin()). Sinks without matching
+    // state ignore both; forwarding sinks pass them on to their aggregator.
+    virtual std::shared_ptr<const MatchState> saveMatchState() const { return {}; }
+    virtual void restoreMatchState(const std::shared_ptr<const MatchState> &state) { Q_UNUSED(state); }
 };
 
 class TraceListener

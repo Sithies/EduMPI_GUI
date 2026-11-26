@@ -206,6 +206,30 @@ void TraceAggregator::addCollective(const Collective &coll)
     }
 }
 
+struct MatchState {
+    QHash<TraceAggregator::MatchKey, TraceAggregator::MatchQueues> pending;
+    QHash<QPair<quint64, quint64>, TraceAggregator::PendingCollective> pendingColl;
+    QHash<QPair<int, quint64>, quint64> collSeq;
+};
+
+std::shared_ptr<const MatchState> TraceAggregator::saveMatchState() const
+{
+    auto s = std::make_shared<MatchState>();
+    s->pending = m_pending;
+    s->pendingColl = m_pendingColl;
+    s->collSeq = m_collSeq;
+    return s;
+}
+
+void TraceAggregator::restoreMatchState(const std::shared_ptr<const MatchState> &state)
+{
+    if (!state)
+        return;
+    m_pending = state->pending;
+    m_pendingColl = state->pendingColl;
+    m_collSeq = state->collSeq;
+}
+
 bool TraceAggregator::waitingFor(qint64 fromNs, qint64 toNs) const
 {
     const auto overlaps = [fromNs, toNs](qint64 enter, qint64 leave) { return leave >= fromNs && enter <= toNs; };

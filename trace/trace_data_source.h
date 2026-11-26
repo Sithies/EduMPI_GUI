@@ -120,6 +120,10 @@ private:
     qint64 m_maxDetailWindowNs = 0; // trace::maxDetailWindowNs for this trace and budget
     std::shared_ptr<const trace::TimelineStore> m_overview; // complete in full mode
     std::shared_ptr<const trace::TimelineStore> m_detailStore; // latest detail window
+    // Windowed mode: checkpoints of the load, detail reads resume at the last one before
+    // their window (empty in full mode).
+    static constexpr int kIndexCheckpoints = 64;
+    trace::TraceIndex m_index;
     std::atomic_bool m_windowed{false};
 
     // Detail requests (requestDetail may run on another thread).

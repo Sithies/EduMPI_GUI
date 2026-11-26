@@ -59,6 +59,8 @@ public:
     void setEarlyStop(bool on) { m_earlyStop = on; }
     qint64 stopAfterNs() const override { return m_earlyStop ? m_to : -1; }
     bool waitingForPartners() const override { return m_agg.waitingFor(m_from, m_to); }
+    std::shared_ptr<const MatchState> saveMatchState() const override { return m_agg.saveMatchState(); }
+    void restoreMatchState(const std::shared_ptr<const MatchState> &state) override { m_agg.restoreMatchState(state); }
     bool downgraded() const { return m_downgraded; }
     // keptBytes() when the downgrade happened (0 = not downgraded).
     quint64 keptBytesAtDowngrade() const { return m_keptAtDowngrade; }

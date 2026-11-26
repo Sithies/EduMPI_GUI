@@ -702,6 +702,50 @@ private slots:
         QVERIFY(progressChanged.count() >= 1);
     }
 
+    // Detail reads resume at the load's checkpoints: the windows (early, middle, late) equal
+    // window builds read from the start.
+    void detailWindowsFromIndexEqualReadFromStart()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        Trace_Data_Source src(m_many);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        const auto overview = lastStore(timeline);
+        QVERIFY(overview && !overview->complete);
+        const qint64 len = overview->traceLengthNs;
+        for (const double at : {0.1, 0.5, 0.9}) {
+            const qint64 a = qint64(at * double(len));
+            src.requestDetail(a, a + kMs);
+            const auto got = lastStore(timeline);
+            QVERIFY2(got, qPrintable(QString::number(at)));
+            trace::TraceAggregator agg;
+            trace::TimelineBuilder builder(agg, got->fromNs, got->toNs, true, 0);
+            trace::TraceMeta meta;
+            QString error;
+            QVERIFY(trace::readOtf2(m_many, builder, &meta, &error));
+            agg.finish(meta.traceLengthNs);
+            const auto want = builder.finish();
+            QCOMPARE(got->rows.size(), want->rows.size());
+            for (int r = 0; r < want->rows.size(); ++r) {
+                QCOMPARE(got->rows[r].activities.size(), want->rows[r].activities.size());
+                for (int i = 0; i < want->rows[r].activities.size(); ++i) {
+                    QCOMPARE(got->rows[r].activities[i].startNs, want->rows[r].activities[i].startNs);
+                    QCOMPARE(got->rows[r].activities[i].endNs, want->rows[r].activities[i].endNs);
+                    QCOMPARE(got->rows[r].activities[i].waitNs, want->rows[r].activities[i].waitNs);
+                }
+                QCOMPARE(got->rows[r].links, want->rows[r].links);
+            }
+            QCOMPARE(got->messages.size(), want->messages.size());
+            for (int i = 0; i < want->messages.size(); ++i) {
+                QCOMPARE(got->messages[i].sendNs, want->messages[i].sendNs);
+                QCOMPARE(got->messages[i].recvNs, want->messages[i].recvNs);
+                QCOMPARE(got->messages[i].lateSender, want->messages[i].lateSender);
+            }
+        }
+    }
+
     void detailRequestLoadsOnlyWindow()
     {
         qputenv("EDUMPI_TRACE_BUDGET_MB", "1");

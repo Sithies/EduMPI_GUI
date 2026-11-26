@@ -81,6 +81,12 @@ public:
     void addCollective(const Collective &coll) override { sink().addCollective(coll); noteDowngrade(); }
     void addUserRegion(const UserRegion &region) override { sink().addUserRegion(region); noteDowngrade(); }
 
+    std::shared_ptr<const MatchState> saveMatchState() const override
+    {
+        return m_builder ? m_builder->saveMatchState() : nullptr;
+    }
+    void restoreMatchState(const std::shared_ptr<const MatchState> &state) override { sink().restoreMatchState(state); }
+
     void setEventsRead(quint64 events) { m_eventsRead = events; }
     int rankCount() const { return int(m_ranks.size()); }
     // Kept bytes per event before the downgrade; 0 if not downgraded or downgraded within the
@@ -168,7 +174,15 @@ void Trace_Data_Source::threadbuildClusterComponents()
         sink.setEventsRead(done);
         report(done, total);
     };
-    if (!readOtf2(anchor, sink, &meta, &error, &m_cancel, progress)) {
+    // Checkpoints for detail reads (resume near the window instead of at the start); dropped
+    // below if the whole timeline fits.
+    TraceIndex index;
+    ReadOptions options;
+    options.cancel = &m_cancel;
+    options.progress = progress;
+    options.buildIndex = &index;
+    options.indexCheckpoints = kIndexCheckpoints;
+    if (!readOtf2(anchor, sink, &meta, &error, options)) {
         emit loadFailed(error.isEmpty() ? QStringLiteral("Cannot read trace: %1").arg(anchor) : error);
         return;
     }
@@ -201,6 +215,7 @@ void Trace_Data_Source::threadbuildClusterComponents()
     m_started = false;
     m_current = -1;
     m_windowed.store(m_overview && !m_overview->complete);
+    m_index = m_windowed.load() ? std::move(index) : TraceIndex{};
 
     static const char *const kSources[] = {"environment", "setting", "automatic"};
     constexpr quint64 kMiB = 1024 * 1024;
@@ -498,7 +513,24 @@ void Trace_Data_Source::processDetailRequest()
         builder.setByteCap(cap, &m_detailCancel);
         TraceMeta meta;
         QString error;
-        const bool ok = readOtf2(m_anchor, builder, &meta, &error, &m_detailCancel, progressReporter(true));
+        // Resume at the last checkpoint before the window. Progress: share of the events up to
+        // the window end (the read stops there), estimated from the remaining time.
+        ReadOptions options;
+        options.cancel = &m_detailCancel;
+        const int checkpoint = m_index.indexBefore(wFrom);
+        options.resumeFrom = checkpoint >= 0 ? m_index.at(checkpoint) : nullptr;
+        const qint64 startNs = checkpoint >= 0 ? m_index.timeNs(checkpoint) : 0;
+        const double share = len > startNs ? std::clamp(double(wTo - startNs) / double(len - startNs), 0.01, 1.0) : 1.0;
+        const ReadProgress report = progressReporter(true);
+        options.progress = [&report, share](quint64 done, quint64 total) {
+            if (done >= total) { // finished (or stopped after the window)
+                report(total, total);
+                return;
+            }
+            const double fraction = std::min(0.99, double(done) / (double(total) * share));
+            report(quint64(fraction * double(total)), total);
+        };
+        const bool ok = readOtf2(m_anchor, builder, &meta, &error, options);
         if (gen != m_detailGen.load())
             return; // superseded: the newer request is answered instead
         if (m_cancel.load()) { // the source was stopped during the read

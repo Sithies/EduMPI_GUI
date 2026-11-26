@@ -82,7 +82,65 @@ struct CountingSink : TraceSink {
     void addUserRegion(const UserRegion &u) override { ++records; target.addUserRegion(u); }
     qint64 stopAfterNs() const override { return target.stopAfterNs(); }
     bool waitingForPartners() const override { return target.waitingForPartners(); }
+    std::shared_ptr<const MatchState> saveMatchState() const override { return target.saveMatchState(); }
+    void restoreMatchState(const std::shared_ptr<const MatchState> &s) override { target.restoreMatchState(s); }
 };
+
+// Two builds of the same window must be equal (activities with links, messages, collectives,
+// user spans); a user span still open where a read stopped early may end later in one of them,
+// but not inside the window (both ends >= to).
+void compareWindowStores(const TimelineStore &got, const TimelineStore &want, qint64 to, const QString &label)
+{
+    QVERIFY2(got.traceLengthNs == want.traceLengthNs, qPrintable(label));
+    QCOMPARE(got.fromNs, want.fromNs);
+    QCOMPARE(got.toNs, want.toNs);
+    QCOMPARE(got.rows.size(), want.rows.size());
+    for (int r = 0; r < want.rows.size(); ++r) {
+        const RankRow &a = want.rows[r];
+        const RankRow &e = got.rows[r];
+        QVERIFY2(e.activities.size() == a.activities.size(),
+                 qPrintable(QStringLiteral("%1: rank %2 activities %3 vs %4").arg(label).arg(a.rank)
+                                .arg(e.activities.size()).arg(a.activities.size())));
+        for (int i = 0; i < a.activities.size(); ++i) {
+            QVERIFY2(e.activities[i].startNs == a.activities[i].startNs, qPrintable(label));
+            QCOMPARE(e.activities[i].endNs, a.activities[i].endNs);
+            QVERIFY2(e.activities[i].waitNs == a.activities[i].waitNs,
+                     qPrintable(QStringLiteral("%1: rank %2 activity %3 wait").arg(label).arg(a.rank).arg(i)));
+            QCOMPARE(e.activities[i].linkCount, a.activities[i].linkCount);
+            QCOMPARE(e.activities[i].category, a.activities[i].category);
+            QCOMPARE(got.functions.value(e.activities[i].function), want.functions.value(a.activities[i].function));
+        }
+        QCOMPARE(e.links, a.links);
+        QCOMPARE(e.messages, a.messages);
+        QCOMPARE(e.userSpans.size(), a.userSpans.size());
+        for (int i = 0; i < a.userSpans.size(); ++i) {
+            QCOMPARE(e.userSpans[i].startNs, a.userSpans[i].startNs);
+            QCOMPARE(e.userSpans[i].depth, a.userSpans[i].depth);
+            if (e.userSpans[i].endNs != a.userSpans[i].endNs)
+                QVERIFY2(e.userSpans[i].endNs >= to && a.userSpans[i].endNs >= to, qPrintable(label));
+        }
+    }
+    QVERIFY2(got.messages.size() == want.messages.size(),
+             qPrintable(QStringLiteral("%1: messages %2 vs %3").arg(label).arg(got.messages.size()).arg(want.messages.size())));
+    for (int i = 0; i < want.messages.size(); ++i) {
+        const Message &a = want.messages[i];
+        const Message &e = got.messages[i];
+        QCOMPARE(e.sender, a.sender);
+        QCOMPARE(e.receiver, a.receiver);
+        QCOMPARE(e.sendNs, a.sendNs);
+        QCOMPARE(e.recvNs, a.recvNs);
+        QCOMPARE(e.bytes, a.bytes);
+        QCOMPARE(e.lateSender, a.lateSender);
+        QCOMPARE(e.lateReceiver, a.lateReceiver);
+    }
+    QVERIFY2(got.collectives.size() == want.collectives.size(),
+             qPrintable(QStringLiteral("%1: collectives %2 vs %3").arg(label).arg(got.collectives.size()).arg(want.collectives.size())));
+    for (int i = 0; i < want.collectives.size(); ++i) {
+        QCOMPARE(got.collectives[i].rank, want.collectives[i].rank);
+        QCOMPARE(got.collectives[i].comm, want.collectives[i].comm);
+        QCOMPARE(got.collectives[i].lateSender, want.collectives[i].lateSender);
+    }
+}
 
 quint16 pyramidValue(const TimelineStore &s, int level, int rank, qint64 ns, Category c)
 {
@@ -750,6 +808,71 @@ private slots:
         }
     }
 
+    // Index: a whole-trace read records checkpoints (positions + reader / matching state); a
+    // window build resumed from the last checkpoint before the window equals one read from the
+    // start and reads fewer records for windows late in the run.
+    void resumeFromCheckpointEqualsReadFromStart()
+    {
+        QTemporaryDir tmp;
+        const QStringList anchors{writeManyMessagesOtf2(tmp.filePath(QStringLiteral("many")), 4, 3000),
+                                  writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))),
+                                  writeWaitallOtf2(tmp.filePath(QStringLiteral("wa"))),
+                                  writeNonblockingOtf2(tmp.filePath(QStringLiteral("nb"))),
+                                  writePhasesOtf2(tmp.filePath(QStringLiteral("ph")))};
+        const double windows[][2] = {{0.0, 0.05}, {0.1, 0.12}, {0.3, 0.35}, {0.5, 0.52}, {0.62, 0.7}, {0.9, 1.0}};
+        for (const QString &anchor : anchors) {
+            TraceIndex index;
+            TraceMeta meta;
+            {
+                TraceAggregator agg;
+                TimelineBuilder builder(agg, 0, kAll, false, 1);
+                ReadOptions opt;
+                opt.buildIndex = &index;
+                opt.indexCheckpoints = 32;
+                QString error;
+                QVERIFY2(readOtf2(anchor, builder, &meta, &error, opt), qPrintable(error));
+            }
+            // Checkpoints sit at the first event at or after each of the 31 times; sparse traces
+            // have fewer (several times fall into one gap between events).
+            QVERIFY2(index.size() >= 2, qPrintable(QStringLiteral("%1: %2 checkpoints").arg(anchor).arg(index.size())));
+            for (int i = 1; i < index.size(); ++i)
+                QVERIFY(index.timeNs(i) >= index.timeNs(i - 1));
+            const qint64 len = meta.traceLengthNs;
+            for (const auto &w : windows) {
+                const qint64 from = qint64(w[0] * double(len));
+                const qint64 to = qint64(w[1] * double(len));
+                const QString label = QStringLiteral("%1 [%2, %3]").arg(anchor).arg(from).arg(to);
+                const auto run = [&](const std::shared_ptr<const ReadCheckpoint> &resume, int *records) {
+                    TraceAggregator agg;
+                    TimelineBuilder builder(agg, from, to, true, 0);
+                    CountingSink counter(builder);
+                    ReadOptions opt;
+                    opt.resumeFrom = resume;
+                    TraceMeta m;
+                    QString error;
+                    const bool ok = readOtf2(anchor, counter, &m, &error, opt);
+                    if (!ok)
+                        qWarning("%s: %s", qPrintable(label), qPrintable(error));
+                    agg.finish(m.traceLengthNs);
+                    *records = counter.records;
+                    return ok ? builder.finish() : nullptr;
+                };
+                int recordsStart = 0;
+                int recordsResumed = 0;
+                const auto cp = index.before(from);
+                const auto fromStart = run(nullptr, &recordsStart);
+                const auto resumed = run(cp, &recordsResumed);
+                QVERIFY2(fromStart && resumed, qPrintable(label));
+                if (cp && w[0] >= 0.5)
+                    QVERIFY2(recordsResumed < recordsStart,
+                             qPrintable(QStringLiteral("%1: %2 vs %3 records").arg(label).arg(recordsResumed).arg(recordsStart)));
+                compareWindowStores(*resumed, *fromStart, to, label);
+                if (QTest::currentTestFailed())
+                    return;
+            }
+        }
+    }
+
     // A window build stops reading once the window is over and nothing in it waits for a
     // partner any more: same store as a build that reads to the end (user spans still open at
     // the stop may end later than recorded, but not inside the window), fewer records read.
@@ -801,44 +924,9 @@ private slots:
             if (c.expectEarly)
                 QVERIFY2(recordsEarly < recordsAll / 2,
                          qPrintable(QStringLiteral("%1: %2 of %3 records").arg(label).arg(recordsEarly).arg(recordsAll)));
-            QCOMPARE(early->traceLengthNs, all->traceLengthNs);
-            QCOMPARE(early->fromNs, all->fromNs);
-            QCOMPARE(early->toNs, all->toNs);
-            QCOMPARE(early->rows.size(), all->rows.size());
-            for (int r = 0; r < all->rows.size(); ++r) {
-                const RankRow &a = all->rows[r];
-                const RankRow &e = early->rows[r];
-                QCOMPARE(e.activities.size(), a.activities.size());
-                for (int i = 0; i < a.activities.size(); ++i) {
-                    QCOMPARE(e.activities[i].startNs, a.activities[i].startNs);
-                    QCOMPARE(e.activities[i].endNs, a.activities[i].endNs);
-                    QCOMPARE(e.activities[i].waitNs, a.activities[i].waitNs);
-                    QCOMPARE(e.activities[i].linkCount, a.activities[i].linkCount);
-                    QCOMPARE(early->functions.value(e.activities[i].function), all->functions.value(a.activities[i].function));
-                }
-                QCOMPARE(e.userSpans.size(), a.userSpans.size());
-                for (int i = 0; i < a.userSpans.size(); ++i) {
-                    QCOMPARE(e.userSpans[i].startNs, a.userSpans[i].startNs);
-                    QCOMPARE(e.userSpans[i].depth, a.userSpans[i].depth);
-                    if (e.userSpans[i].endNs != a.userSpans[i].endNs) {
-                        QVERIFY2(e.userSpans[i].endNs >= c.to && a.userSpans[i].endNs >= c.to, qPrintable(label));
-                    }
-                }
-            }
-            QCOMPARE(early->messages.size(), all->messages.size());
-            for (int i = 0; i < all->messages.size(); ++i) {
-                const Message &a = all->messages[i];
-                const Message &e = early->messages[i];
-                QCOMPARE(e.sender, a.sender);
-                QCOMPARE(e.receiver, a.receiver);
-                QCOMPARE(e.sendNs, a.sendNs);
-                QCOMPARE(e.recvNs, a.recvNs);
-                QCOMPARE(e.lateSender, a.lateSender);
-                QCOMPARE(e.lateReceiver, a.lateReceiver);
-            }
-            QCOMPARE(early->collectives.size(), all->collectives.size());
-            for (int i = 0; i < all->collectives.size(); ++i)
-                QCOMPARE(early->collectives[i].lateSender, all->collectives[i].lateSender);
+            compareWindowStores(*early, *all, c.to, label);
+            if (QTest::currentTestFailed())
+                return;
         }
     }
 

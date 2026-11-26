@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 
 #include "trace_aggregator.h"
 #include "trace_sink.h"
@@ -32,5 +33,46 @@ QString resolveTracePath(const QString &urlOrPath, QString *error);
 using ReadProgress = std::function<void(quint64 done, quint64 total)>;
 bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QString *error,
               const std::atomic_bool *cancel = nullptr, const ReadProgress &progress = {});
+
+// A point of a read from which a later read of the same archive can resume: the position of
+// every location's event reader, the reader's open regions and the sink's matching state
+// (TraceSink::saveMatchState) just before the first event at or after its time.
+struct ReadCheckpoint;
+
+// Checkpoints of one archive, ascending in time (ReadOptions::buildIndex).
+class TraceIndex
+{
+public:
+    int size() const { return int(m_times.size()); }
+    bool isEmpty() const { return m_times.isEmpty(); }
+    qint64 timeNs(int i) const { return m_times[i]; }
+    // The last checkpoint at or before ns; null if there is none.
+    std::shared_ptr<const ReadCheckpoint> before(qint64 ns) const;
+    // Its index (-1 if none) and the checkpoint at an index.
+    int indexBefore(qint64 ns) const;
+    std::shared_ptr<const ReadCheckpoint> at(int i) const { return m_points[i]; }
+    void clear();
+    void append(qint64 ns, std::shared_ptr<const ReadCheckpoint> checkpoint);
+
+private:
+    QVector<qint64> m_times;
+    QVector<std::shared_ptr<const ReadCheckpoint>> m_points;
+};
+
+struct ReadOptions {
+    const std::atomic_bool *cancel = nullptr;
+    // done counts the events of this read (from resumeFrom, if given).
+    ReadProgress progress;
+    // Records about indexCheckpoints checkpoints, evenly spaced over the declared trace length,
+    // into *buildIndex (cleared first). Use with a sink that sees every record (a whole-trace read).
+    TraceIndex *buildIndex = nullptr;
+    int indexCheckpoints = 256;
+    // Starts reading at this checkpoint (of the same archive) instead of the beginning: the
+    // sink gets addRank / begin() as usual, then restoreMatchState and the records from the
+    // checkpoint on. Records of the same window equal those of a read from the start.
+    std::shared_ptr<const ReadCheckpoint> resumeFrom;
+};
+bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QString *error,
+              const ReadOptions &options);
 
 } // namespace trace
