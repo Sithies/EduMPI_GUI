@@ -185,6 +185,9 @@ void Trace_Data_Source::threadbuildClusterComponents()
     // Reading and evaluating in parallel (two threads); with a single core it would only add
     // the hand-over.
     options.pipelined = QThread::idealThreadCount() >= 2;
+    // Several reading threads when there are cores to spare (defaultReadThreads: at most 2,
+    // EDUMPI_TRACE_READ_THREADS overrides); one reader as before otherwise.
+    options.readThreads = 0;
     if (!readOtf2(anchor, sink, &meta, &error, options)) {
         emit loadFailed(error.isEmpty() ? QStringLiteral("Cannot read trace: %1").arg(anchor) : error);
         return;

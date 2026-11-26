@@ -471,6 +471,147 @@ private slots:
         QCOMPARE(sa.details.size(), sb.details.size());
     }
 
+    // Several reading threads: per rank the same records in the same order as one reader,
+    // same aggregate, progress up to the total, and the same checkpoints (resuming from them
+    // gives the same records).
+    void parallelReadEqualsSingle_data()
+    {
+        QTest::addColumn<int>("fixture");
+        QTest::addColumn<int>("threads");
+        for (int f = 0; f < 4; ++f)
+            for (int t : {2, 3, 4})
+                QTest::addRow("fixture%d_threads%d", f, t) << f << t;
+    }
+    void parallelReadEqualsSingle()
+    {
+        QFETCH(int, fixture);
+        QFETCH(int, threads);
+        QTemporaryDir tmp;
+        QString anchor;
+        switch (fixture) {
+        case 0: anchor = writeManyMessagesOtf2(tmp.path(), 24, 40); break;
+        case 1: anchor = writeManyMessagesOtf2(tmp.path(), 9, 25, 5'000'000); break;
+        case 2: anchor = writeWaitallOtf2(tmp.path()); break;
+        default: anchor = writePhasesOtf2(tmp.path()); break;
+        }
+        QVERIFY(!anchor.isEmpty());
+
+        auto read = [&](int n, TraceIndex *index, std::shared_ptr<const ReadCheckpoint> from,
+                        QMap<int, QStringList> *perRank, TraceSummary *summary, quint64 *lastDone) {
+            struct Sink : TraceAggregator {
+                QMap<int, QStringList> *out;
+                void addCall(const MpiCall &c) override
+                {
+                    (*out)[c.rank] << QStringLiteral("call %1 %2 %3").arg(c.function).arg(c.enterNs).arg(c.leaveNs);
+                    TraceAggregator::addCall(c);
+                }
+                void addSend(const P2PSend &x) override
+                {
+                    (*out)[x.rank] << QStringLiteral("send %1 %2 %3 %4 %5 %6 %7").arg(x.peer).arg(x.comm).arg(x.tag)
+                                          .arg(x.bytes).arg(x.function).arg(x.enterNs).arg(x.leaveNs);
+                    TraceAggregator::addSend(x);
+                }
+                void addRecv(const P2PRecv &x) override
+                {
+                    (*out)[x.rank] << QStringLiteral("recv %1 %2 %3 %4 %5 %6 %7").arg(x.peer).arg(x.comm).arg(x.tag)
+                                          .arg(x.bytes).arg(x.function).arg(x.enterNs).arg(x.leaveNs);
+                    TraceAggregator::addRecv(x);
+                }
+                void addCollective(const Collective &x) override
+                {
+                    QStringList m;
+                    for (int r : x.members)
+                        m << QString::number(r);
+                    (*out)[x.rank] << QStringLiteral("coll %1 %2 %3 %4 %5 %6").arg(x.comm).arg(m.join(QLatin1Char(',')))
+                                          .arg(x.function).arg(x.enterNs).arg(x.leaveNs).arg(x.bytesSent + x.bytesRecv);
+                    TraceAggregator::addCollective(x);
+                }
+                void addUserRegion(const UserRegion &u) override
+                {
+                    (*out)[u.rank] << QStringLiteral("user %1 %2 %3 %4").arg(u.function).arg(u.depth).arg(u.enterNs).arg(u.leaveNs);
+
+                }
+            } sink;
+            sink.out = perRank;
+            ReadOptions o;
+            o.pipelined = !from;
+            o.readThreads = n;
+            o.buildIndex = index;
+            o.indexCheckpoints = 8;
+            o.resumeFrom = from;
+            o.progress = [&](quint64 d, quint64) { *lastDone = d; };
+            TraceMeta meta;
+            QString error;
+            const bool ok = readOtf2(anchor, sink, &meta, &error, o);
+            if (!ok)
+                qWarning("%s", qPrintable(error));
+            *summary = sink.finish(meta.traceLengthNs);
+            return ok ? meta.eventCount : quint64(0);
+        };
+        auto rowsText = [](const TraceSummary &s) {
+            QStringList out;
+            for (const auto &sec : s.rows)
+                for (const BucketRow &r : sec)
+                    out << QStringLiteral("%1 %2 %3 %4 %5 %6 %7").arg(r.rank).arg(r.commType).arg(r.sendBytes)
+                               .arg(r.recvBytes).arg(r.lateSender, 0, 'g', 12).arg(r.lateReceiver, 0, 'g', 12).arg(r.timeDiff, 0, 'g', 12);
+            for (const auto &sec : s.details)
+                for (const DetailRow &d : sec)
+                    out << QStringLiteral("d %1 %2 %3 %4").arg(d.commType).arg(d.function).arg(d.rank).arg(d.partner);
+            return out;
+        };
+
+        TraceIndex index1, indexN;
+        QMap<int, QStringList> rec1, recN;
+        TraceSummary sum1, sumN;
+        quint64 done1 = 0, doneN = 0;
+        const quint64 events = read(1, &index1, nullptr, &rec1, &sum1, &done1);
+        QVERIFY(events > 0);
+        QCOMPARE(read(threads, &indexN, nullptr, &recN, &sumN, &doneN), events);
+        QCOMPARE(recN.keys(), rec1.keys());
+        for (auto it = rec1.cbegin(); it != rec1.cend(); ++it)
+            QCOMPARE(recN.value(it.key()), it.value());
+        QCOMPARE(sumN.unmatchedMessages, sum1.unmatchedMessages);
+        QCOMPARE(rowsText(sumN), rowsText(sum1));
+        QCOMPARE(doneN, events);
+        QCOMPARE(done1, events);
+
+        // Checkpoints: same times, and a read resumed from each gives the same records.
+        QCOMPARE(indexN.size(), index1.size());
+        QVERIFY(index1.size() > 0);
+        for (int k = 0; k < index1.size(); ++k) {
+            QCOMPARE(indexN.timeNs(k), index1.timeNs(k));
+            QMap<int, QStringList> r1, rN;
+            TraceSummary s1, sN;
+            quint64 d1 = 0, dN = 0;
+            read(1, nullptr, index1.at(k), &r1, &s1, &d1);
+            read(1, nullptr, indexN.at(k), &rN, &sN, &dN);
+            QCOMPARE(rN, r1);
+            QCOMPARE(rowsText(sN), rowsText(s1));
+        }
+    }
+
+    void parallelReadCancels()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeManyMessagesOtf2(tmp.path(), 16, 8000);
+        QVERIFY(!anchor.isEmpty());
+        std::atomic_bool cancel{false};
+        TraceAggregator agg;
+        TraceMeta meta;
+        QString error;
+        ReadOptions o;
+        o.pipelined = true;
+        o.readThreads = 4;
+        o.cancel = &cancel;
+        o.progress = [&](quint64 d, quint64 t) { if (d > t / 10) cancel = true; };
+        QVERIFY(!readOtf2(anchor, agg, &meta, &error, o));
+        QCOMPARE(error, QStringLiteral("Cancelled"));
+        QVERIFY(defaultReadThreads() >= 1 && defaultReadThreads() <= 2);
+        qputenv("EDUMPI_TRACE_READ_THREADS", "3");
+        QCOMPARE(defaultReadThreads(), 3);
+        qunsetenv("EDUMPI_TRACE_READ_THREADS");
+    }
+
     // Traces without local definition files are still read.
     void toleratesMissingLocalDefinitions()
     {

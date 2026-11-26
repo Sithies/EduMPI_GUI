@@ -76,7 +76,15 @@ struct ReadOptions {
     // whole trace (no resumeFrom, no early stop: TraceSink::stopAfterNs() < 0 or unbounded);
     // ignored otherwise.
     bool pipelined = false;
+    // Pipelined reads only: reading threads (the locations split over them, merged by time on
+    // the calling thread: same records in the same order per location). 1 = one reading
+    // thread as before; 0 = defaultReadThreads(). At most half the number of locations.
+    int readThreads = 1;
 };
+
+// EDUMPI_TRACE_READ_THREADS if set (>= 1), else the cores less one for the sink, at most 2 (the
+// sink is the bottleneck beyond) and at least 1.
+int defaultReadThreads();
 bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QString *error,
               const ReadOptions &options);
 
