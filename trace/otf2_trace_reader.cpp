@@ -419,6 +419,27 @@ public:
 
     void addLocation(OTF2_LocationRef loc, int rank) { m_locations[loc].rank = rank; }
     bool cancelled() const { return m_cancel && m_cancel->load(std::memory_order_relaxed); }
+
+    // Early stop (TraceSink::stopAfterNs); stopAfterNs < 0 = never.
+    void setStopAfter(qint64 stopAfterNs) { m_stopAfter = stopAfterNs; }
+    bool stopped() const { return m_stopped; }
+    // Called for every event before it is translated: true (the read ends here, the event is
+    // not used) once past the stop time with no MPI call entered up to it still open and no
+    // partner awaited by the sink. Checked every kStopCheckEvents events past the stop time.
+    bool shouldStop(qint64 ns)
+    {
+        if (m_stopAfter < 0 || ns <= m_stopAfter || ++m_sinceStopCheck < kStopCheckEvents)
+            return false;
+        m_sinceStopCheck = 0;
+        for (const LocationState &st : std::as_const(m_locations))
+            for (const OpenRegion &r : st.stack)
+                if (r.enterNs <= m_stopAfter)
+                    return false;
+        if (m_sink.waitingForPartners())
+            return false;
+        m_stopped = true;
+        return true;
+    }
     qint64 maxEventNs() const { return m_maxNs; }
 
     qint64 durationNs(uint64_t ticks) const
@@ -537,6 +558,14 @@ public:
     // Regions still open at the end of the trace are closed at endNs.
     void closeAll(qint64 endNs)
     {
+        if (m_stopped) {
+            // Regions entered after the stop time are not needed (and their real end unknown).
+            for (LocationState &st : m_locations) {
+                st.stack.clear();
+                while (!st.userStack.isEmpty() && st.userStack.last().enterNs > m_stopAfter)
+                    st.userStack.removeLast();
+            }
+        }
         for (LocationState &st : m_locations) {
             while (!st.stack.isEmpty()) {
                 const OpenRegion r = st.stack.takeLast();
@@ -609,6 +638,10 @@ private:
     QHash<OTF2_CommRef, CommInfo> m_comms;
     QHash<OTF2_LocationRef, LocationState> m_locations;
     qint64 m_maxNs = 0;
+    static constexpr int kStopCheckEvents = 4096;
+    qint64 m_stopAfter = -1;
+    int m_sinceStopCheck = kStopCheckEvents - 1; // first event past the stop time checks
+    bool m_stopped = false;
 };
 
 // Common prologue of all event callbacks: cancellation check and location lookup.
@@ -619,7 +652,9 @@ private:
     LocationState *st = tr->location(loc);                             \
     if (!st)                                                           \
         return OTF2_CALLBACK_SUCCESS;                                  \
-    const qint64 ns = tr->timeNs(time)
+    const qint64 ns = tr->timeNs(time);                                \
+    if (tr->shouldStop(ns))                                            \
+        return OTF2_CALLBACK_INTERRUPT
 
 OTF2_CallbackCode onEnter(OTF2_LocationRef loc, OTF2_TimeStamp time, void *ud, OTF2_AttributeList *,
                           OTF2_RegionRef region)
@@ -756,7 +791,7 @@ OTF2_ErrorCode readEvents(OTF2_Reader *reader, EventTranslator &tr, quint64 tota
             uint64_t read = 0;
             rc = OTF2_Reader_ReadGlobalEvents(reader, ger, chunk, &read);
             done += read;
-            if (rc != OTF2_SUCCESS || tr.cancelled())
+            if (rc != OTF2_SUCCESS || tr.cancelled() || tr.stopped())
                 break;
             const bool finished = read < chunk;
             if (progress)
@@ -764,6 +799,11 @@ OTF2_ErrorCode readEvents(OTF2_Reader *reader, EventTranslator &tr, quint64 tota
             if (finished)
                 break;
         }
+    }
+    if (tr.stopped() && !tr.cancelled()) {
+        rc = OTF2_SUCCESS; // interrupted by the early stop: a complete read of what is needed
+        if (progress)
+            progress(total, total);
     }
     OTF2_Reader_CloseGlobalEvtReader(reader, ger);
     OTF2_Reader_CloseEvtFiles(reader);
@@ -832,6 +872,7 @@ bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QStri
         ? QDateTime()
         : QDateTime::fromMSecsSinceEpoch(qint64(defs.realtime / 1'000'000), QTimeZone::UTC);
     sink.begin(m);
+    tr.setStopAfter(sink.stopAfterNs());
 
     if (!selected.isEmpty()) {
         if (!prepareLocations(reader.get(), selected, &err))

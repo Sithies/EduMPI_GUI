@@ -180,6 +180,24 @@ void TraceAggregator::addCollective(const Collective &coll)
     }
 }
 
+bool TraceAggregator::waitingFor(qint64 fromNs, qint64 toNs) const
+{
+    const auto overlaps = [fromNs, toNs](qint64 enter, qint64 leave) { return leave >= fromNs && enter <= toNs; };
+    for (const MatchQueues &q : m_pending) {
+        for (const P2PSend &s : q.sends)
+            if (overlaps(s.enterNs, s.leaveNs))
+                return true;
+        for (const P2PRecv &r : q.recvs)
+            if (overlaps(r.enterNs, r.leaveNs))
+                return true;
+    }
+    for (const PendingCollective &inst : m_pendingColl)
+        for (const Collective &c : inst.arrived)
+            if (overlaps(c.enterNs, c.leaveNs))
+                return true;
+    return false;
+}
+
 TraceSummary TraceAggregator::finish(qint64 traceLengthNs)
 {
     TraceSummary s;

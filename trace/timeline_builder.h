@@ -52,6 +52,13 @@ public:
     // result equals an overview built with keepActivities = false. Unlike setByteCap the read
     // is not cancelled.
     void setDowngradeCap(quint64 capBytes) { m_downgradeCap = capBytes; }
+
+    // Early stop (TraceSink::stopAfterNs) for window builds: the read ends once the window is
+    // over and nothing in it waits for a partner. On by default; a whole-range build never
+    // stops early.
+    void setEarlyStop(bool on) { m_earlyStop = on; }
+    qint64 stopAfterNs() const override { return m_earlyStop ? m_to : -1; }
+    bool waitingForPartners() const override { return m_agg.waitingFor(m_from, m_to); }
     bool downgraded() const { return m_downgraded; }
     // keptBytes() when the downgrade happened (0 = not downgraded).
     quint64 keptBytesAtDowngrade() const { return m_keptAtDowngrade; }
@@ -108,6 +115,7 @@ private:
     quint64 m_keptBytes = 0;
     bool m_overBudget = false;
     quint64 m_downgradeCap = 0;
+    bool m_earlyStop = true;
     bool m_downgraded = false;
     quint64 m_keptAtDowngrade = 0;
     qint64 m_minOverviewSpanNs = 0; // declared length / 4096 (level-1 bin width)

@@ -25,6 +25,9 @@ public:
     void addRecv(const P2PRecv &recv) override;
     void addCollective(const Collective &coll) override;
     TraceSummary finish(qint64 traceLengthNs);
+    // A pending (unmatched so far) p2p record or incomplete collective instance has a record
+    // whose [enter, leave] overlaps [fromNs, toNs].
+    bool waitingFor(qint64 fromNs, qint64 toNs) const;
 
     // Not owned; may be null. Set before the first record.
     void setListener(TraceListener *listener) { m_listener = listener; }

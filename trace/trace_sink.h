@@ -20,6 +20,15 @@ public:
     virtual void addRecv(const P2PRecv &recv) = 0;
     virtual void addCollective(const Collective &coll) = 0;
     virtual void addUserRegion(const UserRegion &region) { Q_UNUSED(region); }
+
+    // Early stop of a read (detail windows): records of events after stopAfterNs() are not
+    // needed (-1 = read everything). Once past that time the reader stops as soon as no MPI
+    // call entered up to then is still open and waitingForPartners() is false (asked about
+    // every few thousand events); user regions still open are closed at the trace end.
+    virtual qint64 stopAfterNs() const { return -1; }
+    // Records overlapping the needed range still wait for their partner (p2p match or the
+    // rest of a collective instance), which may come after stopAfterNs().
+    virtual bool waitingForPartners() const { return false; }
 };
 
 class TraceListener
