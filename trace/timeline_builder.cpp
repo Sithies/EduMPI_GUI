@@ -148,6 +148,19 @@ quint16 TimelineBuilder::functionIndex(const QString &name)
     return idx;
 }
 
+Category TimelineBuilder::categoryOf(const QString &function, CallKind kind)
+{
+    const int k = int(kind);
+    if (k < 0 || k >= 3)
+        return categorize(function, kind);
+    CategorySlot &slot = m_categories[function];
+    if (!(slot.known & (1u << k))) {
+        slot.category[k] = categorize(function, kind);
+        slot.known |= quint8(1u << k);
+    }
+    return slot.category[k];
+}
+
 bool TimelineBuilder::overlapsWindow(qint64 start, qint64 end) const
 {
     return end >= m_from && start <= m_to;
@@ -271,7 +284,7 @@ void TimelineBuilder::addCall(const MpiCall &call)
     const int row = rowIndex(call.rank);
     if (row < 0)
         return;
-    const Category cat = categorize(call.function, call.kind);
+    const Category cat = categoryOf(call.function, call.kind);
     addToPyramid(row, start, end, cat, false);
     if (!m_keep || !overlapsWindow(start, end) || !reserve(sizeof(Activity)))
         return;

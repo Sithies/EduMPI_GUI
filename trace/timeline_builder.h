@@ -93,6 +93,8 @@ private:
 
     int rowIndex(int rank);
     quint16 functionIndex(const QString &name);
+    // categorize(), remembered per function name and kind (it searches the name).
+    Category categoryOf(const QString &function, CallKind kind);
     bool overlapsWindow(qint64 start, qint64 end) const;
     int findActivity(int row, qint64 startNs, qint64 endNs) const;
     void addToPyramid(int row, qint64 start, qint64 end, Category cat, bool subtract);
@@ -124,6 +126,11 @@ private:
     QVector<int> m_rankToRow; // dense lookup for ranks >= 0
     QVector<RowState> m_rowState;
     QHash<QString, quint16> m_functionIndex;
+    struct CategorySlot {
+        quint8 known = 0; // bit per CallKind
+        Category category[3] = {};
+    };
+    QHash<QString, CategorySlot> m_categories;
     QHash<quint64, QVector<int>> m_commMembers; // shared member list per communicator
 };
 
