@@ -66,6 +66,13 @@ Window {
         property string graphLayout: "auto"      // "auto", "circle", "grid", "stress", "spectral", "spectral circle"
         property int graphMaxEdges: 500          // heaviest edges drawn, 0 = all
         property var lastEdge: null
+        // Link clicked in the Trace Graph (sender, receiver): highlighted in the timeline.
+        property int graphLinkFrom: -1
+        property int graphLinkTo: -1
+        // Trace Graph colours and edge filter.
+        property string graphEdgeColor: "wait"   // "wait", "volume", "size", "locality", "change"
+        property string graphNodeColor: "wait"   // "wait" or "compute"
+        property string graphEdgeFilter: "all"   // "all", "waiting", "between", "inside"
         property string name: ""
         // Loaded file or folder as a local path (the file dialog yields file:// URLs).
         readonly property string path: decodeURIComponent(run_analysis_win.tracePath.replace(/^file:\/\//, ""))

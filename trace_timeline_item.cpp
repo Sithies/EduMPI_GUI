@@ -127,6 +127,28 @@ void TraceTimelineItem::setView(qint64 start, qint64 end)
     viewRangeChanged();
 }
 
+void TraceTimelineItem::setLinkFrom(int rank)
+{
+    rank = std::max(-1, rank);
+    if (rank == m_linkFrom)
+        return;
+    m_linkFrom = rank;
+    emit displayChanged();
+    updateDerived();
+    update();
+}
+
+void TraceTimelineItem::setLinkTo(int rank)
+{
+    rank = std::max(-1, rank);
+    if (rank == m_linkTo)
+        return;
+    m_linkTo = rank;
+    emit displayChanged();
+    updateDerived();
+    update();
+}
+
 void TraceTimelineItem::setSelectedRank(int rank)
 {
     if (rank < -1)
@@ -278,7 +300,17 @@ void TraceTimelineItem::updateDerived()
     bool capped = false;
     const auto detail = m_model ? m_model->detail() : nullptr;
     if (detail && m_viewEnd > m_viewStart && covers(detail.get(), m_viewStart, m_viewEnd)) {
-        if (m_selectedRank >= 0 && detail->rowIndexOfRank(m_selectedRank) >= 0) {
+        if (m_linkFrom >= 0 && m_linkTo >= 0 && detail->rowIndexOfRank(m_linkFrom) >= 0) {
+            // A link from the Trace Graph: its messages only.
+            m_dimOthers = true;
+            m_partners.insert(m_linkFrom, true);
+            m_partners.insert(m_linkTo, true);
+            for (int i : trace::messagesInView(*detail, m_linkFrom, m_viewStart, m_viewEnd, std::numeric_limits<int>::max())) {
+                const trace::Message &msg = detail->messages[i];
+                if (msg.sender == m_linkFrom && msg.receiver == m_linkTo && m_arrows.size() < kArrowCap)
+                    m_arrows.append(i);
+            }
+        } else if (m_selectedRank >= 0 && detail->rowIndexOfRank(m_selectedRank) >= 0) {
             m_dimOthers = true;
             m_partners.insert(m_selectedRank, true);
             const QVector<int> mine = trace::messagesInView(*detail, m_selectedRank, m_viewStart, m_viewEnd,
@@ -511,9 +543,11 @@ void TraceTimelineItem::paint(QPainter *painter)
     if (detail && !m_arrows.isEmpty()) {
         painter->setClipRect(kLabelWidth, kAxisHeight, w - kLabelWidth, h - kAxisHeight);
         painter->setRenderHint(QPainter::Antialiasing, true);
-        QPen pen(kArrowColor, 1);
+        const bool link = m_linkFrom >= 0 && m_linkTo >= 0;
+        const QColor arrowColor = link ? QColor(0xf9, 0x73, 0x16) : kArrowColor;
+        QPen pen(arrowColor, link ? 2 : 1);
         painter->setPen(pen);
-        painter->setBrush(kArrowColor);
+        painter->setBrush(arrowColor);
         for (int idx : m_arrows) {
             const trace::Message &m = detail->messages[idx];
             const int a = m_layoutOfRank.value(m.sender, -1);

@@ -118,18 +118,6 @@ Rectangle {
                         qsTr("Layout: Spectral"), qsTr("Layout: Spectral circle")
                     ]
                     currentIndex: Math.max(0, values.indexOf(graph.layout))
-                    contentItem: Text {
-                        leftPadding: 6
-                        text: layoutBox.displayText
-                        color: "white"
-                        font: layoutBox.font
-                        verticalAlignment: Text.AlignVCenter
-                        elide: Text.ElideRight
-                    }
-                    background: Rectangle {
-                        radius: 3
-                        color: layoutBox.hovered ? "#666666" : "#5a5a5a"
-                    }
                     onActivated: (index) => {
                         if (trace_graph_view.traceState)
                             trace_graph_view.traceState.graphLayout = values[index]
@@ -241,11 +229,50 @@ Rectangle {
             }
         }
 
-        // Legend.
+        // Colours and filters: what the lines and circles mean, and where to switch it.
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: legend.implicitHeight + 8
             color: "#f3f4f6"
+
+            component LegendScale: Row {
+                property var info: ({})
+                spacing: 4
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: info.low !== undefined ? info.low : ""
+                    color: "#374151"
+                    font.pointSize: 10
+                }
+                Rectangle {
+                    width: 70
+                    height: 10
+                    anchors.verticalCenter: parent.verticalCenter
+                    border.color: "#9ca3af"
+                    border.width: 1
+                    gradient: Gradient {
+                        orientation: Gradient.Horizontal
+                        GradientStop { position: 0.0; color: info.colors && info.colors.length > 0 ? info.colors[0] : "white" }
+                        GradientStop { position: 0.5; color: info.colors && info.colors.length > 2 ? info.colors[1] : (info.colors && info.colors.length > 1 ? Qt.tint(info.colors[0], Qt.rgba(0, 0, 0, 0)) : "white") }
+                        GradientStop { position: 1.0; color: info.colors && info.colors.length > 0 ? info.colors[info.colors.length - 1] : "white" }
+                    }
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: info.high !== undefined ? info.high : ""
+                    color: "#374151"
+                    font.pointSize: 10
+                }
+            }
+            component Picker: ComboBox {
+                property var values: []
+                property string current: ""
+                signal picked(string value)
+                implicitHeight: 22
+                font.pointSize: 10
+                currentIndex: Math.max(0, values.indexOf(current))
+                onActivated: (index) => picked(values[index])
+            }
 
             Flow {
                 id: legend
@@ -253,145 +280,128 @@ Rectangle {
                 anchors.margins: 4
                 spacing: 14
 
-                // Colours as in the 3D view (Cores3D.qml): P2P green, collectives black,
-                // waiting per process white to blue. New: communicator node, host border.
-                Repeater {
-                    model: [
-                        { label: qsTr("P2P message"), colour: "#00d500", dashed: false },
-                        { label: qsTr("Collective → communicator"), colour: "#000000", dashed: true }
-                    ]
-                    delegate: Row {
-                        required property var modelData
-                        spacing: 4
-                        Canvas {
-                            width: 22
-                            height: 12
+                // Lines: colour by …
+                Row {
+                    spacing: 6
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("Lines:")
+                        font.bold: true
+                        color: "#111827"
+                        font.pointSize: 10
+                    }
+                    Picker {
+                        implicitWidth: 170
+                        values: graph.hasReference ? ["wait", "volume", "size", "locality", "change"] : ["wait", "volume", "size", "locality"]
+                        model: graph.hasReference
+                               ? [qsTr("colour: waiting"), qsTr("colour: volume"), qsTr("colour: message size"), qsTr("colour: inside / between nodes"), qsTr("colour: vs. reference")]
+                               : [qsTr("colour: waiting"), qsTr("colour: volume"), qsTr("colour: message size"), qsTr("colour: inside / between nodes")]
+                        current: graph.edgeColor
+                        onPicked: (v) => { if (trace_graph_view.traceState) trace_graph_view.traceState.graphEdgeColor = v; else graph.edgeColor = v }
+                    }
+                    LegendScale {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: graph.edgeLegend.categories === undefined
+                        info: graph.edgeLegend
+                    }
+                    Repeater {
+                        model: graph.edgeLegend.categories !== undefined ? graph.edgeLegend.categories : []
+                        delegate: Row {
+                            required property var modelData
+                            spacing: 3
                             anchors.verticalCenter: parent.verticalCenter
-                            onPaint: {
-                                var ctx = getContext("2d")
-                                ctx.reset()
-                                ctx.strokeStyle = modelData.colour
-                                ctx.lineWidth = 3
-                                if (modelData.dashed)
-                                    ctx.setLineDash([2, 1.5])
-                                ctx.beginPath()
-                                ctx.moveTo(1, height / 2)
-                                ctx.lineTo(width - 1, height / 2)
-                                ctx.stroke()
-                            }
-                        }
-                        Text {
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: modelData.label
-                            color: "#374151"
-                            font.pointSize: 11
-                        }
-                    }
-                }
-                Row {
-                    spacing: 4
-                    Canvas {
-                        width: 14
-                        height: 14
-                        anchors.verticalCenter: parent.verticalCenter
-                        onPaint: {
-                            var ctx = getContext("2d")
-                            ctx.reset()
-                            ctx.fillStyle = "#d1d5db"
-                            ctx.strokeStyle = "#1f2937"
-                            ctx.lineWidth = 1
-                            ctx.beginPath()
-                            ctx.moveTo(7, 1)
-                            ctx.lineTo(13, 7)
-                            ctx.lineTo(7, 13)
-                            ctx.lineTo(1, 7)
-                            ctx.closePath()
-                            ctx.fill()
-                            ctx.stroke()
+                            Rectangle { width: 18; height: 4; color: modelData.color; anchors.verticalCenter: parent.verticalCenter }
+                            Text { text: modelData.label; color: "#374151"; font.pointSize: 10 }
                         }
                     }
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
-                        text: qsTr("Communicator")
-                        color: "#374151"
-                        font.pointSize: 11
+                        text: qsTr("· width: %1 · strong = between nodes, light = inside a node · dashed = collective")
+                              .arg(graph.weight === "messages" ? qsTr("messages") : graph.weight === "wait" ? qsTr("waiting") : qsTr("bytes"))
+                        color: "#6b7280"
+                        font.pointSize: 10
                     }
                 }
+                // Circles: fill by …
                 Row {
-                    spacing: 4
-                    visible: graph.effectiveLevel === "ranks"
-                    Rectangle {
-                        width: 12
-                        height: 12
-                        radius: 6
+                    spacing: 6
+                    Text {
                         anchors.verticalCenter: parent.verticalCenter
-                        color: "#ffffff"
-                        border.color: "#f28e2b"
-                        border.width: 2
+                        text: qsTr("Circles:")
+                        font.bold: true
+                        color: "#111827"
+                        font.pointSize: 10
+                    }
+                    Picker {
+                        implicitWidth: 150
+                        values: ["wait", "compute"]
+                        model: [qsTr("fill: waiting"), qsTr("fill: compute time")]
+                        current: graph.nodeColor
+                        onPicked: (v) => { if (trace_graph_view.traceState) trace_graph_view.traceState.graphNodeColor = v; else graph.nodeColor = v }
+                    }
+                    LegendScale {
+                        anchors.verticalCenter: parent.verticalCenter
+                        info: graph.nodeLegend
                     }
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
-                        text: qsTr("Border = compute node")
-                        color: "#374151"
-                        font.pointSize: 11
+                        text: graph.effectiveLevel === "nodes" ? qsTr("· green ring = messages inside the node · ◇ = communicator")
+                                                               : qsTr("· border colour = compute node · ◇ = communicator")
+                        color: "#6b7280"
+                        font.pointSize: 10
                     }
                 }
+                // Filter, rank search, reference.
                 Row {
-                    spacing: 4
-                    visible: graph.effectiveLevel === "nodes"
-                    Rectangle {
-                        width: 12
-                        height: 12
-                        radius: 6
-                        anchors.verticalCenter: parent.verticalCenter
-                        color: "#ffffff"
-                        border.color: "#00d500"
-                        border.width: 3
-                    }
+                    spacing: 6
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
-                        text: qsTr("Green ring = messages inside the node")
-                        color: "#374151"
-                        font.pointSize: 11
+                        text: qsTr("Show:")
+                        font.bold: true
+                        color: "#111827"
+                        font.pointSize: 10
                     }
-                }
-                // Node fill: waiting time (late sender) of the rank, as the 3D view's scale.
-                Row {
-                    spacing: 4
-                    Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: qsTr("Waiting per %1: %2 ms").arg(graph.effectiveLevel === "nodes" ? qsTr("node") : qsTr("rank"))
-                                  .arg((graph.minWaitSeconds * 1000).toFixed(3))
-                        color: "#374151"
-                        font.pointSize: 11
+                    Picker {
+                        implicitWidth: 170
+                        values: ["all", "waiting", "between", "inside"]
+                        model: [qsTr("all lines"), qsTr("only lines with waiting"), qsTr("only between nodes"), qsTr("only inside nodes")]
+                        current: graph.edgeFilter
+                        onPicked: (v) => { if (trace_graph_view.traceState) trace_graph_view.traceState.graphEdgeFilter = v; else graph.edgeFilter = v }
                     }
-                    Rectangle {
-                        width: 70
-                        height: 10
-                        anchors.verticalCenter: parent.verticalCenter
-                        border.color: "#9ca3af"
-                        border.width: 1
-                        gradient: Gradient {
-                            orientation: Gradient.Horizontal
-                            GradientStop { position: 0.0; color: "#ffffff" }
-                            GradientStop { position: 1.0; color: "#0000ff" }
+                    TextField {
+                        id: rankSearch
+                        implicitWidth: 90
+                        implicitHeight: 22
+                        font.pointSize: 10
+                        placeholderText: qsTr("Rank …")
+                        validator: IntValidator { bottom: 0 }
+                        onAccepted: {
+                            var r = parseInt(text)
+                            if (!isNaN(r) && graph.zoomToRank(r) && trace_graph_view.traceState)
+                                trace_graph_view.traceState.selectedRank = r
                         }
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("Rank number + Enter: zoom to it and select it")
+                    }
+                    Button {
+                        implicitHeight: 22
+                        font.pointSize: 10
+                        text: graph.hasReference ? qsTr("Clear reference") : qsTr("Set as reference")
+                        onClicked: graph.hasReference ? graph.clearReference() : graph.setReference()
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: graph.hasReference
+                                      ? qsTr("Comparing with the window %1; findings under “Comparison”, lines can be coloured by the change").arg(graph.referenceLabel)
+                                      : qsTr("Remember this window; then move to another window to compare (findings and line colour “vs. reference”)")
                     }
                     Text {
+                        visible: graph.hasReference
                         anchors.verticalCenter: parent.verticalCenter
-                        text: qsTr("%1 ms").arg((graph.maxWaitSeconds * 1000).toFixed(3))
-                        color: "#374151"
-                        font.pointSize: 11
+                        text: qsTr("Reference: %1").arg(graph.referenceLabel)
+                        color: "#1d4ed8"
+                        font.pointSize: 10
                     }
-                }
-                Text {
-                    text: {
-                        var w = graph.weight === "messages" ? qsTr("number of messages")
-                              : graph.weight === "wait" ? qsTr("waiting time") : qsTr("bytes")
-                        return qsTr("Edge width: %1").arg(w)
-                    }
-                    color: "#374151"
-                    font.pointSize: 11
                 }
             }
         }
@@ -471,20 +481,36 @@ Rectangle {
             communicators: trace_graph_view.traceState && trace_graph_view.traceState.graphCommunicators ? trace_graph_view.traceState.graphCommunicators : "auto"
             layout: trace_graph_view.traceState && trace_graph_view.traceState.graphLayout ? trace_graph_view.traceState.graphLayout : "auto"
             maxEdges: trace_graph_view.traceState ? trace_graph_view.traceState.graphMaxEdges : 500
+            edgeColor: trace_graph_view.traceState && trace_graph_view.traceState.graphEdgeColor ? trace_graph_view.traceState.graphEdgeColor : "wait"
+            nodeColor: trace_graph_view.traceState && trace_graph_view.traceState.graphNodeColor ? trace_graph_view.traceState.graphNodeColor : "wait"
+            edgeFilter: trace_graph_view.traceState && trace_graph_view.traceState.graphEdgeFilter ? trace_graph_view.traceState.graphEdgeFilter : "all"
 
             onSelectedRankChanged: {
                 if (trace_graph_view.traceState && trace_graph_view.traceState.selectedRank !== selectedRank)
                     trace_graph_view.traceState.selectedRank = selectedRank
             }
+            // A clicked link: details in Trace Options, its messages highlighted in the timeline
+            // (same window, orange arrows). Clicking a circle or empty space ends it.
             onEdgeClicked: (details) => {
-                if (trace_graph_view.traceState)
-                    trace_graph_view.traceState.lastEdge = details
+                if (!trace_graph_view.traceState)
+                    return
+                trace_graph_view.traceState.lastEdge = details
+                if (details.kind === "p2p" && details.fromRank >= 0 && details.toRank >= 0) {
+                    trace_graph_view.traceState.graphLinkFrom = details.fromRank
+                    trace_graph_view.traceState.graphLinkTo = details.toRank
+                }
             }
 
             // Click: node selects the rank (also in the timeline), edge shows its details.
             // Double-click (nodes level): open a compute node into its ranks / merge it again.
             TapHandler {
-                onTapped: (eventPoint, button) => graph.clickAt(eventPoint.position.x, eventPoint.position.y)
+                onTapped: (eventPoint, button) => {
+                    if (trace_graph_view.traceState && trace_graph_view.traceState.graphLinkFrom !== undefined) {
+                        trace_graph_view.traceState.graphLinkFrom = -1
+                        trace_graph_view.traceState.graphLinkTo = -1
+                    }
+                    graph.clickAt(eventPoint.position.x, eventPoint.position.y)
+                }
                 onDoubleTapped: (eventPoint, button) => graph.toggleExpandAt(eventPoint.position.x, eventPoint.position.y)
             }
 
@@ -534,16 +560,40 @@ Rectangle {
             }
         }
 
-        // Findings of the window: one card each; hover highlights its ranks / link in the graph,
-        // click zooms there and selects the rank (also in the timeline), click again resets.
+        // Findings of the window, grouped by category (collapsible). A card shows title and key
+        // number; hover highlights its ranks / links in the graph, a click opens it (explanation,
+        // what to do, waiting over time) and zooms there; click again closes it.
         Rectangle {
             id: findingsPanel
+            objectName: "findingsPanel"
             Layout.fillHeight: true
-            Layout.preferredWidth: visible ? (trace_graph_view.embedded ? 260 : 320) : 0
+            Layout.preferredWidth: visible ? (trace_graph_view.embedded ? 280 : 340) : 0
             visible: graph.findingList.length > 0 && trace_graph_view.width > 700
             color: "#f9fafb"
             border.color: "#e5e7eb"
             property int pinned: -1
+            property var collapsed: ({})
+            readonly property var categories: [
+                { key: "waiting", label: qsTr("Waiting") },
+                { key: "load", label: qsTr("Load") },
+                { key: "structure", label: qsTr("Structure") },
+                { key: "messages", label: qsTr("Messages") },
+                { key: "comparison", label: qsTr("Comparison") }
+            ]
+            function indicesOf(cat) {
+                var out = []
+                for (var i = 0; i < graph.findingList.length; ++i)
+                    if (graph.findingList[i].category === cat)
+                        out.push(i)
+                return out
+            }
+            function worst(cat) {
+                var w = 0
+                var idx = indicesOf(cat)
+                for (var i = 0; i < idx.length; ++i)
+                    w = Math.max(w, graph.findingList[idx[i]].severity)
+                return w
+            }
 
             Connections {
                 target: graph
@@ -556,7 +606,7 @@ Rectangle {
             ColumnLayout {
                 anchors.fill: parent
                 anchors.margins: 6
-                spacing: 6
+                spacing: 4
                 Text {
                     text: qsTr("Findings in this window")
                     font.bold: true
@@ -566,118 +616,224 @@ Rectangle {
                 Text {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
-                    text: qsTr("Hover to highlight, click to zoom there.")
+                    text: qsTr("Hover to highlight, click to open and zoom there.")
                     font.pointSize: 9
                     color: "#6b7280"
                 }
-                ListView {
+                ScrollView {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
-                    spacing: 6
-                    model: graph.findingList
-                    ScrollBar.vertical: ScrollBar {}
-                    delegate: Rectangle {
-                        id: card
-                        required property var modelData
-                        required property int index
-                        readonly property bool active: findingsPanel.pinned === index || cardMouse.containsMouse
-                        readonly property color severityColor: modelData.severity >= 2 ? "#dc2626"
-                                                             : modelData.severity === 1 ? "#f59e0b" : "#9ca3af"
-                        width: ListView.view.width
-                        height: cardColumn.implicitHeight + 14
-                        radius: 6
-                        color: active ? "#fff7ed" : "#ffffff"
-                        border.color: active ? "#f97316" : "#e5e7eb"
-                        border.width: active ? 2 : 1
-                        Rectangle {
-                            width: 4
-                            radius: 2
-                            anchors.left: parent.left
-                            anchors.top: parent.top
-                            anchors.bottom: parent.bottom
-                            anchors.margins: 3
-                            color: card.severityColor
-                        }
-                        ColumnLayout {
-                            id: cardColumn
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.top: parent.top
-                            anchors.leftMargin: 14
-                            anchors.rightMargin: 8
-                            anchors.topMargin: 7
-                            spacing: 2
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-                                Text {
-                                    text: {
-                                        switch (card.modelData.kind) {
-                                        case "pattern": return "◇"
-                                        case "locality": return "⌂"
-                                        case "waiting": return "◷"
-                                        case "outlier": return "▲"
-                                        case "imbalance": return "⚖"
-                                        case "cause": return "⇢"
-                                        case "link": return "⇄"
+                    contentWidth: availableWidth
+                    Column {
+                        width: parent.width
+                        spacing: 6
+                        Repeater {
+                            model: findingsPanel.categories
+                            delegate: Column {
+                                id: section
+                                required property var modelData
+                                readonly property var items: findingsPanel.indicesOf(modelData.key)
+                                readonly property bool open: !findingsPanel.collapsed[modelData.key]
+                                visible: items.length > 0
+                                width: parent.width
+                                spacing: 4
+                                // Category header: name, count, worst severity; click folds it.
+                                Rectangle {
+                                    width: parent.width
+                                    height: 22
+                                    radius: 4
+                                    color: headMouse.containsMouse ? "#e5e7eb" : "#eef0f3"
+                                    Row {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        x: 6
+                                        spacing: 6
+                                        Text { text: section.open ? "▾" : "▸"; color: "#374151"; font.pointSize: 10 }
+                                        Text { text: section.modelData.label; font.bold: true; color: "#111827"; font.pointSize: 10 }
+                                        Rectangle {
+                                            width: countText.implicitWidth + 10
+                                            height: 16
+                                            radius: 8
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            color: findingsPanel.worst(section.modelData.key) >= 2 ? "#dc2626"
+                                                 : findingsPanel.worst(section.modelData.key) === 1 ? "#f59e0b" : "#9ca3af"
+                                            Text { id: countText; anchors.centerIn: parent; text: section.items.length; color: "white"; font.pointSize: 9; font.bold: true }
                                         }
-                                        return "•"
                                     }
-                                    color: card.severityColor
-                                    font.pointSize: 13
+                                    MouseArea {
+                                        id: headMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        onClicked: {
+                                            var c = Object.assign({}, findingsPanel.collapsed)
+                                            c[section.modelData.key] = section.open
+                                            findingsPanel.collapsed = c
+                                        }
+                                    }
                                 }
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: card.modelData.title
-                                    font.bold: true
-                                    font.pointSize: 10
-                                    color: "#111827"
-                                    elide: Text.ElideRight
+                                Repeater {
+                                    model: section.open ? section.items : []
+                                    delegate: Rectangle {
+                                        id: card
+                                        required property int modelData
+                                        readonly property int index: modelData
+                                        readonly property var f: graph.findingList[modelData]
+                                        readonly property bool expanded: findingsPanel.pinned === index
+                                        readonly property bool active: expanded || cardMouse.containsMouse
+                                        readonly property color severityColor: f.severity >= 2 ? "#dc2626" : f.severity === 1 ? "#f59e0b" : "#9ca3af"
+                                        width: section.width
+                                        height: cardColumn.implicitHeight + 12
+                                        radius: 6
+                                        color: active ? "#fff7ed" : "#ffffff"
+                                        border.color: active ? "#f97316" : "#e5e7eb"
+                                        border.width: active ? 2 : 1
+                                        Rectangle {
+                                            width: 4
+                                            radius: 2
+                                            anchors.left: parent.left
+                                            anchors.top: parent.top
+                                            anchors.bottom: parent.bottom
+                                            anchors.margins: 3
+                                            color: card.severityColor
+                                        }
+                                        ColumnLayout {
+                                            id: cardColumn
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.top: parent.top
+                                            anchors.leftMargin: 14
+                                            anchors.rightMargin: 8
+                                            anchors.topMargin: 6
+                                            spacing: 2
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 6
+                                                Text {
+                                                    text: {
+                                                        switch (card.f.kind) {
+                                                        case "pattern": return "◇"
+                                                        case "hub": return "✳"
+                                                        case "locality": return "⌂"
+                                                        case "mapping": return "⇆"
+                                                        case "waiting": return "◷"
+                                                        case "outlier": return "▲"
+                                                        case "imbalance": return "⚖"
+                                                        case "compute": return "⚙"
+                                                        case "cause": return "⇢"
+                                                        case "latereceiver": return "⇠"
+                                                        case "chain": return "⛓"
+                                                        case "link": return "⇄"
+                                                        case "size": return "✉"
+                                                        }
+                                                        return "≠"
+                                                    }
+                                                    color: card.severityColor
+                                                    font.pointSize: 12
+                                                }
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: card.f.title
+                                                    font.bold: true
+                                                    font.pointSize: 10
+                                                    color: "#111827"
+                                                    elide: Text.ElideRight
+                                                }
+                                                Text { text: card.expanded ? "▾" : "▸"; color: "#9ca3af"; font.pointSize: 9 }
+                                            }
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: card.f.metric
+                                                font.pointSize: 11
+                                                font.bold: true
+                                                color: card.f.severity >= 2 ? "#b91c1c" : "#1f2937"
+                                                wrapMode: Text.WordWrap
+                                            }
+                                            Text {
+                                                Layout.fillWidth: true
+                                                visible: card.expanded
+                                                text: card.f.detail
+                                                font.pointSize: 9
+                                                color: "#4b5563"
+                                                wrapMode: Text.WordWrap
+                                            }
+                                            Text {
+                                                Layout.fillWidth: true
+                                                visible: card.expanded && card.f.action !== ""
+                                                text: qsTr("What to do: ") + card.f.action
+                                                font.pointSize: 9
+                                                color: "#065f46"
+                                                wrapMode: Text.WordWrap
+                                            }
+                                            // Waiting over time (window in 40 steps): these ranks vs. all.
+                                            Canvas {
+                                                id: spark
+                                                Layout.fillWidth: true
+                                                Layout.preferredHeight: 36
+                                                visible: card.expanded && card.f.series.length > 1
+                                                onVisibleChanged: requestPaint()
+                                                onWidthChanged: requestPaint()
+                                                onPaint: {
+                                                    var ctx = getContext("2d")
+                                                    ctx.reset()
+                                                    var s = card.f.series, b = card.f.baseline
+                                                    if (!s || s.length < 2)
+                                                        return
+                                                    var max = 1e-9
+                                                    for (var i = 0; i < s.length; ++i)
+                                                        max = Math.max(max, s[i], b && b.length > i ? b[i] : 0)
+                                                    function line(v, colour, w) {
+                                                        ctx.strokeStyle = colour
+                                                        ctx.lineWidth = w
+                                                        ctx.beginPath()
+                                                        for (var k = 0; k < v.length; ++k) {
+                                                            var x = k / (v.length - 1) * (width - 2) + 1
+                                                            var y = height - 12 - v[k] / max * (height - 16)
+                                                            if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
+                                                        }
+                                                        ctx.stroke()
+                                                    }
+                                                    if (b && b.length === s.length)
+                                                        line(b, "#9ca3af", 1)
+                                                    line(s, "#f97316", 2)
+                                                    ctx.fillStyle = "#6b7280"
+                                                    ctx.font = "9px sans-serif"
+                                                    ctx.fillText(qsTr("waiting over the window: these ranks (orange) vs. all (grey)"), 1, height - 1)
+                                                }
+                                            }
+                                        }
+                                        MouseArea {
+                                            id: cardMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onContainsMouseChanged: {
+                                                if (findingsPanel.pinned < 0)
+                                                    graph.highlightedFinding = containsMouse ? card.index : -1
+                                            }
+                                            onClicked: {
+                                                if (findingsPanel.pinned === card.index) {
+                                                    findingsPanel.pinned = -1
+                                                    graph.highlightedFinding = -1
+                                                    graph.resetView()
+                                                    return
+                                                }
+                                                findingsPanel.pinned = card.index
+                                                var f = card.f
+                                                if (f.ranks.length > 0 || f.nodes.length > 0)
+                                                    graph.zoomToFinding(card.index)
+                                                else
+                                                    graph.highlightedFinding = card.index
+                                                var r = f.fromRank >= 0 ? f.fromRank : f.rank
+                                                if (r >= 0 && trace_graph_view.traceState)
+                                                    trace_graph_view.traceState.selectedRank = r
+                                                if (f.fromRank >= 0 && f.toRank >= 0 && trace_graph_view.traceState) {
+                                                    trace_graph_view.traceState.graphLinkFrom = f.fromRank
+                                                    trace_graph_view.traceState.graphLinkTo = f.toRank
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
-                            }
-                            Text {
-                                Layout.fillWidth: true
-                                text: card.modelData.metric
-                                font.pointSize: 12
-                                font.bold: true
-                                color: card.modelData.severity >= 2 ? "#b91c1c" : "#1f2937"
-                                wrapMode: Text.WordWrap
-                            }
-                            Text {
-                                Layout.fillWidth: true
-                                text: card.modelData.detail
-                                font.pointSize: 9
-                                color: "#4b5563"
-                                wrapMode: Text.WordWrap
-                            }
-                        }
-                        MouseArea {
-                            id: cardMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onContainsMouseChanged: {
-                                if (findingsPanel.pinned < 0)
-                                    graph.highlightedFinding = containsMouse ? card.index : -1
-                            }
-                            onClicked: {
-                                if (findingsPanel.pinned === card.index) {
-                                    findingsPanel.pinned = -1
-                                    graph.highlightedFinding = -1
-                                    graph.resetView()
-                                    return
-                                }
-                                findingsPanel.pinned = card.index
-                                var f = card.modelData
-                                if (f.ranks.length > 0 || f.nodes.length > 0)
-                                    graph.zoomToFinding(card.index)
-                                else
-                                    graph.highlightedFinding = card.index
-                                // Late sender / link: the sender, else the rank of the finding.
-                                var r = f.fromRank >= 0 ? f.fromRank : f.rank
-                                if (r >= 0 && trace_graph_view.traceState)
-                                    trace_graph_view.traceState.selectedRank = r
                             }
                         }
                     }

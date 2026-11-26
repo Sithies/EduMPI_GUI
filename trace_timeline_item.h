@@ -27,6 +27,10 @@ class TraceTimelineItem : public QQuickPaintedItem
     Q_PROPERTY(qint64 viewStartNs READ viewStartNs WRITE setViewStartNs NOTIFY viewChanged)
     Q_PROPERTY(qint64 viewEndNs READ viewEndNs WRITE setViewEndNs NOTIFY viewChanged)
     Q_PROPERTY(int selectedRank READ selectedRank WRITE setSelectedRank NOTIFY selectedRankChanged)
+    // A link from the Trace Graph (sender, receiver; -1 = none): its messages in the window are
+    // drawn as orange arrows, both rows lit, the rest dimmed (takes precedence over selectedRank).
+    Q_PROPERTY(int linkFrom READ linkFrom WRITE setLinkFrom NOTIFY displayChanged)
+    Q_PROPERTY(int linkTo READ linkTo WRITE setLinkTo NOTIFY displayChanged)
     Q_PROPERTY(bool allArrows READ allArrows WRITE setAllArrows NOTIFY displayChanged)
     Q_PROPERTY(bool highlightWait READ highlightWait WRITE setHighlightWait NOTIFY displayChanged)
     Q_PROPERTY(bool showArrows READ showArrows WRITE setShowArrows NOTIFY displayChanged)
@@ -54,6 +58,12 @@ public:
     qint64 viewEndNs() const { return m_viewEnd; }
     void setViewEndNs(qint64 ns);
     int selectedRank() const { return m_selectedRank; }
+    int linkFrom() const { return m_linkFrom; }
+    void setLinkFrom(int rank);
+    int linkTo() const { return m_linkTo; }
+    void setLinkTo(int rank);
+    // Messages drawn as arrows (indices into the detail store's messages), for tests.
+    const QVector<int> &arrowMessages() const { return m_arrows; }
     void setSelectedRank(int rank);
     bool allArrows() const { return m_allArrows; }
     void setAllArrows(bool on);
@@ -126,6 +136,8 @@ private:
     qint64 m_viewStart = 0;
     qint64 m_viewEnd = 0;
     int m_selectedRank = -1;
+    int m_linkFrom = -1;
+    int m_linkTo = -1;
     bool m_allArrows = false;
     bool m_highlightWait = true;
     bool m_showArrows = true;

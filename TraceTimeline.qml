@@ -220,6 +220,8 @@ Rectangle {
                     model: trace_timeline_view.timelineModel
                     showArrows: trace_timeline_view.traceState ? trace_timeline_view.traceState.showArrows : true
                     allArrows: trace_timeline_view.traceState ? trace_timeline_view.traceState.allArrows : false
+                    linkFrom: trace_timeline_view.traceState && trace_timeline_view.traceState.graphLinkFrom !== undefined ? trace_timeline_view.traceState.graphLinkFrom : -1
+                    linkTo: trace_timeline_view.traceState && trace_timeline_view.traceState.graphLinkTo !== undefined ? trace_timeline_view.traceState.graphLinkTo : -1
                     highlightWait: trace_timeline_view.traceState ? trace_timeline_view.traceState.highlightWait : true
                     showPhases: trace_timeline_view.traceState ? trace_timeline_view.traceState.showPhases : true
                     phaseLevel: trace_timeline_view.traceState ? trace_timeline_view.traceState.phaseLevel : "outer"

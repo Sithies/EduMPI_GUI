@@ -120,12 +120,51 @@ private slots:
         QVERIFY(std::abs(item.nodeWaitSeconds(item.graph().indexOfRank(0)) - 0.299) < 1e-6);
         const QPointF p1 = item.nodePosition(item.graph().indexOfRank(1));
         QCOMPARE(QColor(img.pixel(int(p1.x()), int(p1.y()))).name(), QStringLiteral("#ffffff"));
-        // P2P edges are green, with or without waiting.
-        for (const auto &pair : {std::pair{3, 0}, std::pair{0, 1}}) {
-            const QPointF mid = item.edgeMidpoint(edgeIndex(item.graph(), pair.first, pair.second));
+        // Line colour = waiting on the link: 3 -> 0 (late sender, the most waiting) red, 0 -> 1
+        // (no waiting) green.
+        {
+            const QPointF mid = item.edgeMidpoint(edgeIndex(item.graph(), 3, 0));
             const QColor c(img.pixel(int(mid.x()), int(mid.y())));
-            QVERIFY2(c.green() > c.red() + 60 && c.green() > c.blue() + 60, qPrintable(c.name()));
+            QVERIFY2(c.red() > c.green() + 60 && c.red() > c.blue() + 60, qPrintable(c.name()));
+            const QPointF mid1 = item.edgeMidpoint(edgeIndex(item.graph(), 0, 1));
+            const QColor c1(img.pixel(int(mid1.x()), int(mid1.y())));
+            QVERIFY2(c1.green() > c1.red() + 40 && c1.green() > c1.blue() + 40, qPrintable(c1.name()));
         }
+        // Legend of the line colour and other colour modes.
+        QCOMPARE(item.edgeLegend().value(QStringLiteral("colors")).toStringList().size(), 3);
+        QVERIFY(item.edgeLegend().value(QStringLiteral("high")).toString().contains(QStringLiteral("ms")));
+        const int e30 = edgeIndex(item.graph(), 3, 0);
+        item.setEdgeColor(QStringLiteral("locality"));
+        QVERIFY(item.edgeLegend().contains(QStringLiteral("categories")));
+        // ring4: ranks 0, 1 on nodeA, 2, 3 on nodeB: 3 -> 0 crosses nodes.
+        QCOMPARE(item.edgeColorOf(e30).name(), QStringLiteral("#1565c0"));
+        QCOMPARE(item.edgeColorOf(edgeIndex(item.graph(), 0, 1)).name(), QStringLiteral("#66bb6a"));
+        item.setEdgeColor(QStringLiteral("volume"));
+        QVERIFY(item.edgeLegend().value(QStringLiteral("title")).toString().contains(QStringLiteral("bytes")));
+        item.setEdgeColor(QStringLiteral("nonsense"));
+        QCOMPARE(item.edgeColor(), QStringLiteral("wait"));
+        // Node fill by compute time: legend switches.
+        item.setNodeColor(QStringLiteral("compute"));
+        QVERIFY(item.nodeLegend().value(QStringLiteral("title")).toString().contains(QStringLiteral("compute")));
+        QVERIFY(!render(item).isNull());
+        item.setNodeColor(QStringLiteral("wait"));
+        // Edge filter: only between nodes / only with waiting.
+        item.setEdgeFilter(QStringLiteral("between"));
+        for (int i : item.drawnEdges()) {
+            const auto &e = item.graph().edges[i];
+            QVERIFY(e.kind == GraphEdge::Kind::P2P);
+            QVERIFY(item.graph().nodes[e.from].group != item.graph().nodes[e.to].group);
+        }
+        item.setEdgeFilter(QStringLiteral("waiting"));
+        for (int i : item.drawnEdges())
+            QVERIFY(item.graph().edges[i].waitSeconds > 0);
+        QVERIFY(item.drawnEdges().contains(e30));
+        item.setEdgeFilter(QStringLiteral("all"));
+        // Zoom to a rank selects it.
+        QVERIFY(item.zoomToRank(2));
+        QCOMPARE(item.selectedRank(), 2);
+        QVERIFY(!item.zoomToRank(77));
+        item.resetView();
     }
 
     void wholeRunWhenWindowEmpty()
@@ -518,6 +557,66 @@ private slots:
         item.setLevel(QStringLiteral("ranks"));
         QTRY_VERIFY(!item.layoutBusy());
         QCOMPARE(item.effectiveLayout(), QStringLiteral("stress"));
+    }
+
+    // Reference window: comparison findings and the "change" line colour.
+    void referenceComparison()
+    {
+        TraceTimelineModel model;
+        TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
+        model.addSnapshot({build(m_ring4)});
+        item.setModel(&model);
+        item.setWidth(600);
+        item.setHeight(400);
+        item.setLevel(QStringLiteral("ranks"));
+        item.setViewStartNs(0);
+        item.setViewEndNs(1000 * kMs);
+        QVERIFY(!item.hasReference());
+        QSignalSpy refChanged(&item, &TraceGraphItem::referenceChanged);
+        item.setReference();
+        QVERIFY(item.hasReference());
+        QCOMPARE(refChanged.count(), 1);
+        QVERIFY(!item.referenceLabel().isEmpty());
+        // Another window: comparison findings appear.
+        item.setViewStartNs(1000 * kMs);
+        item.setViewEndNs(2500 * kMs);
+        bool comparison = false;
+        for (const QVariant &v : item.findingMaps())
+            comparison = comparison || v.toMap().value(QStringLiteral("category")).toString() == QLatin1String("comparison");
+        QVERIFY(comparison);
+        item.setEdgeColor(QStringLiteral("change"));
+        QCOMPARE(item.edgeColor(), QStringLiteral("change"));
+        QCOMPARE(item.edgeLegend().value(QStringLiteral("colors")).toStringList().size(), 3);
+        QVERIFY(!render(item).isNull());
+        item.clearReference();
+        QVERIFY(!item.hasReference());
+        QCOMPARE(item.edgeColor(), QStringLiteral("wait")); // "change" needs a reference
+    }
+
+    // A link clicked in the graph: the timeline draws only that link's messages.
+    void timelineHighlightsLink()
+    {
+        TraceTimelineModel model;
+        model.addSnapshot({build(m_ring4)});
+        TraceTimelineItem tl;
+        tl.setModel(&model);
+        tl.setWidth(800);
+        tl.setHeight(300);
+        tl.setViewStartNs(0);
+        tl.setViewEndNs(2500 * kMs);
+        tl.setLinkFrom(3);
+        tl.setLinkTo(0);
+        QVERIFY(!tl.arrowMessages().isEmpty());
+        const auto store = model.detail();
+        QVERIFY(store);
+        for (int i : tl.arrowMessages()) {
+            QCOMPARE(store->messages[i].sender, 3);
+            QCOMPARE(store->messages[i].receiver, 0);
+        }
+        tl.setLinkFrom(-1);
+        QVERIFY(tl.arrowMessages().isEmpty() || tl.selectedRank() >= 0 || tl.allArrows());
     }
 
     // Wait colours span the window's least to most waiting rank (white to blue).

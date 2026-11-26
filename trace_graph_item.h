@@ -76,6 +76,21 @@ class TraceGraphItem : public QQuickPaintedItem
     Q_PROPERTY(QStringList findings READ findings NOTIFY graphChanged)
     Q_PROPERTY(QVariantList findingRanks READ findingRanks NOTIFY graphChanged)
     Q_PROPERTY(QVariantList findingList READ findingMaps NOTIFY graphChanged)
+    // Edge colour: "wait" (default; waiting on the link, green -> yellow -> red), "volume",
+    // "size" (average message size), "locality" (inside / between compute nodes), "change"
+    // (waiting against the reference window). Edges inside a compute node are drawn lighter.
+    Q_PROPERTY(QString edgeColor READ edgeColor WRITE setEdgeColor NOTIFY displayChanged)
+    // Node fill: "wait" (default, white -> blue) or "compute" (time outside MPI, white -> orange).
+    Q_PROPERTY(QString nodeColor READ nodeColor WRITE setNodeColor NOTIFY displayChanged)
+    // Legend of the colours: maps with label, low, high (texts), colors (list of colour names).
+    Q_PROPERTY(QVariantMap edgeLegend READ edgeLegend NOTIFY graphChanged)
+    Q_PROPERTY(QVariantMap nodeLegend READ nodeLegend NOTIFY graphChanged)
+    // Edge filter: "all", "waiting" (only links with waiting), "between" (only between compute
+    // nodes), "inside" (only inside compute nodes).
+    Q_PROPERTY(QString edgeFilter READ edgeFilter WRITE setEdgeFilter NOTIFY displayChanged)
+    // Reference window for comparisons (setReference / clearReference).
+    Q_PROPERTY(bool hasReference READ hasReference NOTIFY referenceChanged)
+    Q_PROPERTY(QString referenceLabel READ referenceLabel NOTIFY referenceChanged)
     // Finding whose ranks / link are highlighted (-1 = none); the rest of the graph is dimmed.
     Q_PROPERTY(int highlightedFinding READ highlightedFinding WRITE setHighlightedFinding NOTIFY highlightChanged)
 
@@ -138,6 +153,24 @@ public:
     Q_INVOKABLE void resetView();
     // Zooms to the ranks / nodes of a finding (and highlights it).
     Q_INVOKABLE void zoomToFinding(int index);
+    // Zooms to a rank (its node at the nodes level); false if not in the graph.
+    Q_INVOKABLE bool zoomToRank(int rank);
+    // The current window (ranks) as the reference for comparisons; clearReference drops it.
+    Q_INVOKABLE void setReference();
+    Q_INVOKABLE void clearReference();
+
+    QString edgeColor() const { return m_edgeColor; }
+    void setEdgeColor(const QString &mode);
+    QString nodeColor() const { return m_nodeColor; }
+    void setNodeColor(const QString &mode);
+    QVariantMap edgeLegend() const;
+    QVariantMap nodeLegend() const;
+    QString edgeFilter() const { return m_edgeFilter; }
+    void setEdgeFilter(const QString &filter);
+    bool hasReference() const { return m_reference.rankNodeCount > 0; }
+    QString referenceLabel() const { return m_referenceLabel; }
+    // Colour of a drawn edge (for tests).
+    QColor edgeColorOf(int edge) const;
     int maxEdges() const { return m_maxEdges; }
     void setMaxEdges(int n);
     QString status() const { return m_status; }
@@ -179,6 +212,7 @@ signals:
     // comm (collectives), bytes, messages, waitSeconds, directed, fromNs, toNs.
     void edgeClicked(QVariantMap details);
     void viewTransformChanged();
+    void referenceChanged();
     void highlightChanged();
 
 protected:
@@ -211,6 +245,10 @@ private:
     void updateSpacing();                 // m_unitSpacing from m_unitPos
     void updateHighlight();
     void relayout(); // positions for m_graph (cache / background / synchronous)
+    bool edgePassesFilter(const trace::GraphEdge &e) const;
+    double computeSeconds(int node) const; // time outside MPI of a rank / host (per rank)
+    void updateEdgeScale();
+    void addTimeSeries(const trace::TimelineStore &store, qint64 from, qint64 to);
     void setPositions(const QVector<QPointF> &positions, trace::GraphLayout layout, bool animate);
     double edgeWidth(const trace::GraphEdge &edge) const;
     void setStatus(const QString &status);
@@ -252,6 +290,20 @@ private:
     int m_highlightFinding = -1;
     QVector<bool> m_highlightNodes;
     int m_highlightEdge = -1;
+    QVector<int> m_highlightEdges; // links of the highlighted finding
+    QString m_edgeColor = QStringLiteral("wait");
+    QString m_nodeColor = QStringLiteral("wait");
+    QString m_edgeFilter = QStringLiteral("all");
+    double m_edgeScaleMax = 0;   // largest value of the edge colour quantity
+    double m_edgeScaleMin = 0;
+    double m_maxCompute = 0;
+    double m_minCompute = 0;
+    trace::CommGraph m_rankGraph;  // the window at rank level (findings, reference)
+    trace::CommGraph m_reference;
+    QString m_referenceLabel;
+    QHash<quint64, double> m_referenceLinkWait; // (sender << 32 | receiver) -> waiting per second
+    QVector<QVariantList> m_findingSeries;      // per finding: waiting over time of its ranks
+    QVector<QVariantList> m_findingBaseline;    // per finding: of all ranks
     int m_maxEdges = kDefaultMaxEdges;
 
     trace::CommGraph m_graph;

@@ -507,9 +507,15 @@ private slots:
         QVERIFY(imb);
         QVERIFY2(imb->text.contains(QStringLiteral("n3")) && !imb->text.contains(QStringLiteral("n0")), qPrintable(imb->text));
 
-        // Without waiting: pattern and locality only.
+        // Without waiting: pattern, locality and message sizes only; categories and actions set.
         const QVector<GraphFinding> quiet = analyzeCommGraph(stencil(8, 8, 8));
-        QCOMPARE(quiet.size(), 2);
+        QCOMPARE(quiet.size(), 3);
+        QCOMPARE(quiet[0].category, QStringLiteral("structure"));
+        QCOMPARE(quiet[2].kind, QStringLiteral("size"));
+        QCOMPARE(quiet[2].category, QStringLiteral("messages"));
+        for (const GraphFinding &x : f)
+            QVERIFY2(!x.category.isEmpty(), qPrintable(x.kind));
+        QVERIFY(!find(QStringLiteral("cause"), 9)->action.isEmpty());
         QVERIFY(analyzeCommGraph(CommGraph()).isEmpty());
     }
 
@@ -556,6 +562,104 @@ private slots:
         // Positions stay in the unit square.
         for (const QPointF &p : c.positions)
             QVERIFY(std::abs(p.x()) <= 1.0 && std::abs(p.y()) <= 1.0);
+    }
+
+    // The further analyses: late receiver, wait chain, compute imbalance, hub, small messages,
+    // rank placement, comparison with a reference.
+    void furtherFindings()
+    {
+        auto find = [](const QVector<GraphFinding> &f, const QString &kind) -> const GraphFinding * {
+            for (const GraphFinding &x : f)
+                if (x.kind == kind)
+                    return &x;
+            return nullptr;
+        };
+        // Pipeline 0 -> 1 -> ... -> 15 (two nodes of 8): rank 0 is late, 1 waits for it and is
+        // late itself for 2, ... : a wait chain back to rank 0. Rank 5's receiver (6) is late:
+        // 5 waits as a sender (late receiver).
+        QVector<std::tuple<int, int, quint64, double>> p2p;
+        for (int r = 0; r < 15; ++r)
+            p2p.append({r, r + 1, 100, r < 4 ? 0.010 * (r + 1) : 0.0001});
+        CommGraph g = handGraph(16, 8, p2p);
+        g.windowNs = 1'000'000'000;
+        for (GraphEdge &e : g.edges)
+            if (e.from == 5)
+                e.lateReceiverSeconds = 0.02;
+        // Compute time: ranks 12, 13 compute twice as long (spend less in MPI).
+        for (int i = 0; i < 16; ++i)
+            g.nodes[i].mpiSeconds = (i == 12 || i == 13) ? 0.0 : 0.5;
+        const QVector<GraphFinding> f = analyzeCommGraph(g);
+        const GraphFinding *chain = find(f, QStringLiteral("chain"));
+        QVERIFY(chain);
+        QVERIFY2(chain->metric.startsWith(QStringLiteral("0 → 1 → 2")), qPrintable(chain->metric));
+        QCOMPARE(chain->rank, 0);
+        QVERIFY(chain->links.contains(QPair<int, int>(0, 1)));
+        QCOMPARE(chain->category, QStringLiteral("waiting"));
+        const GraphFinding *lr = find(f, QStringLiteral("latereceiver"));
+        QVERIFY(lr);
+        QCOMPARE(lr->rank, 6);
+        QVERIFY(lr->ranks.contains(5));
+        const GraphFinding *comp = find(f, QStringLiteral("compute"));
+        QVERIFY(comp);
+        QCOMPARE(comp->category, QStringLiteral("load"));
+        QVERIFY(comp->ranks.contains(12) && comp->ranks.contains(13) && comp->ranks.size() == 2);
+        QVERIFY(!comp->action.isEmpty());
+
+        // Hub: master-worker, and many small messages.
+        QVector<std::tuple<int, int, quint64, double>> star;
+        for (int r = 1; r < 16; ++r)
+            star.append({0, r, 64, 0.0}), star.append({r, 0, 64, 0.0});
+        CommGraph sg = handGraph(16, 8, star);
+        for (GraphEdge &e : sg.edges)
+            e.messages = 40, e.bytes = 40 * 64;
+        const QVector<GraphFinding> sf = analyzeCommGraph(sg);
+        const GraphFinding *hub = find(sf, QStringLiteral("hub"));
+        QVERIFY(hub);
+        QCOMPARE(hub->rank, 0);
+        const GraphFinding *size = find(sf, QStringLiteral("size"));
+        QVERIFY(size);
+        QCOMPARE(size->title, QStringLiteral("Many small messages"));
+        QVERIFY(size->action.contains(QStringLiteral("Bundle")));
+
+        // Rank placement: a 8 x 4 grid where every node holds one column (4 ranks): little stays
+        // inside; tiles do better.
+        QVector<std::tuple<int, int, quint64, double>> grid;
+        for (int r = 0; r < 32; ++r) {
+            if (r % 8 + 1 < 8)
+                grid.append({r, r + 1, 1000, 0.0});
+            if (r + 8 < 32)
+                grid.append({r, r + 8, 1000, 0.0});
+        }
+        CommGraph gg = handGraph(32, 4, grid);
+        for (int i = 0; i < 32; ++i) {
+            gg.nodes[i].group = i % 8; // node = column
+            gg.nodes[i].node = QStringLiteral("c%1").arg(i % 8);
+        }
+        gg.groups.clear();
+        for (int c = 0; c < 8; ++c)
+            gg.groups << QStringLiteral("c%1").arg(c);
+        const MappingSuggestion ms = suggestMapping(gg, 8);
+        QVERIFY2(ms.bestShare > ms.currentShare + 0.1, qPrintable(QStringLiteral("%1 %2").arg(ms.currentShare).arg(ms.bestShare)));
+        QVERIFY(!ms.how.isEmpty());
+        QCOMPARE(ms.nodeOfRank.size(), 32);
+        const GraphFinding *map = find(analyzeCommGraph(gg, 8), QStringLiteral("mapping"));
+        QVERIFY(map);
+        QCOMPARE(map->category, QStringLiteral("structure"));
+
+        // Comparison: the same graph with doubled waiting on 0 -> 1.
+        CommGraph later = g;
+        for (GraphEdge &e : later.edges)
+            if (e.from == 0)
+                e.waitSeconds *= 3;
+        const QVector<GraphFinding> cmp = compareCommGraphs(later, g);
+        QVERIFY(cmp.size() >= 2);
+        QCOMPARE(cmp[0].category, QStringLiteral("comparison"));
+        QVERIFY(cmp[0].value > 0);
+        const GraphFinding *worse = find(cmp, QStringLiteral("compare-link"));
+        QVERIFY(worse);
+        QCOMPARE(worse->fromRank, 0);
+        QCOMPARE(worse->toRank, 1);
+        QVERIFY(find(cmp, QStringLiteral("compare-ranks"))->ranks.contains(1));
     }
 
     // The pattern of a real trace: the ring of writeManyMessagesOtf2 (r -> r + 1).

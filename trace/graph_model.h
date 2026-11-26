@@ -51,6 +51,10 @@ struct GraphNode {
     // Kind::Node only: traffic between ranks of this node (no edge is drawn for it).
     quint64 internalBytes = 0;
     int internalMessages = 0;
+    // Rank / host: time in MPI calls within the window (seconds, summed over a host's ranks)
+    // and the ranks it stands for (1 for a rank).
+    double mpiSeconds = 0;
+    int rankCount = 1;
 };
 
 struct GraphEdge {
@@ -61,6 +65,7 @@ struct GraphEdge {
     quint64 bytes = 0;
     int messages = 0;   // P2P: messages; collective: calls
     double waitSeconds = 0; // P2P: late sender of the receiver; collective: late sender of the rank
+    double lateReceiverSeconds = 0; // P2P: the sender's waiting for a late receive (blocking sends)
 };
 
 struct CommGraph {
@@ -68,6 +73,7 @@ struct CommGraph {
     QVector<GraphEdge> edges;
     QStringList groups;       // node (host) names, index = GraphNode::group
     int rankNodeCount = 0;    // nodes before the communicators
+    qint64 windowNs = 0;      // length of the window the graph covers
 
     int indexOfRank(int rank) const; // Ranks level: graph node of that rank, else -1
 };
@@ -117,6 +123,11 @@ CommPattern detectPattern(const CommGraph &rankGraph);
 // "cause", "link"; rank: the rank the finding is about (-1 if none); text: one line for the GUI.
 struct GraphFinding {
     QString kind;
+    // "structure", "waiting", "load", "messages" or "comparison" (cards are grouped by it).
+    QString category;
+    QString action;     // what to do about it (empty: nothing to do)
+    // Links to highlight (sender rank, receiver rank), e.g. a wait chain.
+    QVector<QPair<int, int>> links;
     QString text;       // one line: title, number and explanation together
     int rank = -1;      // the rank the finding is mainly about
     double value = 0;
@@ -131,7 +142,23 @@ struct GraphFinding {
     int fromRank = -1;
     int toRank = -1;
 };
-QVector<GraphFinding> analyzeCommGraph(const CommGraph &rankGraph);
+QVector<GraphFinding> analyzeCommGraph(const CommGraph &rankGraph, int gridColumns = 0);
+
+// Comparison of a window with a reference window (both rank-level graphs of the same ranks):
+// change of the total waiting, the ranks and links whose waiting grew / shrank most.
+QVector<GraphFinding> compareCommGraphs(const CommGraph &current, const CommGraph &reference);
+
+// Rank -> compute node assignment that keeps more P2P volume inside the nodes: block tiles of
+// the process grid (gridColumns > 0) and a greedy grouping by communication, nodes of the
+// current size. Returns the share of the volume inside nodes now and with the best found
+// assignment, and its description ("" if none better).
+struct MappingSuggestion {
+    double currentShare = 0;
+    double bestShare = 0;
+    QString how;
+    QVector<int> nodeOfRank; // indexed by graph node (rank level), the suggested node index
+};
+MappingSuggestion suggestMapping(const CommGraph &rankGraph, int gridColumns = 0);
 
 // Waiting per graph node (seconds): late sender of P2P edges at their receiver, waiting at
 // collectives at the calling rank / host. Communicators get 0.

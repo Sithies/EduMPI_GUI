@@ -54,6 +54,7 @@ CommGraph buildCommGraph(const TimelineStore &store, qint64 fromNs, qint64 toNs,
             n.kind = GraphNode::Kind::Node;
             n.node = g.groups[grp];
             n.members = int(rowsOfGroup[grp].size());
+            n.rankCount = n.members;
             n.group = grp;
             for (int row : rowsOfGroup[grp])
                 nodeOfRow[row] = int(g.nodes.size());
@@ -73,6 +74,7 @@ CommGraph buildCommGraph(const TimelineStore &store, qint64 fromNs, qint64 toNs,
     g.rankNodeCount = int(g.nodes.size());
 
     const bool covered = store.complete || (fromNs >= store.fromNs && toNs <= store.toNs);
+    g.windowNs = std::max<qint64>(0, toNs - fromNs);
     if (!covered || toNs <= fromNs)
         return g;
 
@@ -97,6 +99,20 @@ CommGraph buildCommGraph(const TimelineStore &store, qint64 fromNs, qint64 toNs,
     for (int rowIdx = 0; rowIdx < store.rows.size(); ++rowIdx) {
         const RankRow &r = store.rows[rowIdx];
         const int self = nodeOfRow[rowIdx];
+        // Time in MPI calls overlapping the window.
+        {
+            double mpi = 0;
+            // MPI calls of a rank do not overlap: only the one before the first starting in
+            // the window can reach into it.
+            auto a0 = std::lower_bound(r.activities.cbegin(), r.activities.cend(), fromNs,
+                                       [](const Activity &a, qint64 t) { return a.startNs < t; });
+            if (a0 != r.activities.cbegin())
+                --a0;
+            for (auto it = a0; it != r.activities.cend() && it->startNs < toNs; ++it)
+                if (it->endNs > fromNs)
+                    mpi += double(std::min(it->endNs, toNs) - std::max(it->startNs, fromNs)) / 1e9;
+            g.nodes[self].mpiSeconds += std::max(0.0, mpi);
+        }
         auto first = std::lower_bound(r.activities.cbegin(), r.activities.cend(), fromNs,
                                       [](const Activity &a, qint64 t) { return a.startNs < t; });
         for (auto it = first; it != r.activities.cend() && it->startNs < toNs; ++it) {
@@ -150,6 +166,7 @@ CommGraph buildCommGraph(const TimelineStore &store, qint64 fromNs, qint64 toNs,
                 e.bytes += m.bytes;
                 e.messages += 1;
                 e.waitSeconds += m.lateSender;
+                e.lateReceiverSeconds += m.lateReceiver;
             }
         }
     }
@@ -183,6 +200,7 @@ CommGraph mergeCommunicators(const CommGraph &graph)
         return graph;
     CommGraph g;
     g.groups = graph.groups;
+    g.windowNs = graph.windowNs;
     g.rankNodeCount = n;
     g.nodes = graph.nodes.mid(0, n);
     GraphNode all;
@@ -360,78 +378,287 @@ QString offsetsText(const QVector<int> &offsets)
 
 } // namespace
 
-QVector<GraphFinding> analyzeCommGraph(const CommGraph &g)
+namespace {
+
+// Undirected P2P volume between rank-level graph nodes (i < j): key (i << 32 | j).
+QHash<quint64, double> undirectedVolume(const CommGraph &g)
+{
+    QHash<quint64, double> v;
+    const int n = g.rankNodeCount;
+    for (const GraphEdge &e : g.edges) {
+        if (e.kind != GraphEdge::Kind::P2P || e.from >= n || e.to >= n || e.from == e.to)
+            continue;
+        const int a = std::min(e.from, e.to), c = std::max(e.from, e.to);
+        v[(quint64(quint32(a)) << 32) | quint32(c)] += double(e.bytes);
+    }
+    return v;
+}
+
+double insideShare(const QHash<quint64, double> &vol, const QVector<int> &nodeOf)
+{
+    double in = 0, all = 0;
+    for (auto it = vol.cbegin(); it != vol.cend(); ++it) {
+        const int a = int(it.key() >> 32), c = int(it.key() & 0xffffffffu);
+        all += it.value();
+        if (nodeOf[a] == nodeOf[c])
+            in += it.value();
+    }
+    return all > 0 ? in / all : 0;
+}
+
+QString rankList(const QVector<int> &ranks, int max = 4)
+{
+    QStringList l;
+    for (int k = 0; k < std::min<qsizetype>(max, ranks.size()); ++k)
+        l << QString::number(ranks[k]);
+    if (ranks.size() > max)
+        l << QStringLiteral("…");
+    return l.join(QStringLiteral(", "));
+}
+
+} // namespace
+
+MappingSuggestion suggestMapping(const CommGraph &g, int gridColumns)
+{
+    MappingSuggestion out;
+    const int n = g.rankNodeCount;
+    if (n < 4 || g.groups.size() < 2)
+        return out;
+    QVector<int> current(n);
+    QHash<int, int> groupSize;
+    for (int i = 0; i < n; ++i) {
+        current[i] = g.nodes[i].group;
+        groupSize[current[i]] += 1;
+    }
+    // Node size: the most common one; only uniform-size mappings are suggested.
+    int m = 0, best = 0;
+    QHash<int, int> sizes;
+    for (int sz : std::as_const(groupSize))
+        sizes[sz] += 1;
+    for (auto it = sizes.cbegin(); it != sizes.cend(); ++it)
+        if (it.value() > best) {
+            best = it.value();
+            m = it.key();
+        }
+    if (m < 2 || n % m != 0)
+        return out;
+    const QHash<quint64, double> vol = undirectedVolume(g);
+    if (vol.isEmpty())
+        return out;
+    out.currentShare = insideShare(vol, current);
+    out.bestShare = out.currentShare;
+
+    // Graph node of each rank number (grid tiles are by rank number).
+    QVector<int> nodeOfRank(n, -1);
+    for (int i = 0; i < n; ++i)
+        if (g.nodes[i].kind == GraphNode::Kind::Rank && g.nodes[i].rank >= 0 && g.nodes[i].rank < n)
+            nodeOfRank[g.nodes[i].rank] = i;
+    const bool byRank = !nodeOfRank.contains(-1);
+
+    // (a) Tiles a x b of the process grid.
+    if (gridColumns > 1 && byRank && n % gridColumns == 0) {
+        const int cols = gridColumns, rows = n / gridColumns;
+        for (int a = 1; a <= m; ++a) {
+            if (m % a != 0)
+                continue;
+            const int b = m / a;
+            if (cols % a != 0 || rows % b != 0)
+                continue;
+            QVector<int> assign(n);
+            for (int r = 0; r < n; ++r) {
+                const int x = r % cols, y = r / cols;
+                assign[nodeOfRank[r]] = (y / b) * (cols / a) + x / a;
+            }
+            const double share = insideShare(vol, assign);
+            if (share > out.bestShare + 1e-9) {
+                out.bestShare = share;
+                out.nodeOfRank = assign;
+                out.how = QStringLiteral("blocks of %1 × %2 ranks of the process grid per node").arg(a).arg(b);
+            }
+        }
+    }
+    // (b) Greedy: grow each node from the lowest unassigned rank by the strongest connection.
+    {
+        QVector<QVector<std::pair<int, double>>> adj(n);
+        for (auto it = vol.cbegin(); it != vol.cend(); ++it) {
+            const int a = int(it.key() >> 32), c = int(it.key() & 0xffffffffu);
+            adj[a].append({c, it.value()});
+            adj[c].append({a, it.value()});
+        }
+        QVector<int> assign(n, -1);
+        int node = 0;
+        for (int seed = 0; seed < n; ++seed) {
+            if (assign[seed] >= 0)
+                continue;
+            QHash<int, double> gain; // unassigned neighbour -> connection to the group
+            assign[seed] = node;
+            int size = 1;
+            for (const auto &[v, w] : adj[seed])
+                if (assign[v] < 0)
+                    gain[v] += w;
+            while (size < m) {
+                int pick = -1;
+                double pw = -1;
+                for (auto it = gain.cbegin(); it != gain.cend(); ++it)
+                    if (assign[it.key()] < 0 && (it.value() > pw || (it.value() == pw && it.key() < pick))) {
+                        pick = it.key();
+                        pw = it.value();
+                    }
+                if (pick < 0) {
+                    for (int r = 0; r < n; ++r)
+                        if (assign[r] < 0) {
+                            pick = r;
+                            break;
+                        }
+                }
+                if (pick < 0)
+                    break;
+                assign[pick] = node;
+                gain.remove(pick);
+                ++size;
+                for (const auto &[v, w] : adj[pick])
+                    if (assign[v] < 0)
+                        gain[v] += w;
+            }
+            ++node;
+        }
+        const double share = insideShare(vol, assign);
+        if (share > out.bestShare + 0.02) {
+            out.bestShare = share;
+            out.nodeOfRank = assign;
+            out.how = QStringLiteral("ranks grouped by who talks to whom, %1 per node").arg(m);
+        }
+    }
+    return out;
+}
+
+QVector<GraphFinding> analyzeCommGraph(const CommGraph &g, int gridColumns)
 {
     QVector<GraphFinding> out;
     const int n = g.rankNodeCount;
     if (n == 0 || g.edges.isEmpty())
         return out;
-    auto finish = [&](GraphFinding f) {
-        f.text = f.title + QStringLiteral(": ") + (f.metric.isEmpty() ? QString() : f.metric + QStringLiteral(" – "))
-            + f.detail;
+    auto finish = [&](GraphFinding f, const QString &line = QString()) {
+        f.text = line.isEmpty() ? f.title + QStringLiteral(": ") + (f.metric.isEmpty() ? QString() : f.metric + QStringLiteral(" – ")) + f.detail
+                                : line;
         out.append(f);
     };
+    auto rankOf = [&](int i) { return g.nodes[i].rank; };
+    auto nodeOf = [&](int i) { return g.nodes[i].node; };
 
-    // 1. Pattern.
+    // ---- Structure ---------------------------------------------------------------------
     const CommPattern pat = detectPattern(g);
-    GraphFinding f;
-    f.kind = QStringLiteral("pattern");
-    f.title = QStringLiteral("Pattern");
-    switch (pat.kind) {
-    case CommPattern::Kind::None:
-        f.metric = QStringLiteral("collectives only");
-        f.detail = QStringLiteral("no point-to-point messages in this window");
-        break;
-    case CommPattern::Kind::Ring:
-        f.metric = QStringLiteral("ring");
-        f.detail = QStringLiteral("every rank exchanges with its neighbours ±1");
-        break;
-    case CommPattern::Kind::Pipeline:
-        f.metric = QStringLiteral("pipeline");
-        f.detail = QStringLiteral("every rank sends to rank %1").arg(offsetsText(pat.offsets));
-        break;
-    case CommPattern::Kind::Stencil2D:
-        f.metric = QStringLiteral("2D stencil %1 × %2").arg(pat.gridColumns).arg((n + pat.gridColumns - 1) / pat.gridColumns);
-        f.detail = QStringLiteral("halo exchange with the partners at offsets %1 – each rank is a cell of a %2-wide grid "
-                                  "and talks to its 4 grid neighbours (Layout Auto shows the grid)")
-                       .arg(offsetsText(pat.offsets)).arg(pat.gridColumns);
-        break;
-    case CommPattern::Kind::AllToAll:
-        f.metric = QStringLiteral("all-to-all");
-        f.detail = QStringLiteral("a rank talks to %1 of %2 other ranks").arg(pat.medianPartners).arg(n - 1);
-        break;
-    case CommPattern::Kind::Irregular:
-        f.metric = QStringLiteral("irregular");
-        f.detail = pat.offsets.isEmpty()
-            ? QStringLiteral("a rank talks to %1 partners (median), no common offset").arg(pat.medianPartners)
-            : QStringLiteral("a rank talks to %1 partners (median), most at offsets %2")
-                  .arg(pat.medianPartners).arg(offsetsText(pat.offsets));
-        break;
-    }
-    // Lowercase first word of the old one-line text ("Pattern: 2D stencil / halo exchange …").
-    finish(f);
-    out.last().text = QStringLiteral("Pattern: %1 – %2").arg(f.metric, f.detail);
-
-    // 2. Locality: P2P bytes inside / between compute nodes (ranks of different groups).
-    double inside = 0, between = 0;
-    for (const GraphEdge &e : g.edges) {
-        if (e.kind != GraphEdge::Kind::P2P || e.from >= n || e.to >= n)
-            continue;
-        (g.nodes[e.from].group == g.nodes[e.to].group ? inside : between) += double(e.bytes);
-    }
-    if (g.groups.size() > 1 && inside + between > 0) {
-        GraphFinding l;
-        l.kind = QStringLiteral("locality");
-        l.value = inside / (inside + between);
-        l.title = QStringLiteral("Locality");
-        l.metric = QStringLiteral("%1 % inside nodes").arg(qRound(100 * l.value));
-        l.detail = QStringLiteral("of the P2P volume (%1) stays inside the compute nodes, %2 crosses the network")
-                       .arg(bytesText(inside + between)).arg(bytesText(between));
-        l.severity = l.value < 0.25 ? 1 : 0;
-        finish(l);
+    {
+        GraphFinding f;
+        f.kind = QStringLiteral("pattern");
+        f.category = QStringLiteral("structure");
+        f.title = QStringLiteral("Pattern");
+        switch (pat.kind) {
+        case CommPattern::Kind::None:
+            f.metric = QStringLiteral("collectives only");
+            f.detail = QStringLiteral("no point-to-point messages in this window");
+            break;
+        case CommPattern::Kind::Ring:
+            f.metric = QStringLiteral("ring");
+            f.detail = QStringLiteral("every rank exchanges with its neighbours ±1");
+            break;
+        case CommPattern::Kind::Pipeline:
+            f.metric = QStringLiteral("pipeline");
+            f.detail = QStringLiteral("every rank sends to rank %1").arg(offsetsText(pat.offsets));
+            break;
+        case CommPattern::Kind::Stencil2D:
+            f.metric = QStringLiteral("2D stencil %1 × %2").arg(pat.gridColumns).arg((n + pat.gridColumns - 1) / pat.gridColumns);
+            f.detail = QStringLiteral("halo exchange with the partners at offsets %1 – each rank is a cell of a %2-wide grid and talks to its 4 grid neighbours")
+                           .arg(offsetsText(pat.offsets)).arg(pat.gridColumns);
+            break;
+        case CommPattern::Kind::AllToAll:
+            f.metric = QStringLiteral("all-to-all");
+            f.detail = QStringLiteral("a rank talks to %1 of %2 other ranks").arg(pat.medianPartners).arg(n - 1);
+            f.action = QStringLiteral("All-to-all P2P scales badly: consider MPI_Alltoall(v) or a hierarchical exchange");
+            break;
+        case CommPattern::Kind::Irregular:
+            f.metric = QStringLiteral("irregular");
+            f.detail = pat.offsets.isEmpty()
+                ? QStringLiteral("a rank talks to %1 partners (median), no common offset – see the layout for the structure").arg(pat.medianPartners)
+                : QStringLiteral("a rank talks to %1 partners (median), most at offsets %2").arg(pat.medianPartners).arg(offsetsText(pat.offsets));
+            break;
+        }
+        finish(f, QStringLiteral("Pattern: %1 – %2").arg(f.metric, f.detail));
     }
 
-    // 3. Waiting per rank: mean, outliers (> mean + 2 sigma and > 1.5 x mean), share at collectives.
+    // Roles: hubs (far more messages than the others).
+    {
+        QVector<double> msgs(n, 0.0);
+        double total = 0;
+        for (const GraphEdge &e : g.edges)
+            if (e.kind == GraphEdge::Kind::P2P && e.from < n && e.to < n) {
+                msgs[e.from] += e.messages;
+                msgs[e.to] += e.messages;
+                total += 2.0 * e.messages;
+            }
+        if (total > 0 && n >= 6) {
+            QVector<int> hubs;
+            for (int i = 0; i < n; ++i)
+                if (msgs[i] / total >= std::max(0.10, 4.0 / n))
+                    hubs.append(i);
+            std::sort(hubs.begin(), hubs.end(), [&](int a, int b) { return msgs[a] > msgs[b]; });
+            if (!hubs.isEmpty() && hubs.size() <= 3) {
+                GraphFinding f;
+                f.kind = QStringLiteral("hub");
+                f.category = QStringLiteral("structure");
+                f.severity = msgs[hubs[0]] / total >= 0.3 ? 1 : 0;
+                f.rank = rankOf(hubs[0]);
+                QVector<int> rl;
+                for (int h : std::as_const(hubs)) {
+                    f.ranks.append(rankOf(h));
+                    rl.append(rankOf(h));
+                }
+                f.value = msgs[hubs[0]] / total;
+                f.title = hubs.size() == 1 ? QStringLiteral("Hub") : QStringLiteral("Hubs");
+                f.metric = QStringLiteral("rank %1: %2 % of all messages").arg(rankList(rl)).arg(qRound(100 * f.value));
+                f.detail = QStringLiteral("these ranks take part in a large share of all point-to-point messages (master / root role)");
+                f.action = QStringLiteral("A central rank serialises the work: distribute it, or use a tree / collective instead of P2P to one rank");
+                finish(f);
+            }
+        }
+    }
+
+    // Locality and a better rank -> node mapping.
+    {
+        double inside = 0, between = 0;
+        for (const GraphEdge &e : g.edges) {
+            if (e.kind != GraphEdge::Kind::P2P || e.from >= n || e.to >= n)
+                continue;
+            (g.nodes[e.from].group == g.nodes[e.to].group ? inside : between) += double(e.bytes);
+        }
+        if (g.groups.size() > 1 && inside + between > 0) {
+            GraphFinding l;
+            l.kind = QStringLiteral("locality");
+            l.category = QStringLiteral("structure");
+            l.value = inside / (inside + between);
+            l.title = QStringLiteral("Locality");
+            l.metric = QStringLiteral("%1 % inside nodes").arg(qRound(100 * l.value));
+            l.detail = QStringLiteral("of the P2P volume (%1) stays inside the compute nodes, %2 crosses the network")
+                           .arg(bytesText(inside + between)).arg(bytesText(between));
+            finish(l, QStringLiteral("Locality: %1 % of the P2P volume (%2) stays inside the compute nodes, %3 crosses the network")
+                          .arg(qRound(100 * l.value)).arg(bytesText(inside + between)).arg(bytesText(between)));
+            const MappingSuggestion ms = suggestMapping(g, gridColumns);
+            if (!ms.how.isEmpty() && ms.bestShare - ms.currentShare >= 0.10) {
+                GraphFinding f;
+                f.kind = QStringLiteral("mapping");
+                f.category = QStringLiteral("structure");
+                f.severity = 1;
+                f.value = ms.bestShare;
+                f.title = QStringLiteral("Better rank placement");
+                f.metric = QStringLiteral("%1 % → %2 % inside nodes").arg(qRound(100 * ms.currentShare)).arg(qRound(100 * ms.bestShare));
+                f.detail = QStringLiteral("with %1 more traffic would stay inside the compute nodes (found automatically)").arg(ms.how);
+                f.action = QStringLiteral("Place the ranks accordingly: MPI_Cart_create / MPI_Dist_graph_create with reorder, or the rank order / --map-by of the job");
+                finish(f);
+            }
+        }
+    }
+
+    // ---- Waiting -----------------------------------------------------------------------
     const QVector<double> wait = nodeWaiting(g);
     double sum = 0, sum2 = 0, coll = 0;
     int counted = 0;
@@ -450,11 +677,16 @@ QVector<GraphFinding> analyzeCommGraph(const CommGraph &g)
         const double sigma = std::sqrt(std::max(0.0, sum2 / counted - mean * mean));
         GraphFinding w;
         w.kind = QStringLiteral("waiting");
+        w.category = QStringLiteral("waiting");
         w.value = mean;
         w.title = QStringLiteral("Waiting");
         w.metric = QStringLiteral("%1 per rank").arg(msText(mean));
         w.detail = QStringLiteral("on average; %1 % of it in collectives (wait at collective), %2 % in P2P (late sender)")
                        .arg(qRound(100 * coll / sum)).arg(100 - qRound(100 * coll / sum));
+        if (g.windowNs > 0 && mean / (g.windowNs / 1e9) > 0.2) {
+            w.severity = 1;
+            w.action = QStringLiteral("More than a fifth of the time is waiting: look at the load balance and the late senders below");
+        }
         finish(w);
         QVector<int> order;
         for (int i = 0; i < n; ++i)
@@ -464,30 +696,228 @@ QVector<GraphFinding> analyzeCommGraph(const CommGraph &g)
         if (!order.isEmpty()) {
             GraphFinding o;
             o.kind = QStringLiteral("outlier");
-            o.rank = g.nodes[order[0]].rank;
+            o.category = QStringLiteral("waiting");
+            o.rank = rankOf(order[0]);
             o.value = wait[order[0]];
             o.severity = 1;
             o.title = order.size() == 1 ? QStringLiteral("Waits far more") : QStringLiteral("%1 ranks wait far more").arg(order.size());
             QStringList names;
             for (int k = 0; k < order.size(); ++k) {
-                o.ranks.append(g.nodes[order[k]].rank);
+                o.ranks.append(rankOf(order[k]));
                 if (k < 3)
-                    names << QStringLiteral("%1 (%2)").arg(g.nodes[order[k]].rank).arg(g.nodes[order[k]].node);
+                    names << QStringLiteral("%1 (%2)").arg(rankOf(order[k])).arg(nodeOf(order[k]));
             }
             if (order.size() > 3)
                 names << QStringLiteral("…");
             o.metric = QStringLiteral("up to %1× the mean").arg(wait[order[0]] / mean, 0, 'f', 1);
             o.detail = QStringLiteral("rank %1 waits most (%2); they wait for slower partners")
                            .arg(names.join(QStringLiteral(", "))).arg(msText(wait[order[0]]));
-            finish(o);
-            // The old one-line text per outlier (tests, snapshots).
-            out.last().text = QStringLiteral("Outlier: rank %1 (%2) waits %3 – %4× the mean")
-                                  .arg(o.rank).arg(g.nodes[order[0]].node).arg(msText(wait[order[0]])).arg(wait[order[0]] / mean, 0, 'f', 1);
+            o.action = QStringLiteral("Follow the wait chain / late senders to the partner that is late");
+            finish(o, QStringLiteral("Outlier: rank %1 (%2) waits %3 – %4× the mean")
+                          .arg(o.rank).arg(nodeOf(order[0])).arg(msText(wait[order[0]])).arg(wait[order[0]] / mean, 0, 'f', 1));
         }
     }
 
-    // 3b. Compute nodes whose ranks wait much less than the rest: in a bulk-synchronous program
-    // the others wait for them, i.e. they are probably the slow ones (load imbalance per node).
+    // Late senders (receivers wait for them), aggregated in one card.
+    QVector<double> caused(n, 0.0);
+    double causedSum = 0;
+    for (const GraphEdge &e : g.edges) {
+        if (e.kind != GraphEdge::Kind::P2P || e.from >= n)
+            continue;
+        caused[e.from] += e.waitSeconds;
+        causedSum += e.waitSeconds;
+    }
+    if (causedSum > 0) {
+        QVector<int> order;
+        const double mean = causedSum / std::max(1, counted);
+        for (int i = 0; i < n; ++i)
+            if (caused[i] >= 2 * mean)
+                order.append(i);
+        std::sort(order.begin(), order.end(), [&](int a, int b) { return caused[a] > caused[b]; });
+        if (!order.isEmpty()) {
+            GraphFinding c;
+            c.kind = QStringLiteral("cause");
+            c.category = QStringLiteral("waiting");
+            c.rank = rankOf(order[0]);
+            c.value = caused[order[0]];
+            c.severity = 2;
+            QVector<int> top;
+            for (int k = 0; k < std::min<qsizetype>(3, order.size()); ++k)
+                top.append(rankOf(order[k]));
+            for (int k = 0; k < std::min<qsizetype>(3, order.size()); ++k) {
+                c.ranks.append(rankOf(order[k]));
+                for (const GraphEdge &e : g.edges)
+                    if (e.kind == GraphEdge::Kind::P2P && e.from == order[k] && e.waitSeconds > 0 && e.to < n) {
+                        c.ranks.append(rankOf(e.to));
+                        c.links.append({rankOf(e.from), rankOf(e.to)});
+                    }
+            }
+            c.title = order.size() == 1 ? QStringLiteral("Late sender") : QStringLiteral("Late senders");
+            c.metric = QStringLiteral("rank %1: %2× the mean").arg(rankList(top, 3)).arg(caused[order[0]] / mean, 0, 'f', 1);
+            c.detail = QStringLiteral("rank %1 (%2) makes its receivers wait %3 in total – likely slower than its neighbours%4")
+                           .arg(c.rank).arg(nodeOf(order[0])).arg(msText(caused[order[0]]))
+                           .arg(order.size() > 1 ? QStringLiteral("; %1 ranks stand out").arg(order.size()) : QString());
+            c.action = QStringLiteral("Reduce the work of these ranks (load balance) or overlap: post MPI_Isend earlier, compute while messages travel");
+            finish(c, QStringLiteral("Late sender: rank %1 (%2) makes its receivers wait %3 in total – %4× the mean, likely slower than its neighbours")
+                          .arg(c.rank).arg(nodeOf(order[0])).arg(msText(caused[order[0]])).arg(caused[order[0]] / mean, 0, 'f', 1));
+        }
+    }
+
+    // Late receivers: senders wait (blocking / synchronous sends) because the receive came late.
+    {
+        QVector<double> lr(n, 0.0); // by receiver: how long senders waited for it
+        double lrSum = 0;
+        for (const GraphEdge &e : g.edges)
+            if (e.kind == GraphEdge::Kind::P2P && e.to < n && e.lateReceiverSeconds > 0) {
+                lr[e.to] += e.lateReceiverSeconds;
+                lrSum += e.lateReceiverSeconds;
+            }
+        if (lrSum > 0 && (sum <= 0 || lrSum >= 0.05 * sum)) {
+            int worst = int(std::max_element(lr.cbegin(), lr.cend()) - lr.cbegin());
+            GraphFinding f;
+            f.kind = QStringLiteral("latereceiver");
+            f.category = QStringLiteral("waiting");
+            f.severity = 1;
+            f.rank = rankOf(worst);
+            f.value = lrSum;
+            f.ranks.append(rankOf(worst));
+            for (const GraphEdge &e : g.edges)
+                if (e.kind == GraphEdge::Kind::P2P && e.to == worst && e.lateReceiverSeconds > 0 && e.from < n) {
+                    f.ranks.append(rankOf(e.from));
+                    f.links.append({rankOf(e.from), rankOf(e.to)});
+                }
+            f.title = QStringLiteral("Late receiver");
+            f.metric = QStringLiteral("senders wait %1").arg(msText(lrSum));
+            f.detail = QStringLiteral("senders are blocked until the receive is posted; most for rank %1 (%2, %3)")
+                           .arg(f.rank).arg(nodeOf(worst)).arg(msText(lr[worst]));
+            f.action = QStringLiteral("Post the receives earlier (MPI_Irecv before computing) or send non-blocking (MPI_Isend)");
+            finish(f);
+        }
+    }
+
+    // Wait chain: from the rank that waits most, follow whom it waited for, as long as that one
+    // waited itself (a simplified critical path: who delays whom).
+    {
+        QVector<double> p2pWait(n, 0.0);
+        for (const GraphEdge &e : g.edges)
+            if (e.kind == GraphEdge::Kind::P2P && e.to < n)
+                p2pWait[e.to] += e.waitSeconds;
+        int cur = int(std::max_element(p2pWait.cbegin(), p2pWait.cend()) - p2pWait.cbegin());
+        const double first = n > 0 ? p2pWait[cur] : 0;
+        if (first > 0) {
+            QVector<int> chain{cur};
+            QSet<int> seen{cur};
+            while (chain.size() < 8) {
+                int bestFrom = -1;
+                double bw = 0;
+                for (const GraphEdge &e : g.edges)
+                    if (e.kind == GraphEdge::Kind::P2P && e.to == cur && e.from < n && e.waitSeconds > bw) {
+                        bw = e.waitSeconds;
+                        bestFrom = e.from;
+                    }
+                if (bestFrom < 0 || seen.contains(bestFrom) || bw < 0.05 * first)
+                    break;
+                chain.append(bestFrom);
+                seen.insert(bestFrom);
+                if (p2pWait[bestFrom] < 0.1 * first)
+                    break; // the origin: it does not wait itself
+                cur = bestFrom;
+            }
+            if (chain.size() >= 3) {
+                GraphFinding f;
+                f.kind = QStringLiteral("chain");
+                f.category = QStringLiteral("waiting");
+                f.severity = 2;
+                QStringList names;
+                for (int k = int(chain.size()) - 1; k >= 0; --k)
+                    names << QString::number(rankOf(chain[k]));
+                for (int k = 0; k < chain.size(); ++k)
+                    f.ranks.append(rankOf(chain[k]));
+                for (int k = int(chain.size()) - 1; k > 0; --k)
+                    f.links.append({rankOf(chain[k]), rankOf(chain[k - 1])});
+                f.rank = rankOf(chain.last());
+                f.value = first;
+                f.title = QStringLiteral("Wait chain");
+                f.metric = names.join(QStringLiteral(" → "));
+                f.detail = QStringLiteral("delay passed on over %1 ranks: rank %2 is late, its receivers wait and are late themselves (rank %3 waits %4)")
+                               .arg(chain.size()).arg(rankOf(chain.last())).arg(rankOf(chain.first())).arg(msText(first));
+                f.action = QStringLiteral("Fix the origin (rank %1): its delay propagates through the whole chain").arg(rankOf(chain.last()));
+                finish(f);
+            }
+        }
+    }
+
+    // Link with the most waiting.
+    {
+        int best = -1;
+        for (int i = 0; i < g.edges.size(); ++i)
+            if (g.edges[i].kind == GraphEdge::Kind::P2P && (best < 0 || g.edges[i].waitSeconds > g.edges[best].waitSeconds))
+                best = i;
+        if (best >= 0 && g.edges[best].waitSeconds > 0) {
+            const GraphEdge &e = g.edges[best];
+            GraphFinding l;
+            l.kind = QStringLiteral("link");
+            l.category = QStringLiteral("waiting");
+            l.rank = rankOf(e.to);
+            l.value = e.waitSeconds;
+            l.severity = 1;
+            l.fromRank = rankOf(e.from);
+            l.toRank = rankOf(e.to);
+            l.ranks = {l.fromRank, l.toRank};
+            l.links = {{l.fromRank, l.toRank}};
+            l.title = QStringLiteral("Most waiting on one link");
+            l.metric = QStringLiteral("%1 → %2: %3").arg(l.fromRank).arg(l.toRank).arg(msText(e.waitSeconds));
+            l.detail = QStringLiteral("rank %1 waits for rank %2's messages, %3 in %4 messages")
+                           .arg(l.toRank).arg(l.fromRank).arg(msText(e.waitSeconds)).arg(e.messages);
+            finish(l, QStringLiteral("Most waiting on one link: rank %1 → rank %2, %3 in %4 messages")
+                          .arg(l.fromRank).arg(l.toRank).arg(msText(e.waitSeconds)).arg(e.messages));
+        }
+    }
+
+    // ---- Load --------------------------------------------------------------------------
+    // Compute time (window - time in MPI) per rank against the mean.
+    if (g.windowNs > 0) {
+        const double win = g.windowNs / 1e9;
+        QVector<double> comp(n, 0.0);
+        double csum = 0;
+        int cn = 0;
+        for (int i = 0; i < n; ++i) {
+            if (g.nodes[i].kind != GraphNode::Kind::Rank)
+                continue;
+            comp[i] = std::max(0.0, win - g.nodes[i].mpiSeconds);
+            csum += comp[i];
+            ++cn;
+        }
+        const double cmean = cn > 0 ? csum / cn : 0;
+        if (cmean > 0) {
+            QVector<int> slow;
+            for (int i = 0; i < n; ++i)
+                if (g.nodes[i].kind == GraphNode::Kind::Rank && comp[i] >= 1.3 * cmean)
+                    slow.append(i);
+            std::sort(slow.begin(), slow.end(), [&](int a, int b) { return comp[a] > comp[b]; });
+            if (!slow.isEmpty() && slow.size() <= std::max(1, cn / 3)) {
+                GraphFinding f;
+                f.kind = QStringLiteral("compute");
+                f.category = QStringLiteral("load");
+                f.severity = 2;
+                f.rank = rankOf(slow[0]);
+                f.value = comp[slow[0]] / cmean;
+                QVector<int> rl;
+                for (int i : std::as_const(slow)) {
+                    f.ranks.append(rankOf(i));
+                    rl.append(rankOf(i));
+                }
+                f.title = slow.size() == 1 ? QStringLiteral("Computes longer") : QStringLiteral("%1 ranks compute longer").arg(slow.size());
+                f.metric = QStringLiteral("rank %1: +%2 %").arg(rankList(rl, 3)).arg(qRound(100 * (f.value - 1)));
+                f.detail = QStringLiteral("rank %1 computes %2 (outside MPI) against %3 on average – the others wait for it")
+                               .arg(f.rank).arg(msText(comp[slow[0]])).arg(msText(cmean));
+                f.action = QStringLiteral("Balance the load: give these ranks less work (smaller sub-domain) or find what makes them slow");
+                finish(f);
+            }
+        }
+    }
+
+    // Compute nodes whose ranks wait much less than the rest (likely the slow ones).
     if (g.groups.size() > 2 && sum > 0) {
         QVector<double> groupWait(g.groups.size(), 0.0);
         QVector<int> groupRanks(g.groups.size(), 0);
@@ -514,7 +944,6 @@ QVector<GraphFinding> analyzeCommGraph(const CommGraph &g)
         const double gsigma = gcount > 0 ? std::sqrt(gvar / gcount) : 0;
         QStringList slow;
         double slowWait = 0;
-        // Clearly below the others: 1.5 sigma under the mean and at most 85 % of it.
         for (int k = 0; k < groupWait.size(); ++k)
             if (groupRanks[k] > 0 && gmean - groupWait[k] > 1.5 * gsigma && groupWait[k] < 0.85 * gmean) {
                 slow << g.groups[k];
@@ -523,6 +952,7 @@ QVector<GraphFinding> analyzeCommGraph(const CommGraph &g)
         if (!slow.isEmpty() && slow.size() <= gcount / 2) {
             GraphFinding s;
             s.kind = QStringLiteral("imbalance");
+            s.category = QStringLiteral("load");
             s.value = slowWait / slow.size();
             s.severity = 2;
             s.nodes = slow;
@@ -536,74 +966,140 @@ QVector<GraphFinding> analyzeCommGraph(const CommGraph &g)
             s.metric = QStringLiteral("%1 of %2 nodes").arg(slow.size()).arg(gcount);
             s.detail = QStringLiteral("the ranks of %1 wait only %2 on average (others %3) – the others wait for them, so these nodes are likely slower")
                            .arg(shown.join(QStringLiteral(", "))).arg(msText(s.value)).arg(msText(gmean));
-            finish(s);
-            out.last().text = QStringLiteral("Imbalance: the ranks of %1 wait only %2 on average (others %3) – the others probably wait for them, these nodes are likely slower")
-                                  .arg(shown.join(QStringLiteral(", "))).arg(msText(s.value)).arg(msText(gmean));
+            s.action = QStringLiteral("Check these nodes (CPU frequency, other jobs, hardware) or give them less work");
+            finish(s, QStringLiteral("Imbalance: the ranks of %1 wait only %2 on average (others %3) – the others probably wait for them, these nodes are likely slower")
+                          .arg(shown.join(QStringLiteral(", "))).arg(msText(s.value)).arg(msText(gmean)));
         }
     }
 
-    // 4. Cause: senders whose messages arrived late (sum of late-sender time they caused).
-    QVector<double> caused(n, 0.0);
-    double causedSum = 0;
-    for (const GraphEdge &e : g.edges) {
-        if (e.kind != GraphEdge::Kind::P2P || e.from >= n)
-            continue;
-        caused[e.from] += e.waitSeconds;
-        causedSum += e.waitSeconds;
+    // ---- Messages ----------------------------------------------------------------------
+    {
+        quint64 bytes = 0;
+        qint64 msgs = 0;
+        double smallMsgs = 0; // messages of edges whose average size is below 1 KiB
+        for (const GraphEdge &e : g.edges) {
+            if (e.kind != GraphEdge::Kind::P2P || e.messages <= 0)
+                continue;
+            bytes += e.bytes;
+            msgs += e.messages;
+            if (double(e.bytes) / e.messages < 1024)
+                smallMsgs += e.messages;
+        }
+        if (msgs > 0) {
+            GraphFinding f;
+            f.kind = QStringLiteral("size");
+            f.category = QStringLiteral("messages");
+            const double avg = double(bytes) / double(msgs);
+            const double smallShare = smallMsgs / double(msgs);
+            const double perRank = double(msgs) / std::max(1, n);
+            f.value = avg;
+            f.title = QStringLiteral("Message sizes");
+            f.metric = QStringLiteral("Ø %1, %2 messages").arg(bytesText(avg)).arg(msgs);
+            f.detail = QStringLiteral("%1 % of the messages are below 1 KiB (latency-bound), %2 per rank in this window")
+                           .arg(qRound(100 * smallShare)).arg(perRank, 0, 'f', perRank < 10 ? 1 : 0);
+            if (smallShare >= 0.5 && perRank >= 20) {
+                f.severity = 1;
+                f.title = QStringLiteral("Many small messages");
+                f.action = QStringLiteral("Bundle small messages (pack several into one, derived datatypes) – each message costs latency");
+            } else if (avg >= 64 * 1024) {
+                f.detail += QStringLiteral("; large messages: bandwidth-bound");
+                f.action = QStringLiteral("Overlap large transfers with computation (non-blocking sends / receives)");
+            }
+            finish(f);
+        }
     }
-    if (causedSum > 0) {
-        QVector<int> order;
-        for (int i = 0; i < n; ++i)
-            if (caused[i] > 0)
-                order.append(i);
-        std::sort(order.begin(), order.end(), [&](int a, int b) { return caused[a] > caused[b]; });
-        const double mean = causedSum / std::max(1, counted);
-        for (int k = 0; k < std::min<qsizetype>(2, order.size()); ++k) {
-            const int i = order[k];
-            if (caused[i] < 2 * mean)
-                break;
-            GraphFinding c;
-            c.kind = QStringLiteral("cause");
-            c.rank = g.nodes[i].rank;
-            c.value = caused[i];
-            c.severity = 2;
-            c.ranks.append(c.rank);
-            // Its receivers (who wait for it).
-            for (const GraphEdge &e : g.edges)
-                if (e.kind == GraphEdge::Kind::P2P && e.from == i && e.waitSeconds > 0 && e.to < n)
-                    c.ranks.append(g.nodes[e.to].rank);
-            c.title = QStringLiteral("Late sender");
-            c.metric = QStringLiteral("rank %1: %2× the mean").arg(c.rank).arg(caused[i] / mean, 0, 'f', 1);
-            c.detail = QStringLiteral("rank %1 (%2) makes its receivers wait %3 in total – likely slower than its neighbours")
-                           .arg(c.rank).arg(g.nodes[i].node).arg(msText(caused[i]));
-            finish(c);
-            out.last().text = QStringLiteral("Late sender: rank %1 (%2) makes its receivers wait %3 in total – %4× the mean, likely slower than its neighbours")
-                                  .arg(c.rank).arg(g.nodes[i].node).arg(msText(caused[i])).arg(caused[i] / mean, 0, 'f', 1);
+    return out;
+}
+
+QVector<GraphFinding> compareCommGraphs(const CommGraph &cur, const CommGraph &ref)
+{
+    QVector<GraphFinding> out;
+    const int n = std::min(cur.rankNodeCount, ref.rankNodeCount);
+    if (n == 0)
+        return out;
+    // By rank number (both rank level).
+    QHash<int, int> ci, ri;
+    for (int i = 0; i < cur.rankNodeCount; ++i)
+        ci.insert(cur.nodes[i].rank, i);
+    for (int i = 0; i < ref.rankNodeCount; ++i)
+        ri.insert(ref.nodes[i].rank, i);
+    const QVector<double> cw = nodeWaiting(cur), rw = nodeWaiting(ref);
+    // Per second of window, so that windows of different length compare.
+    const double cs = cur.windowNs > 0 ? cur.windowNs / 1e9 : 1, rs = ref.windowNs > 0 ? ref.windowNs / 1e9 : 1;
+    double ctot = 0, rtot = 0;
+    QVector<std::pair<double, int>> deltas;
+    for (auto it = ci.cbegin(); it != ci.cend(); ++it) {
+        const int r = it.key();
+        const double c = cw[it.value()] / cs;
+        const double p = ri.contains(r) ? rw[ri.value(r)] / rs : 0;
+        ctot += c;
+        rtot += p;
+        deltas.append({c - p, r});
+    }
+    GraphFinding t;
+    t.kind = QStringLiteral("compare");
+    t.category = QStringLiteral("comparison");
+    t.title = QStringLiteral("Waiting vs. reference");
+    const double change = rtot > 0 ? (ctot - rtot) / rtot : 0;
+    t.value = change;
+    t.severity = change > 0.2 ? 2 : change > 0.05 ? 1 : 0;
+    t.metric = rtot > 0 ? QStringLiteral("%1%2 %").arg(change >= 0 ? QStringLiteral("+") : QString()).arg(qRound(100 * change))
+                        : QStringLiteral("no waiting in the reference");
+    t.detail = QStringLiteral("waiting per second of the window, all ranks: %1 now, %2 in the reference")
+                   .arg(msText(ctot)).arg(msText(rtot));
+    t.text = t.title + QStringLiteral(": ") + t.metric;
+    out.append(t);
+    std::sort(deltas.begin(), deltas.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+    if (!deltas.isEmpty() && deltas.first().first > 0) {
+        GraphFinding f;
+        f.kind = QStringLiteral("compare-ranks");
+        f.category = QStringLiteral("comparison");
+        f.severity = 1;
+        QVector<int> rl;
+        for (int k = 0; k < std::min<qsizetype>(5, deltas.size()) && deltas[k].first > 0; ++k) {
+            f.ranks.append(deltas[k].second);
+            rl.append(deltas[k].second);
         }
-        // Link with the most waiting.
-        int best = -1;
-        for (int i = 0; i < g.edges.size(); ++i)
-            if (g.edges[i].kind == GraphEdge::Kind::P2P
-                && (best < 0 || g.edges[i].waitSeconds > g.edges[best].waitSeconds))
-                best = i;
-        if (best >= 0 && g.edges[best].waitSeconds > 0) {
-            const GraphEdge &e = g.edges[best];
-            GraphFinding l;
-            l.kind = QStringLiteral("link");
-            l.rank = g.nodes[e.to].rank;
-            l.value = e.waitSeconds;
-            l.severity = 1;
-            l.fromRank = g.nodes[e.from].rank;
-            l.toRank = g.nodes[e.to].rank;
-            l.ranks = {l.fromRank, l.toRank};
-            l.title = QStringLiteral("Most waiting on one link");
-            l.metric = QStringLiteral("%1 → %2: %3").arg(l.fromRank).arg(l.toRank).arg(msText(e.waitSeconds));
-            l.detail = QStringLiteral("rank %1 waits for rank %2's messages, %3 in %4 messages")
-                           .arg(l.toRank).arg(l.fromRank).arg(msText(e.waitSeconds)).arg(e.messages);
-            finish(l);
-            out.last().text = QStringLiteral("Most waiting on one link: rank %1 → rank %2, %3 in %4 messages")
-                                  .arg(l.fromRank).arg(l.toRank).arg(msText(e.waitSeconds)).arg(e.messages);
+        f.rank = rl.first();
+        f.title = QStringLiteral("Waits more than in the reference");
+        f.metric = QStringLiteral("rank %1").arg(rankList(rl, 5));
+        f.detail = QStringLiteral("rank %1 waits %2 per second more than in the reference window").arg(rl.first()).arg(msText(deltas.first().first));
+        f.text = f.title + QStringLiteral(": ") + f.metric;
+        out.append(f);
+    }
+    // Links whose waiting grew most.
+    QHash<quint64, double> refLink;
+    for (const GraphEdge &e : ref.edges)
+        if (e.kind == GraphEdge::Kind::P2P && e.from < ref.rankNodeCount && e.to < ref.rankNodeCount)
+            refLink[(quint64(quint32(ref.nodes[e.from].rank)) << 32) | quint32(ref.nodes[e.to].rank)] += e.waitSeconds / rs;
+    double bestD = 0;
+    int bf = -1, bt = -1;
+    for (const GraphEdge &e : cur.edges) {
+        if (e.kind != GraphEdge::Kind::P2P || e.from >= cur.rankNodeCount || e.to >= cur.rankNodeCount)
+            continue;
+        const int a = cur.nodes[e.from].rank, b = cur.nodes[e.to].rank;
+        const double d = e.waitSeconds / cs - refLink.value((quint64(quint32(a)) << 32) | quint32(b));
+        if (d > bestD) {
+            bestD = d;
+            bf = a;
+            bt = b;
         }
+    }
+    if (bf >= 0) {
+        GraphFinding f;
+        f.kind = QStringLiteral("compare-link");
+        f.category = QStringLiteral("comparison");
+        f.severity = 1;
+        f.fromRank = bf;
+        f.toRank = bt;
+        f.ranks = {bf, bt};
+        f.links = {{bf, bt}};
+        f.rank = bt;
+        f.title = QStringLiteral("Link that got worse");
+        f.metric = QStringLiteral("%1 → %2: +%3/s").arg(bf).arg(bt).arg(msText(bestD));
+        f.detail = QStringLiteral("rank %1 waits for rank %2 %3 per second more than in the reference").arg(bt).arg(bf).arg(msText(bestD));
+        f.text = f.title + QStringLiteral(": ") + f.metric;
+        out.append(f);
     }
     return out;
 }

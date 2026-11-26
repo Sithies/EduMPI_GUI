@@ -80,6 +80,11 @@ Item {
     property string graphLayout: 'auto'
     property int graphMaxEdges: 500
     property var lastEdge: null
+    property int graphLinkFrom: -1
+    property int graphLinkTo: -1
+    property string graphEdgeColor: 'wait'
+    property string graphNodeColor: 'wait'
+    property string graphEdgeFilter: 'all'
     signal viewRequested(real startNs, real endNs)
   }
   TraceGraph { objectName: 'graph'; anchors.fill: parent; listNodes: ({timeline: tlModel}); traceState: parent.state }
@@ -230,6 +235,18 @@ int main(int argc, char **argv)
                 const QString key = kv.section(QLatin1Char('='), 0, 0);
                 if (key == QLatin1String("zoomToFinding") && graph) {
                     graph->zoomToFinding(kv.section(QLatin1Char('='), 1).toInt());
+                    continue;
+                }
+                if (key == QLatin1String("pin") && graph) {
+                    // As a click on a card: opened, highlighted, zoomed.
+                    const int idx = kv.section(QLatin1Char('='), 1).toInt();
+                    if (QObject *panel = obj->findChild<QObject *>(QStringLiteral("findingsPanel")))
+                        panel->setProperty("pinned", idx);
+                    graph->zoomToFinding(idx);
+                    continue;
+                }
+                if (key == QLatin1String("reference") && graph) {
+                    graph->setReference();
                     continue;
                 }
                 if (key == QLatin1String("highlight") && graph) {

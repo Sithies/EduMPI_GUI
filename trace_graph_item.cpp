@@ -500,6 +500,11 @@ QVariantList TraceGraphItem::findingMaps() const
         m.insert(QStringLiteral("nodes"), f.nodes);
         m.insert(QStringLiteral("fromRank"), f.fromRank);
         m.insert(QStringLiteral("toRank"), f.toRank);
+        m.insert(QStringLiteral("category"), f.category);
+        m.insert(QStringLiteral("action"), f.action);
+        const int idx = int(out.size());
+        m.insert(QStringLiteral("series"), m_findingSeries.value(idx));
+        m.insert(QStringLiteral("baseline"), m_findingBaseline.value(idx));
         out << m;
     }
     return out;
@@ -523,6 +528,7 @@ void TraceGraphItem::updateHighlight()
 {
     m_highlightNodes = QVector<bool>(m_graph.nodes.size(), false);
     m_highlightEdge = -1;
+    m_highlightEdges.clear();
     if (m_highlightFinding < 0 || m_highlightFinding >= m_findings.size())
         return;
     const trace::GraphFinding &f = m_findings[m_highlightFinding];
@@ -548,11 +554,16 @@ void TraceGraphItem::updateHighlight()
                     m_highlightNodes[i] = true;
         }
     }
-    if (f.fromRank >= 0 && f.toRank >= 0) {
-        const int a = nodeOfRank.value(f.fromRank, -1), b = nodeOfRank.value(f.toRank, -1);
+    QVector<QPair<int, int>> links = f.links;
+    if (f.fromRank >= 0 && f.toRank >= 0 && !links.contains({f.fromRank, f.toRank}))
+        links.append({f.fromRank, f.toRank});
+    for (const auto &l : std::as_const(links)) {
+        const int a = nodeOfRank.value(l.first, -1), b = nodeOfRank.value(l.second, -1);
         for (int i = 0; i < m_graph.edges.size() && a >= 0 && b >= 0; ++i)
-            if (m_graph.edges[i].kind == GraphEdge::Kind::P2P && m_graph.edges[i].from == a && m_graph.edges[i].to == b)
+            if (m_graph.edges[i].kind == GraphEdge::Kind::P2P && m_graph.edges[i].from == a && m_graph.edges[i].to == b) {
+                m_highlightEdges.append(i);
                 m_highlightEdge = i;
+            }
     }
 }
 
@@ -674,6 +685,8 @@ void TraceGraphItem::rebuild()
     QString status;
     QVector<trace::GraphFinding> rankGraphFindings;
     int gridColumns = 0;
+    std::shared_ptr<const TimelineStore> seriesStore;
+    m_rankGraph = CommGraph();
     if (overview) {
         m_overviewRankHost.clear();
         for (const auto &row : overview->rows)
@@ -693,10 +706,14 @@ void TraceGraphItem::rebuild()
             rankOptions.level == m_options.level && m_options.directed && m_options.expandedNodes.isEmpty()
                 ? m_graph
                 : trace::buildCommGraph(*detail, from, to, rankOptions);
-        rankGraphFindings = trace::analyzeCommGraph(rankGraph);
         const trace::CommPattern pattern = trace::detectPattern(rankGraph);
-        gridColumns = pattern.kind == trace::CommPattern::Kind::Stencil2D && m_options.level == trace::GraphLevel::Ranks
-            ? pattern.gridColumns : 0;
+        const int patternGrid = pattern.kind == trace::CommPattern::Kind::Stencil2D ? pattern.gridColumns : 0;
+        gridColumns = m_options.level == trace::GraphLevel::Ranks ? patternGrid : 0;
+        rankGraphFindings = trace::analyzeCommGraph(rankGraph, patternGrid);
+        if (hasReference())
+            rankGraphFindings += trace::compareCommGraphs(rankGraph, m_reference);
+        m_rankGraph = rankGraph;
+        seriesStore = detail;
     } else {
         // Nodes without edges, so the layout is already in place.
         m_graph = trace::buildCommGraph(*overview, 0, 0, m_options);
@@ -716,6 +733,10 @@ void TraceGraphItem::rebuild()
         m_graph = trace::mergeCommunicators(m_graph);
     m_findings = rankGraphFindings;
     m_gridColumns = gridColumns;
+    m_findingSeries.clear();
+    m_findingBaseline.clear();
+    if (seriesStore)
+        addTimeSeries(*seriesStore, from, to);
     // Same graph nodes as before (window moved): positions stay until the new layout is there.
     if (m_unitPos.size() != m_graph.nodes.size()) {
         m_unitPos = trace::layoutGraph(m_graph, trace::GraphLayout::Circle);
@@ -737,6 +758,14 @@ void TraceGraphItem::rebuild()
         m_minWait = m_minWait < 0 ? m_nodeWait[i] : std::min(m_minWait, m_nodeWait[i]);
     }
     m_minWait = std::max(0.0, m_minWait);
+    m_maxCompute = 0;
+    m_minCompute = -1;
+    for (int i = 0; i < m_graph.rankNodeCount; ++i) {
+        const double c = computeSeconds(i);
+        m_maxCompute = std::max(m_maxCompute, c);
+        m_minCompute = m_minCompute < 0 ? c : std::min(m_minCompute, c);
+    }
+    m_minCompute = std::max(0.0, m_minCompute);
     reselect();
     emit graphChanged();
     update();
@@ -745,6 +774,14 @@ void TraceGraphItem::rebuild()
 void TraceGraphItem::reselect()
 {
     m_drawn = trace::selectEdges(m_graph, m_weight, m_maxEdges, focusNode());
+    if (m_edgeFilter != QLatin1String("all")) {
+        QVector<int> kept;
+        for (int i : std::as_const(m_drawn))
+            if (edgePassesFilter(m_graph.edges[i]))
+                kept.append(i);
+        m_drawn = kept;
+    }
+    updateEdgeScale();
     m_maxWeight = 0;
     for (int i : std::as_const(m_drawn))
         m_maxWeight = std::max(m_maxWeight, trace::edgeWeight(m_graph.edges[i], m_weight));
@@ -1055,7 +1092,9 @@ void TraceGraphItem::paint(QPainter *painter)
 
     // Partners of the selected rank (drawn in full, the rest dimmed); a highlighted finding
     // takes precedence: its ranks / nodes lit, the rest dimmed.
-    const bool highlight = m_highlightFinding >= 0 && m_highlightNodes.size() == m_graph.nodes.size();
+    // Only findings that point at ranks / nodes dim the rest (a structure finding without any does not).
+    const bool highlight = m_highlightFinding >= 0 && m_highlightNodes.size() == m_graph.nodes.size()
+        && m_highlightNodes.contains(true);
     QVector<bool> lit(m_graph.nodes.size(), focus < 0 && !highlight);
     if (highlight) {
         lit = m_highlightNodes;
@@ -1116,8 +1155,12 @@ void TraceGraphItem::paint(QPainter *painter)
         const GraphEdge &e = m_graph.edges[i];
         const EdgePath path = edgePath(e);
         const bool dim = highlight ? !(lit[e.from] && lit[e.to]) : (focus >= 0 && e.from != focus && e.to != focus);
-        QColor c = e.kind == GraphEdge::Kind::Collective ? kCollectiveColor : kP2PColor;
-        c.setAlphaF(dim ? 0.12 : (e.kind == GraphEdge::Kind::Collective ? 0.6 : 0.85));
+        QColor c = edgeColorOf(i);
+        // Inside one compute node lighter, between nodes strong.
+        const bool inside = e.kind == GraphEdge::Kind::P2P && m_graph.groups.size() > 1
+            && m_graph.nodes[e.from].kind == GraphNode::Kind::Rank && m_graph.nodes[e.to].kind == GraphNode::Kind::Rank
+            && m_graph.nodes[e.from].group == m_graph.nodes[e.to].group;
+        c.setAlphaF(dim ? 0.12 : (e.kind == GraphEdge::Kind::Collective ? 0.5 : inside ? 0.45 : 0.95));
         QPen pen(c, edgeWidth(e));
         pen.setCapStyle(Qt::RoundCap);
         if (e.kind == GraphEdge::Kind::Collective)
@@ -1165,8 +1208,10 @@ void TraceGraphItem::paint(QPainter *painter)
     }
 
     // The link of the highlighted finding, on top (also when not among the drawn edges).
-    if (highlight && m_highlightEdge >= 0) {
-        const EdgePath path = edgePath(m_graph.edges[m_highlightEdge]);
+    for (int he : std::as_const(m_highlightEdges)) {
+        if (!highlight || he < 0 || he >= m_graph.edges.size())
+            continue;
+        const EdgePath path = edgePath(m_graph.edges[he]);
         const QColor c(0xf9, 0x73, 0x16);
         QPen pen(c, 5);
         pen.setCapStyle(Qt::RoundCap);
@@ -1194,7 +1239,10 @@ void TraceGraphItem::paint(QPainter *painter)
     f.setPointSizeF(8);
     painter->setFont(f);
     // Rank labels once neighbouring nodes are far enough apart (zoom in for more).
-    const bool rankLabels = m_options.level == trace::GraphLevel::Nodes || nodeSpacing() >= kLabelSpacing;
+    // Labels sit beside the node on the circle, below it elsewhere (needs more room).
+    const bool circleLabels = m_layout == trace::GraphLayout::Circle || m_layout == trace::GraphLayout::SpectralCircle;
+    const bool rankLabels = m_options.level == trace::GraphLevel::Nodes
+        || nodeSpacing() >= (circleLabels ? kLabelSpacing : 2 * kLabelSpacing);
     const QRectF visible = QRectF(0, 0, width(), height()).adjusted(-20, -20, 20, 20);
     for (int i = 0; i < m_graph.nodes.size(); ++i) {
         const GraphNode &n = m_graph.nodes[i];
@@ -1214,7 +1262,10 @@ void TraceGraphItem::paint(QPainter *painter)
         // colour when the ranks of several hosts are shown, the selection colour when selected.
         QColor fill = n.kind == GraphNode::Kind::Communicator
             ? kCommunicatorColor
-            : waitColor(m_nodeWait.value(i));
+            : m_nodeColor == QLatin1String("compute")
+                ? mix(kWaitLowColor, QColor(0xff, 0x7f, 0x0e),
+                      m_maxCompute > m_minCompute ? (computeSeconds(i) - m_minCompute) / (m_maxCompute - m_minCompute) : 0)
+                : waitColor(m_nodeWait.value(i));
         if (!lit[i])
             fill = mix(fill, kBackground, 0.75);
         painter->setBrush(fill);
@@ -1276,6 +1327,330 @@ void TraceGraphItem::paint(QPainter *painter)
     }
 
     paintHint(painter);
+}
+
+namespace {
+const QColor kEdgeOk(0x4c, 0xaf, 0x50);
+const QColor kEdgeMid(0xf5, 0xc5, 0x42);
+const QColor kEdgeBad(0xd6, 0x27, 0x28);
+const QColor kVolLow(0xb2, 0xdf, 0xdb);
+const QColor kVolHigh(0x00, 0x69, 0x5c);
+const QColor kSizeLow(0xd1, 0xc4, 0xe9);
+const QColor kSizeHigh(0x45, 0x27, 0xa0);
+const QColor kInside(0x66, 0xbb, 0x6a);
+const QColor kBetween(0x15, 0x65, 0xc0);
+const QColor kLess(0x21, 0x66, 0xac);
+const QColor kMore(0xb2, 0x18, 0x2b);
+const QColor kSame(0xbd, 0xbd, 0xbd);
+
+QColor threeStop(double t, const QColor &a, const QColor &b, const QColor &c)
+{
+    t = std::clamp(t, 0.0, 1.0);
+    return t < 0.5 ? mix(a, b, t * 2) : mix(b, c, (t - 0.5) * 2);
+}
+
+// 0 .. 1 on a log scale between lo and hi (values spanning orders of magnitude).
+double logPos(double v, double lo, double hi)
+{
+    if (hi <= 0 || v <= 0)
+        return 0;
+    lo = std::max(lo, hi * 1e-4);
+    if (hi <= lo)
+        return 1;
+    return std::clamp(std::log(std::max(v, lo) / lo) / std::log(hi / lo), 0.0, 1.0);
+}
+
+QString shortValue(double v, const QString &kind)
+{
+    if (kind == QLatin1String("volume") || kind == QLatin1String("size"))
+        return formatBytes(v);
+    return formatMs(v);
+}
+} // namespace
+
+double TraceGraphItem::computeSeconds(int node) const
+{
+    if (node < 0 || node >= m_graph.rankNodeCount || m_graph.windowNs <= 0)
+        return 0;
+    const GraphNode &n = m_graph.nodes[node];
+    const double win = m_graph.windowNs / 1e9;
+    return std::max(0.0, win - n.mpiSeconds / std::max(1, n.rankCount));
+}
+
+bool TraceGraphItem::edgePassesFilter(const GraphEdge &e) const
+{
+    if (m_edgeFilter == QLatin1String("all"))
+        return true;
+    if (e.kind != GraphEdge::Kind::P2P)
+        return false;
+    if (m_edgeFilter == QLatin1String("waiting"))
+        return e.waitSeconds > 0;
+    const GraphNode &a = m_graph.nodes[e.from];
+    const GraphNode &b = m_graph.nodes[e.to];
+    const bool inside = a.group == b.group && a.kind == GraphNode::Kind::Rank && b.kind == GraphNode::Kind::Rank;
+    if (m_edgeFilter == QLatin1String("inside"))
+        return inside;
+    if (m_edgeFilter == QLatin1String("between"))
+        return !inside;
+    return true;
+}
+
+namespace {
+double changeOf(const trace::CommGraph &g, const trace::GraphEdge &e, const QHash<quint64, double> &ref)
+{
+    if (e.kind != trace::GraphEdge::Kind::P2P || g.nodes[e.from].kind != trace::GraphNode::Kind::Rank
+        || g.nodes[e.to].kind != trace::GraphNode::Kind::Rank)
+        return 0;
+    const double s = g.windowNs > 0 ? g.windowNs / 1e9 : 1;
+    return e.waitSeconds / s - ref.value((quint64(quint32(g.nodes[e.from].rank)) << 32) | quint32(g.nodes[e.to].rank));
+}
+} // namespace
+
+void TraceGraphItem::updateEdgeScale()
+{
+    m_edgeScaleMax = 0;
+    m_edgeScaleMin = -1;
+    for (const GraphEdge &e : std::as_const(m_graph.edges)) {
+        if (e.kind != GraphEdge::Kind::P2P || !edgePassesFilter(e))
+            continue;
+        double v = 0;
+        if (m_edgeColor == QLatin1String("volume"))
+            v = double(e.bytes);
+        else if (m_edgeColor == QLatin1String("size"))
+            v = e.messages > 0 ? double(e.bytes) / e.messages : 0;
+        else if (m_edgeColor == QLatin1String("change"))
+            v = std::abs(changeOf(m_graph, e, m_referenceLinkWait));
+        else
+            v = e.waitSeconds;
+        m_edgeScaleMax = std::max(m_edgeScaleMax, v);
+        if (v > 0)
+            m_edgeScaleMin = m_edgeScaleMin < 0 ? v : std::min(m_edgeScaleMin, v);
+    }
+    m_edgeScaleMin = std::max(0.0, m_edgeScaleMin);
+}
+
+QColor TraceGraphItem::edgeColorOf(int edge) const
+{
+    if (edge < 0 || edge >= m_graph.edges.size())
+        return kP2PColor;
+    const GraphEdge &e = m_graph.edges[edge];
+    if (e.kind == GraphEdge::Kind::Collective)
+        return QColor(0x55, 0x55, 0x55);
+    if (m_edgeColor == QLatin1String("volume"))
+        return mix(kVolLow, kVolHigh, logPos(double(e.bytes), m_edgeScaleMin, m_edgeScaleMax));
+    if (m_edgeColor == QLatin1String("size"))
+        return mix(kSizeLow, kSizeHigh, logPos(e.messages > 0 ? double(e.bytes) / e.messages : 0, m_edgeScaleMin, m_edgeScaleMax));
+    if (m_edgeColor == QLatin1String("locality")) {
+        const GraphNode &a = m_graph.nodes[e.from];
+        const GraphNode &b = m_graph.nodes[e.to];
+        return a.group == b.group && a.kind == GraphNode::Kind::Rank && b.kind == GraphNode::Kind::Rank ? kInside : kBetween;
+    }
+    if (m_edgeColor == QLatin1String("change")) {
+        const double d = changeOf(m_graph, e, m_referenceLinkWait);
+        if (m_edgeScaleMax <= 0 || std::abs(d) < 1e-12)
+            return kSame;
+        const double t = std::clamp(std::sqrt(std::abs(d) / m_edgeScaleMax), 0.0, 1.0);
+        return mix(kSame, d > 0 ? kMore : kLess, 0.25 + 0.75 * t);
+    }
+    // Waiting: green (none) -> yellow -> red (the most waiting link).
+    if (e.waitSeconds <= 0)
+        return kEdgeOk;
+    // Square root of the share of the largest: a few heavy links stand out, little waiting
+    // stays green.
+    return threeStop(m_edgeScaleMax > 0 ? std::sqrt(e.waitSeconds / m_edgeScaleMax) : 0, kEdgeOk, kEdgeMid, kEdgeBad);
+}
+
+QVariantMap TraceGraphItem::edgeLegend() const
+{
+    QVariantMap m;
+    QStringList colors;
+    if (m_edgeColor == QLatin1String("locality")) {
+        m.insert(QStringLiteral("title"), tr("Line colour: inside / between compute nodes"));
+        m.insert(QStringLiteral("categories"), QVariantList{
+            QVariantMap{{QStringLiteral("color"), kInside.name()}, {QStringLiteral("label"), tr("inside a node")}},
+            QVariantMap{{QStringLiteral("color"), kBetween.name()}, {QStringLiteral("label"), tr("between nodes")}}});
+        return m;
+    }
+    QString title, lo = shortValue(m_edgeScaleMin, m_edgeColor), hi = shortValue(m_edgeScaleMax, m_edgeColor);
+    if (m_edgeColor == QLatin1String("volume")) {
+        title = tr("Line colour: bytes on the link");
+        colors << kVolLow.name() << kVolHigh.name();
+    } else if (m_edgeColor == QLatin1String("size")) {
+        title = tr("Line colour: average message size");
+        colors << kSizeLow.name() << kSizeHigh.name();
+    } else if (m_edgeColor == QLatin1String("change")) {
+        title = tr("Line colour: waiting vs. reference (per s)");
+        colors << kLess.name() << kSame.name() << kMore.name();
+        lo = QStringLiteral("−") + formatMs(m_edgeScaleMax);
+        hi = QStringLiteral("+") + formatMs(m_edgeScaleMax);
+    } else {
+        title = tr("Line colour: waiting on the link (late sender)");
+        colors << kEdgeOk.name() << kEdgeMid.name() << kEdgeBad.name();
+        lo = tr("none");
+        hi = formatMs(m_edgeScaleMax);
+    }
+    m.insert(QStringLiteral("title"), title);
+    m.insert(QStringLiteral("colors"), colors);
+    m.insert(QStringLiteral("low"), lo);
+    m.insert(QStringLiteral("high"), hi);
+    return m;
+}
+
+QVariantMap TraceGraphItem::nodeLegend() const
+{
+    QVariantMap m;
+    if (m_nodeColor == QLatin1String("compute")) {
+        m.insert(QStringLiteral("title"), tr("Fill: compute time (outside MPI)"));
+        m.insert(QStringLiteral("colors"), QStringList{kWaitLowColor.name(), QColor(0xff, 0x7f, 0x0e).name()});
+        m.insert(QStringLiteral("low"), formatMs(m_minCompute));
+        m.insert(QStringLiteral("high"), formatMs(m_maxCompute));
+    } else {
+        m.insert(QStringLiteral("title"), m_options.level == trace::GraphLevel::Nodes ? tr("Fill: waiting per node")
+                                                                                     : tr("Fill: waiting per rank"));
+        m.insert(QStringLiteral("colors"), QStringList{kWaitLowColor.name(), kWaitHighColor.name()});
+        m.insert(QStringLiteral("low"), formatMs(m_minWait));
+        m.insert(QStringLiteral("high"), formatMs(m_maxWait));
+    }
+    return m;
+}
+
+void TraceGraphItem::setEdgeColor(const QString &mode)
+{
+    const QString m = (mode == QLatin1String("volume") || mode == QLatin1String("size") || mode == QLatin1String("locality")
+                       || mode == QLatin1String("change"))
+        ? mode : QStringLiteral("wait");
+    if (m == m_edgeColor)
+        return;
+    m_edgeColor = m;
+    emit displayChanged();
+    updateEdgeScale();
+    emit graphChanged();
+    update();
+}
+
+void TraceGraphItem::setNodeColor(const QString &mode)
+{
+    const QString m = mode == QLatin1String("compute") ? mode : QStringLiteral("wait");
+    if (m == m_nodeColor)
+        return;
+    m_nodeColor = m;
+    emit displayChanged();
+    emit graphChanged();
+    update();
+}
+
+void TraceGraphItem::setEdgeFilter(const QString &filter)
+{
+    const QString f = (filter == QLatin1String("waiting") || filter == QLatin1String("between") || filter == QLatin1String("inside"))
+        ? filter : QStringLiteral("all");
+    if (f == m_edgeFilter)
+        return;
+    m_edgeFilter = f;
+    emit displayChanged();
+    reselect();
+    update();
+}
+
+void TraceGraphItem::setReference()
+{
+    if (m_rankGraph.rankNodeCount == 0)
+        return;
+    m_reference = m_rankGraph;
+    m_referenceLinkWait.clear();
+    const double s = m_reference.windowNs > 0 ? m_reference.windowNs / 1e9 : 1;
+    for (const GraphEdge &e : std::as_const(m_reference.edges))
+        if (e.kind == GraphEdge::Kind::P2P && e.from < m_reference.rankNodeCount && e.to < m_reference.rankNodeCount)
+            m_referenceLinkWait[(quint64(quint32(m_reference.nodes[e.from].rank)) << 32) | quint32(m_reference.nodes[e.to].rank)]
+                += e.waitSeconds / s;
+    m_referenceLabel = QStringLiteral("%1 – %2 s").arg(windowStart() / 1e9, 0, 'f', 6).arg(windowEnd() / 1e9, 0, 'f', 6);
+    emit referenceChanged();
+    rebuild();
+}
+
+void TraceGraphItem::clearReference()
+{
+    if (!hasReference())
+        return;
+    m_reference = CommGraph();
+    m_referenceLinkWait.clear();
+    m_referenceLabel.clear();
+    if (m_edgeColor == QLatin1String("change"))
+        m_edgeColor = QStringLiteral("wait");
+    emit referenceChanged();
+    emit displayChanged();
+    rebuild();
+}
+
+bool TraceGraphItem::zoomToRank(int rank)
+{
+    int node = m_graph.indexOfRank(rank);
+    if (node < 0 && m_overviewRankHost.contains(rank)) {
+        const QString host = m_overviewRankHost.value(rank);
+        for (int i = 0; i < m_graph.rankNodeCount; ++i)
+            if (m_graph.nodes[i].kind == GraphNode::Kind::Node && m_graph.nodes[i].node == host)
+                node = i;
+    }
+    if (node < 0)
+        return false;
+    const QPointF p = basePosition(node);
+    m_zoom = std::clamp(std::max(m_zoom, 24.0 / std::max(1e-6, m_unitSpacing * radius())), 1.0, 8.0);
+    m_pan = -(p - center()) * m_zoom;
+    emit viewTransformChanged();
+    setSelectedRank(rank);
+    update();
+    return true;
+}
+
+// Waiting over time (40 bins of the window) of each finding's ranks against all ranks
+// (ms per rank and bin), from the activities' waiting of the detail store.
+void TraceGraphItem::addTimeSeries(const TimelineStore &store, qint64 from, qint64 to)
+{
+    constexpr int kBins = 40;
+    if (to <= from || store.rows.isEmpty())
+        return;
+    const double binNs = double(to - from) / kBins;
+    QHash<int, QVector<double>> perRank;
+    QVector<double> all(kBins, 0.0);
+    for (const auto &row : store.rows) {
+        QVector<double> bins(kBins, 0.0);
+        auto first = std::lower_bound(row.activities.cbegin(), row.activities.cend(), from,
+                                      [](const trace::Activity &a, qint64 t) { return a.startNs < t; });
+        for (auto it = first; it != row.activities.cend() && it->startNs < to; ++it) {
+            if (it->waitNs <= 0)
+                continue;
+            const int b = std::clamp(int((it->startNs - from) / binNs), 0, kBins - 1);
+            bins[b] += it->waitNs / 1e6;
+        }
+        for (int b = 0; b < kBins; ++b)
+            all[b] += bins[b] / store.rows.size();
+        perRank.insert(row.rank, bins);
+    }
+    QVariantList baseline;
+    for (double v : std::as_const(all))
+        baseline << v;
+    for (const trace::GraphFinding &f : std::as_const(m_findings)) {
+        QVariantList series;
+        QVector<int> ranks = f.ranks;
+        if (ranks.isEmpty() && f.rank >= 0)
+            ranks.append(f.rank);
+        if (!ranks.isEmpty() && f.category != QLatin1String("structure")) {
+            QVector<double> acc(kBins, 0.0);
+            int used = 0;
+            for (int r : std::as_const(ranks)) {
+                const auto it = perRank.constFind(r);
+                if (it == perRank.cend())
+                    continue;
+                for (int b = 0; b < kBins; ++b)
+                    acc[b] += (*it)[b];
+                ++used;
+            }
+            if (used > 0)
+                for (double v : std::as_const(acc))
+                    series << v / used;
+        }
+        m_findingSeries.append(series);
+        m_findingBaseline.append(series.isEmpty() ? QVariantList() : baseline);
+    }
 }
 
 void TraceGraphItem::paintHint(QPainter *painter)
