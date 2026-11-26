@@ -86,6 +86,40 @@ double edgeWeight(const GraphEdge &edge, GraphWeight weight);
 // GraphWeight::Wait, where messages without waiting still show the communication.
 QVector<int> selectEdges(const CommGraph &graph, GraphWeight weight, int maxEdges, int focusNode);
 
+// Communication pattern of the P2P edges of a rank-level graph (GraphLevel::Ranks): which
+// partners the ranks have, as rank offsets d = (receiver - sender) mod n. Offsets that at least
+// half of the sending ranks use are "regular"; the kind follows from them:
+// Ring: only ±1 (or +1 / -1 alone: a pipeline); Stencil2D: ±1 and ±k with 1 < k < n/2 (a k-wide
+// grid, gridColumns = k); AllToAll: the median rank talks to at least half of the others;
+// Irregular: anything else; None: no P2P messages.
+struct CommPattern {
+    enum class Kind : quint8 { None, Ring, Pipeline, Stencil2D, AllToAll, Irregular };
+    Kind kind = Kind::None;
+    QVector<int> offsets;      // regular offsets, as signed values in (-n/2, n/2]
+    int gridColumns = 0;       // Stencil2D: k
+    int medianPartners = 0;    // distinct receivers of the median sending rank
+    int sendingRanks = 0;
+};
+CommPattern detectPattern(const CommGraph &rankGraph);
+
+// Findings of a rank-level graph of one window, in the order they should be shown: the
+// communication pattern, how much P2P traffic stays inside the compute nodes, the ranks that wait
+// most (outliers against the mean, as wait states in Scalasca: late sender / wait at
+// collective) and the ranks that make others wait (senders of the late-sender time, i.e. the
+// likely cause), the link with the most waiting. kind: "pattern", "locality", "waiting",
+// "cause", "link"; rank: the rank the finding is about (-1 if none); text: one line for the GUI.
+struct GraphFinding {
+    QString kind;
+    QString text;
+    int rank = -1;
+    double value = 0;
+};
+QVector<GraphFinding> analyzeCommGraph(const CommGraph &rankGraph);
+
+// Waiting per graph node (seconds): late sender of P2P edges at their receiver, waiting at
+// collectives at the calling rank / host. Communicators get 0.
+QVector<double> nodeWaiting(const CommGraph &graph);
+
 // Positions in the unit square [-1, 1]² (y down), one per graph node.
 // Circle: rank/host nodes on a circle in graph order (ranks grouped by node, as in the
 // overview), communicators on a small inner circle (one at the centre).

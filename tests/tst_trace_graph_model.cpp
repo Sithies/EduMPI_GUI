@@ -41,6 +41,66 @@ const GraphEdge *findEdge(const CommGraph &g, int from, int to, GraphEdge::Kind 
     return nullptr;
 }
 
+// Rank-level graph built by hand: `ranks` ranks, `perNode` per compute node, P2P edges
+// (from, to, bytes, wait seconds) and optional collective waiting per rank (one communicator).
+CommGraph handGraph(int ranks, int perNode, const QVector<std::tuple<int, int, quint64, double>> &p2p,
+                    const QVector<double> &collectiveWait = {})
+{
+    CommGraph g;
+    for (int r = 0; r < ranks; ++r) {
+        GraphNode n;
+        n.kind = GraphNode::Kind::Rank;
+        n.rank = r;
+        n.group = r / perNode;
+        n.node = QStringLiteral("n%1").arg(n.group);
+        if (g.groups.size() <= n.group)
+            g.groups.append(n.node);
+        g.nodes.append(n);
+    }
+    g.rankNodeCount = ranks;
+    for (const auto &[from, to, bytes, wait] : p2p) {
+        GraphEdge e;
+        e.from = from;
+        e.to = to;
+        e.bytes = bytes;
+        e.messages = 1;
+        e.waitSeconds = wait;
+        g.edges.append(e);
+    }
+    if (!collectiveWait.isEmpty()) {
+        GraphNode c;
+        c.kind = GraphNode::Kind::Communicator;
+        c.comm = 0;
+        c.members = ranks;
+        c.group = -1;
+        g.nodes.append(c);
+        for (int r = 0; r < ranks; ++r) {
+            GraphEdge e;
+            e.kind = GraphEdge::Kind::Collective;
+            e.from = r;
+            e.to = ranks;
+            e.messages = 1;
+            e.waitSeconds = collectiveWait.value(r);
+            g.edges.append(e);
+        }
+    }
+    return g;
+}
+
+// Periodic 2D stencil on a cols x rows grid (ranks row by row).
+CommGraph stencil(int cols, int rows, int perNode)
+{
+    QVector<std::tuple<int, int, quint64, double>> p2p;
+    for (int r = 0; r < cols * rows; ++r) {
+        const int x = r % cols, y = r / cols;
+        for (const auto &[dx, dy] : {std::pair{1, 0}, std::pair{-1, 0}, std::pair{0, 1}, std::pair{0, -1}}) {
+            const int to = ((y + dy + rows) % rows) * cols + (x + dx + cols) % cols;
+            p2p.append({r, to, 1000, 0.0});
+        }
+    }
+    return handGraph(cols * rows, perNode, p2p);
+}
+
 int commIndex(const CommGraph &g, quint64 comm)
 {
     for (int i = g.rankNodeCount; i < g.nodes.size(); ++i)
@@ -371,6 +431,99 @@ private slots:
         QCOMPARE(sel.size(), 500 + 3); // rank 3's edges (2 -> 3, 3 -> 4, star) are below the top 500
         QCOMPARE(pos.size(), 1025);
         QVERIFY2(t.elapsed() < 500, qPrintable(QString::number(t.elapsed())));
+    }
+
+    // Pattern detection on rank offsets: ring, pipeline, 2D stencil, all-to-all, irregular.
+    void detectsPatterns()
+    {
+        QVector<std::tuple<int, int, quint64, double>> ring, pipe, all, irregular;
+        for (int r = 0; r < 16; ++r) {
+            ring.append({r, (r + 1) % 16, 10, 0.0});
+            ring.append({r, (r + 15) % 16, 10, 0.0});
+            pipe.append({r, (r + 1) % 16, 10, 0.0});
+            for (int o = 0; o < 16; ++o)
+                if (o != r)
+                    all.append({r, o, 10, 0.0});
+            irregular.append({r, (r * 7 + 3) % 16 == r ? (r + 2) % 16 : (r * 7 + 3) % 16, 10, 0.0});
+        }
+        QCOMPARE(detectPattern(handGraph(16, 4, ring)).kind, CommPattern::Kind::Ring);
+        const CommPattern p = detectPattern(handGraph(16, 4, pipe));
+        QCOMPARE(p.kind, CommPattern::Kind::Pipeline);
+        QCOMPARE(p.offsets, QVector<int>{1});
+        QCOMPARE(detectPattern(handGraph(16, 4, all)).kind, CommPattern::Kind::AllToAll);
+        QCOMPARE(detectPattern(handGraph(16, 4, irregular)).kind, CommPattern::Kind::Irregular);
+        QCOMPARE(detectPattern(handGraph(16, 4, {})).kind, CommPattern::Kind::None);
+
+        // 32 x 32 periodic grid (as tools/big-trace): offsets ±1 and ±32 (the wrap-around of a
+        // row, -31 / +31, is used by too few ranks to count).
+        const CommPattern s = detectPattern(stencil(32, 32, 32));
+        QCOMPARE(s.kind, CommPattern::Kind::Stencil2D);
+        QCOMPARE(s.gridColumns, 32);
+        QCOMPARE(s.offsets, (QVector<int>{-32, -1, 1, 32}));
+        QCOMPARE(s.medianPartners, 4);
+        QCOMPARE(s.sendingRanks, 1024);
+        // Not square: 8 columns x 4 rows.
+        QCOMPARE(detectPattern(stencil(8, 4, 8)).gridColumns, 8);
+    }
+
+    void findingsNameOutliersAndCauses()
+    {
+        // Ring of 32 ranks on 4 nodes. Rank 9 sends late to rank 10 (rank 10 waits 50 ms), every
+        // other receiver waits 1 ms. Collectives: ranks of node n3 (24..31) wait 0, others 10 ms.
+        QVector<std::tuple<int, int, quint64, double>> p2p;
+        for (int r = 0; r < 32; ++r)
+            p2p.append({r, (r + 1) % 32, 1000, r == 9 ? 0.050 : 0.001});
+        QVector<double> coll(32, 0.010);
+        for (int r = 24; r < 32; ++r)
+            coll[r] = 0;
+        const CommGraph g = handGraph(32, 8, p2p, coll);
+        const QVector<double> wait = nodeWaiting(g);
+        QVERIFY(std::abs(wait[10] - 0.060) < 1e-9);
+        QCOMPARE(wait[32], 0.0); // communicator
+
+        const QVector<GraphFinding> f = analyzeCommGraph(g);
+        auto find = [&](const QString &kind, int rank = -2) -> const GraphFinding * {
+            for (const GraphFinding &x : f)
+                if (x.kind == kind && (rank == -2 || x.rank == rank))
+                    return &x;
+            return nullptr;
+        };
+        QVERIFY(find(QStringLiteral("pattern")));
+        QVERIFY2(find(QStringLiteral("pattern"))->text.contains(QStringLiteral("pipeline")),
+                 qPrintable(find(QStringLiteral("pattern"))->text));
+        // 4 of 32 ring messages cross a node border.
+        const GraphFinding *loc = find(QStringLiteral("locality"));
+        QVERIFY(loc);
+        QVERIFY(std::abs(loc->value - 28.0 / 32) < 1e-9);
+        // Rank 10 waits most: an outlier, and rank 9 is the late sender that causes it.
+        QVERIFY(find(QStringLiteral("waiting"), 10));
+        QVERIFY(find(QStringLiteral("cause"), 9));
+        QVERIFY(!find(QStringLiteral("cause"), 3));
+        const GraphFinding *link = find(QStringLiteral("link"));
+        QVERIFY(link);
+        QVERIFY2(link->text.contains(QStringLiteral("rank 9 → rank 10")), qPrintable(link->text));
+        // Node n3 waits least: named as the likely slow node.
+        const GraphFinding *imb = find(QStringLiteral("imbalance"));
+        QVERIFY(imb);
+        QVERIFY2(imb->text.contains(QStringLiteral("n3")) && !imb->text.contains(QStringLiteral("n0")), qPrintable(imb->text));
+
+        // Without waiting: pattern and locality only.
+        const QVector<GraphFinding> quiet = analyzeCommGraph(stencil(8, 8, 8));
+        QCOMPARE(quiet.size(), 2);
+        QVERIFY(analyzeCommGraph(CommGraph()).isEmpty());
+    }
+
+    // The pattern of a real trace: the ring of writeManyMessagesOtf2 (r -> r + 1).
+    void detectsPatternOfTrace()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeManyMessagesOtf2(tmp.path(), 24, 4);
+        QVERIFY(!anchor.isEmpty());
+        auto store = build(anchor);
+        QVERIFY(store);
+        GraphOptions o;
+        const CommGraph g = buildCommGraph(*store, 0, store->traceLengthNs, o);
+        QCOMPARE(detectPattern(g).kind, CommPattern::Kind::Pipeline);
     }
 };
 

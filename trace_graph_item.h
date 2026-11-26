@@ -3,6 +3,7 @@
 #include <QPointer>
 #include <QPointF>
 #include <QQuickPaintedItem>
+#include <QHash>
 #include <QVariantMap>
 #include <QVector>
 #include <QtQml/qqmlregistration.h>
@@ -59,6 +60,19 @@ class TraceGraphItem : public QQuickPaintedItem
     Q_PROPERTY(int shownEdgeCount READ shownEdgeCount NOTIFY graphChanged)
     // Largest waiting time (late sender) of one rank / host in the window: the blue end of the scale.
     Q_PROPERTY(double maxWaitSeconds READ maxWaitSeconds NOTIFY graphChanged)
+    // Smallest waiting time of one rank / host: the white end of the scale (so that differences
+    // show even when every rank waits a lot, e.g. in long windows).
+    Q_PROPERTY(double minWaitSeconds READ minWaitSeconds NOTIFY graphChanged)
+    // "auto" (default), "graph" or "matrix". Matrix: communication matrix (sender rows x receiver
+    // columns, colour = weight), scales to thousands of ranks. Auto: graph for up to
+    // kAutoMatrixLimit ranks / hosts, matrix above.
+    Q_PROPERTY(QString view READ view WRITE setView NOTIFY displayChanged)
+    // View actually drawn: "graph" or "matrix".
+    Q_PROPERTY(QString effectiveView READ effectiveView NOTIFY graphChanged)
+    // Findings of the window (trace::analyzeCommGraph on the ranks): pattern, locality, waiting
+    // outliers, late senders. Lines of text; ranks of the lines in findingRanks (-1 = none).
+    Q_PROPERTY(QStringList findings READ findings NOTIFY graphChanged)
+    Q_PROPERTY(QVariantList findingRanks READ findingRanks NOTIFY graphChanged)
 
 public:
     static constexpr int kDefaultMaxEdges = 500;
@@ -68,6 +82,8 @@ public:
     static constexpr int kAutoRankLimit = 64;
     static constexpr qint64 kAutoRanksWindowNs = 50'000'000; // 50 ms
     static constexpr int kAutoCommunicatorLimit = 8;
+    // Auto view: communication matrix from this many rank / host nodes on.
+    static constexpr int kAutoMatrixLimit = 128;
     // Hint to zoom in from this window length on (the graph sums up many steps).
     static constexpr qint64 kLongWindowNs = 1'000'000'000; // 1 s
 
@@ -104,6 +120,18 @@ public:
     int edgeCount() const { return int(m_graph.edges.size()); }
     int shownEdgeCount() const { return int(m_drawn.size()); }
     double maxWaitSeconds() const { return m_maxWait; }
+    double minWaitSeconds() const { return m_minWait; }
+    QString view() const;
+    void setView(const QString &view);
+    QString effectiveView() const { return m_matrix ? QStringLiteral("matrix") : QStringLiteral("graph"); }
+    QStringList findings() const;
+    QVariantList findingRanks() const;
+    const QVector<trace::GraphFinding> &findingList() const { return m_findings; }
+    // Matrix view: pixel rectangle of the matrix and the cell (row = sender, column = receiver
+    // graph node) at a point, or -1 / -1.
+    QRectF matrixRect() const;
+    QPoint matrixCellAt(QPointF p) const;
+    QPointF matrixCellCenter(int fromNode, int toNode) const;
     double nodeWaitSeconds(int node) const { return m_nodeWait.value(node); }
 
     // Rank node: toggles selectedRank; edge: emits edgeClicked; elsewhere nothing.
@@ -160,6 +188,10 @@ private:
     QString nodeLabel(int node) const;
     double edgeWidth(const trace::GraphEdge &edge) const;
     void setStatus(const QString &status);
+    void paintMatrix(QPainter *painter);
+    void paintHint(QPainter *painter);
+    int edgeBetween(int fromNode, int toNode) const; // P2P edge index, -1 if none
+    QColor waitColor(double seconds) const;
 
     QPointer<TraceTimelineModel> m_model;
     qint64 m_viewStart = 0;
@@ -180,6 +212,11 @@ private:
     double m_maxWeight = 0;
     QVector<double> m_nodeWait; // waiting (late sender) per graph node, seconds
     double m_maxWait = 0;       // largest waiting of a rank / host node
+    double m_minWait = 0;       // smallest waiting of a rank / host node
+    Mode m_viewMode = Mode::Auto; // On = matrix, Off = graph
+    bool m_matrix = false;
+    QHash<quint64, int> m_p2pIndex; // (from << 32 | to) -> P2P edge, for the matrix
+    QVector<trace::GraphFinding> m_findings;
     quint64 m_maxInternal = 0;  // largest traffic inside one compute node (nodes level)
     QString m_status = QStringLiteral("empty");
 

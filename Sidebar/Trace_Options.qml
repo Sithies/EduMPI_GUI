@@ -219,6 +219,17 @@ Rectangle {
                 Layout.fillWidth: true
                 columnSpacing: 6
                 Text {
+                    text: qsTr("View:")
+                    color: "#999999"
+                }
+                ComboBox {
+                    Layout.fillWidth: true
+                    readonly property var values: ["auto", "graph", "matrix"]
+                    model: [qsTr("Auto (by size)"), qsTr("Graph"), qsTr("Matrix")]
+                    currentIndex: traceState ? Math.max(0, values.indexOf(traceState.graphView)) : 0
+                    onActivated: (index) => traceState.graphView = values[index]
+                }
+                Text {
                     text: qsTr("Edge width:")
                     color: "#999999"
                 }

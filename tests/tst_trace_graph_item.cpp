@@ -388,6 +388,73 @@ private slots:
         QCOMPARE(item.graph().nodes.size(), 5);
     }
 
+    // Many ranks: Auto switches to the communication matrix; cells, clicks, tooltips, findings.
+    void matrixForManyRanks()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeManyMessagesOtf2(tmp.path(), 160, 2);
+        QVERIFY(!anchor.isEmpty());
+        TraceTimelineModel model;
+        model.addSnapshot({build(anchor)});
+        TraceGraphItem item;
+        item.setModel(&model);
+        item.setWidth(900);
+        item.setHeight(700);
+        item.setLevel(QStringLiteral("ranks"));
+        QCOMPARE(item.status(), QString());
+        QCOMPARE(item.view(), QStringLiteral("auto"));
+        QCOMPARE(item.effectiveView(), QStringLiteral("matrix"));
+        QCOMPARE(item.graph().rankNodeCount, 160);
+
+        // Rank 5 sends to rank 6: its cell is drawn (green), the cell 6 -> 5 is empty.
+        const int r5 = item.graph().indexOfRank(5), r6 = item.graph().indexOfRank(6);
+        const QImage img = render(item);
+        const QRectF m = item.matrixRect();
+        QVERIFY(m.width() > 100 && m.height() == m.width());
+        const QPointF filled = item.matrixCellCenter(r5, r6);
+        const QColor c = img.pixelColor(filled.toPoint());
+        QVERIFY2(c.green() > c.red() && c.green() > c.blue(), qPrintable(c.name()));
+        const QPointF empty = item.matrixCellCenter(r6, r5 + 40);
+        QCOMPARE(img.pixelColor(empty.toPoint()).name(), QStringLiteral("#fafafa"));
+        QCOMPARE(item.matrixCellAt(filled), QPoint(r6, r5));
+        QCOMPARE(item.matrixCellAt(QPointF(1, 1)), QPoint(-1, -1));
+
+        // Hover and click on the cell: sender selected, edge details emitted.
+        QVERIFY2(item.toolTipAt(filled.x(), filled.y()).contains(QStringLiteral("rank 5")), qPrintable(item.toolTipAt(filled.x(), filled.y())));
+        QSignalSpy clicked(&item, &TraceGraphItem::edgeClicked);
+        item.clickAt(filled.x(), filled.y());
+        QCOMPARE(item.selectedRank(), 5);
+        QCOMPARE(clicked.count(), 1);
+        QCOMPARE(clicked.first().first().toMap().value(QStringLiteral("toRank")).toInt(), 6);
+
+        // Findings: the ring r -> r + 1 of the fixture.
+        QVERIFY(!item.findings().isEmpty());
+        QVERIFY2(item.findings().first().contains(QStringLiteral("pipeline")), qPrintable(item.findings().first()));
+        QCOMPARE(item.findings().size(), item.findingRanks().size());
+
+        // Forced graph view and back; compute nodes: 2 hosts -> graph again under Auto.
+        item.setView(QStringLiteral("graph"));
+        QCOMPARE(item.effectiveView(), QStringLiteral("graph"));
+        item.setView(QStringLiteral("auto"));
+        item.setLevel(QStringLiteral("nodes"));
+        QCOMPARE(item.effectiveView(), QStringLiteral("graph"));
+        item.setView(QStringLiteral("matrix"));
+        QCOMPARE(item.effectiveView(), QStringLiteral("matrix"));
+        QVERIFY(!render(item).isNull());
+        // Findings come from the ranks also at the nodes level.
+        QVERIFY(item.findings().first().contains(QStringLiteral("pipeline")));
+    }
+
+    // Wait colours span the window's least to most waiting rank (white to blue).
+    void waitScaleFromLeastToMost()
+    {
+        TraceTimelineModel model;
+        TraceGraphItem item;
+        setupRing4(model, item);
+        QCOMPARE(item.minWaitSeconds(), 0.0);
+        QVERIFY(item.maxWaitSeconds() > item.minWaitSeconds());
+    }
+
     // TraceGraph.qml as its own view and below the timeline: loads, follows traceState.
     void traceGraphQmlFollowsTraceState()
     {
@@ -422,6 +489,7 @@ private slots:
                   "    property string graphCommunicators: 'auto'\n"
                   "    property string graphLayout: 'circle'\n"
                   "    property int graphMaxEdges: 500\n"
+                  "    property string graphView: 'auto'\n"
                   "    property var lastEdge: null\n"
                   "    signal viewRequested(real startNs, real endNs)\n"
                   "  }\n"
@@ -450,6 +518,10 @@ private slots:
         QCOMPARE(own->edgeCount(), 5); // ring + 3 -> 2 (1 -> 2 adds to the ring's edge), no star
         state->setProperty("graphWeight", QStringLiteral("messages"));
         QCOMPARE(own->weight(), QStringLiteral("messages"));
+        state->setProperty("graphView", QStringLiteral("matrix"));
+        QCOMPARE(own->effectiveView(), QStringLiteral("matrix"));
+        state->setProperty("graphView", QStringLiteral("auto"));
+        QCOMPARE(own->effectiveView(), QStringLiteral("graph"));
 
         // Own view: the overview bar moves the window through viewRequested.
         QMetaObject::invokeMethod(state, "viewRequested", Q_ARG(double, 1000.0 * kMs), Q_ARG(double, 2000.0 * kMs));

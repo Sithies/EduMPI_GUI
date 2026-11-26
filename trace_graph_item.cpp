@@ -284,6 +284,42 @@ void TraceGraphItem::setMaxEdges(int n)
     update();
 }
 
+QString TraceGraphItem::view() const
+{
+    switch (m_viewMode) {
+    case Mode::On: return QStringLiteral("matrix");
+    case Mode::Off: return QStringLiteral("graph");
+    case Mode::Auto: break;
+    }
+    return QStringLiteral("auto");
+}
+
+void TraceGraphItem::setView(const QString &view)
+{
+    const Mode m = view == QLatin1String("matrix") ? Mode::On : view == QLatin1String("graph") ? Mode::Off : Mode::Auto;
+    if (m == m_viewMode)
+        return;
+    m_viewMode = m;
+    emit displayChanged();
+    rebuild();
+}
+
+QStringList TraceGraphItem::findings() const
+{
+    QStringList out;
+    for (const trace::GraphFinding &f : m_findings)
+        out << f.text;
+    return out;
+}
+
+QVariantList TraceGraphItem::findingRanks() const
+{
+    QVariantList out;
+    for (const trace::GraphFinding &f : m_findings)
+        out << f.rank;
+    return out;
+}
+
 qint64 TraceGraphItem::windowStart() const
 {
     return m_viewEnd > m_viewStart ? m_viewStart : 0;
@@ -340,11 +376,21 @@ void TraceGraphItem::rebuild()
     }
     m_options.level = nodes ? trace::GraphLevel::Nodes : trace::GraphLevel::Ranks;
     QString status;
+    QVector<trace::GraphFinding> rankGraphFindings;
     if (!overview || overview->rows.isEmpty()) {
         m_graph = CommGraph();
         status = QStringLiteral("empty");
     } else if (detail && covers(detail.get(), from, to)) {
         m_graph = trace::buildCommGraph(*detail, from, to, m_options);
+        // Findings always from the ranks (pattern and outliers need them), directed.
+        trace::GraphOptions rankOptions = m_options;
+        rankOptions.level = trace::GraphLevel::Ranks;
+        rankOptions.directed = true;
+        rankOptions.expandedNodes.clear();
+        rankGraphFindings = trace::analyzeCommGraph(
+            rankOptions.level == m_options.level && m_options.directed && m_options.expandedNodes.isEmpty()
+                ? m_graph
+                : trace::buildCommGraph(*detail, from, to, rankOptions));
     } else {
         // Nodes without edges, so the layout is already in place.
         m_graph = trace::buildCommGraph(*overview, 0, 0, m_options);
@@ -363,17 +409,26 @@ void TraceGraphItem::rebuild()
     if (m_commMerged)
         m_graph = trace::mergeCommunicators(m_graph);
     m_unitPos = trace::layoutGraph(m_graph, m_layout);
+    m_findings = rankGraphFindings;
+    m_matrix = m_viewMode == Mode::On || (m_viewMode == Mode::Auto && m_graph.rankNodeCount > kAutoMatrixLimit);
+    m_p2pIndex.clear();
+    for (int i = 0; i < m_graph.edges.size(); ++i) {
+        const GraphEdge &e = m_graph.edges[i];
+        if (e.kind == GraphEdge::Kind::P2P)
+            m_p2pIndex.insert((quint64(quint32(e.from)) << 32) | quint32(e.to), i);
+    }
     // Waiting of a rank (late sender): receiver of a P2P edge, caller of a collective.
-    m_nodeWait = QVector<double>(m_graph.nodes.size(), 0.0);
-    for (const GraphEdge &e : std::as_const(m_graph.edges))
-        m_nodeWait[e.kind == GraphEdge::Kind::P2P ? e.to : e.from] += e.waitSeconds;
+    m_nodeWait = trace::nodeWaiting(m_graph);
     m_maxInternal = 0;
     for (const GraphNode &n : std::as_const(m_graph.nodes))
         m_maxInternal = std::max(m_maxInternal, n.internalBytes);
     m_maxWait = 0;
-    for (int i = 0; i < m_graph.nodes.size(); ++i)
-        if (m_graph.nodes[i].kind != GraphNode::Kind::Communicator)
-            m_maxWait = std::max(m_maxWait, m_nodeWait[i]);
+    m_minWait = -1;
+    for (int i = 0; i < m_graph.rankNodeCount; ++i) {
+        m_maxWait = std::max(m_maxWait, m_nodeWait[i]);
+        m_minWait = m_minWait < 0 ? m_nodeWait[i] : std::min(m_minWait, m_nodeWait[i]);
+    }
+    m_minWait = std::max(0.0, m_minWait);
     reselect();
     emit graphChanged();
     update();
@@ -388,6 +443,18 @@ void TraceGraphItem::reselect()
     // Lightest first, so the heavy edges end up on top.
     std::reverse(m_drawn.begin(), m_drawn.end());
     emit graphChanged();
+}
+
+QColor TraceGraphItem::waitColor(double seconds) const
+{
+    // White at the least waiting rank / host of the window, blue at the most.
+    const double span = m_maxWait - m_minWait;
+    return mix(kWaitLowColor, kWaitHighColor, span > 0 ? (seconds - m_minWait) / span : 0);
+}
+
+int TraceGraphItem::edgeBetween(int fromNode, int toNode) const
+{
+    return m_p2pIndex.value((quint64(quint32(fromNode)) << 32) | quint32(toNode), -1);
 }
 
 int TraceGraphItem::focusNode() const
@@ -512,17 +579,204 @@ int TraceGraphItem::edgeAt(QPointF p) const
     return -1;
 }
 
+namespace {
+constexpr double kMatrixLeft = 84;   // host / rank labels of the rows
+constexpr double kMatrixTop = 40;    // hint line + column labels
+constexpr double kMatrixRight = 44;  // waiting strip
+constexpr double kMatrixBottom = 26; // axis caption
+constexpr double kWaitStrip = 14;
+} // namespace
+
+QRectF TraceGraphItem::matrixRect() const
+{
+    const int n = m_graph.rankNodeCount;
+    if (n <= 0)
+        return {};
+    const double side = std::max(10.0, std::min(width() - kMatrixLeft - kMatrixRight, height() - kMatrixTop - kMatrixBottom));
+    const double left = kMatrixLeft + std::max(0.0, (width() - kMatrixLeft - kMatrixRight - side) / 2);
+    return QRectF(left, kMatrixTop, side, side);
+}
+
+QPoint TraceGraphItem::matrixCellAt(QPointF p) const
+{
+    const QRectF r = matrixRect();
+    const int n = m_graph.rankNodeCount;
+    if (!m_matrix || n <= 0 || !r.contains(p))
+        return QPoint(-1, -1);
+    const int col = std::clamp(int((p.x() - r.left()) / r.width() * n), 0, n - 1);
+    const int row = std::clamp(int((p.y() - r.top()) / r.height() * n), 0, n - 1);
+    return QPoint(col, row);
+}
+
+QPointF TraceGraphItem::matrixCellCenter(int fromNode, int toNode) const
+{
+    const QRectF r = matrixRect();
+    const int n = std::max(1, m_graph.rankNodeCount);
+    return QPointF(r.left() + (toNode + 0.5) * r.width() / n, r.top() + (fromNode + 0.5) * r.height() / n);
+}
+
+void TraceGraphItem::paintMatrix(QPainter *painter)
+{
+    const int n = m_graph.rankNodeCount;
+    const QRectF r = matrixRect();
+    painter->setRenderHint(QPainter::Antialiasing, false);
+    painter->setPen(QPen(QColor(0xd1, 0xd5, 0xdb), 1));
+    painter->setBrush(QColor(0xfa, 0xfa, 0xfa));
+    painter->drawRect(r);
+
+    // Cells: one image pixel per screen pixel; several cells on one pixel keep the largest value
+    // (a thin band of a stencil must not vanish when 1024 ranks share 800 pixels).
+    const qreal dpr = painter->device() ? painter->device()->devicePixelRatioF() : 1.0;
+    const int px = std::max(1, int(std::floor(r.width() * dpr)));
+    const bool waitScale = m_weight == trace::GraphWeight::Wait;
+    double maxW = 0;
+    for (const GraphEdge &e : std::as_const(m_graph.edges))
+        if (e.kind == GraphEdge::Kind::P2P)
+            maxW = std::max(maxW, trace::edgeWeight(e, m_weight));
+    // Inside a compute node (nodes level): the diagonal.
+    if (!waitScale)
+        for (int i = 0; i < n; ++i)
+            maxW = std::max(maxW, m_weight == trace::GraphWeight::Bytes ? double(m_graph.nodes[i].internalBytes)
+                                                                        : double(m_graph.nodes[i].internalMessages));
+    QVector<float> cells(px * px, -1.0f);
+    auto put = [&](int row, int col, double w) {
+        const int x0 = int(double(col) * px / n), x1 = std::max(x0 + 1, int(double(col + 1) * px / n));
+        const int y0 = int(double(row) * px / n), y1 = std::max(y0 + 1, int(double(row + 1) * px / n));
+        // Log scale: bytes and waiting span several orders of magnitude.
+        const float t = maxW > 0 ? float(std::log1p(w / maxW * 1000) / std::log1p(1000.0)) : 0.0f;
+        for (int y = y0; y < std::min(y1, px); ++y)
+            for (int x = x0; x < std::min(x1, px); ++x)
+                cells[y * px + x] = std::max(cells[y * px + x], t);
+    };
+    for (const GraphEdge &e : std::as_const(m_graph.edges))
+        if (e.kind == GraphEdge::Kind::P2P && e.from < n && e.to < n)
+            put(e.from, e.to, trace::edgeWeight(e, m_weight));
+    if (!waitScale)
+        for (int i = 0; i < n; ++i) {
+            const GraphNode &g = m_graph.nodes[i];
+            const double w = m_weight == trace::GraphWeight::Bytes ? double(g.internalBytes) : double(g.internalMessages);
+            if (w > 0)
+                put(i, i, w);
+        }
+    // Colours: messages / bytes light to dark green (P2P colour), waiting light to dark blue.
+    const QColor lo = waitScale ? QColor(0xdb, 0xe4, 0xff) : QColor(0xcf, 0xf5, 0xcf);
+    const QColor hi = waitScale ? QColor(0x00, 0x00, 0x8b) : QColor(0x00, 0x4d, 0x00);
+    QImage img(px, px, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::transparent);
+    for (int y = 0; y < px; ++y) {
+        QRgb *line = reinterpret_cast<QRgb *>(img.scanLine(y));
+        for (int x = 0; x < px; ++x) {
+            const float t = cells[y * px + x];
+            if (t >= 0)
+                line[x] = mix(lo, hi, t).rgba();
+        }
+    }
+    img.setDevicePixelRatio(dpr);
+    painter->drawImage(r.topLeft(), img);
+
+    // Compute node borders (ranks of several hosts) and their names.
+    QFont f = painter->font();
+    f.setPointSizeF(8);
+    painter->setFont(f);
+    const QFontMetricsF fm(f);
+    const double cell = r.width() / n;
+    if (m_graph.groups.size() > 1 && m_options.level == trace::GraphLevel::Ranks) {
+        int first = 0;
+        double lastLabelY = -1e9;
+        while (first < n) {
+            const int g = m_graph.nodes[first].group;
+            int last = first;
+            while (last + 1 < n && m_graph.nodes[last + 1].group == g)
+                ++last;
+            if (first > 0) {
+                QColor line(0x9c, 0xa3, 0xaf);
+                line.setAlphaF(0.6);
+                painter->setPen(QPen(line, 1));
+                painter->drawLine(QPointF(r.left(), r.top() + first * cell), QPointF(r.right(), r.top() + first * cell));
+                painter->drawLine(QPointF(r.left() + first * cell, r.top()), QPointF(r.left() + first * cell, r.bottom()));
+            }
+            const double y = r.top() + (first + last + 1) / 2.0 * cell;
+            if (y - lastLabelY >= fm.height()) {
+                painter->setPen(kTextColor);
+                painter->drawText(QRectF(r.left() - kMatrixLeft + 2, y - 8, kMatrixLeft - 8, 16),
+                                  Qt::AlignRight | Qt::AlignVCenter, m_graph.groups.value(g));
+                lastLabelY = y;
+            }
+            first = last + 1;
+        }
+    } else {
+        // Row labels: ranks / hosts when there is room.
+        double lastY = -1e9;
+        for (int i = 0; i < n; ++i) {
+            const double y = r.top() + (i + 0.5) * cell;
+            if (y - lastY < fm.height())
+                continue;
+            painter->setPen(kTextColor);
+            painter->drawText(QRectF(r.left() - kMatrixLeft + 2, y - 8, kMatrixLeft - 8, 16),
+                              Qt::AlignRight | Qt::AlignVCenter, nodeLabel(i));
+            lastY = y;
+        }
+    }
+
+    // Selected rank: its row (what it sends) and column (what it receives).
+    const int focus = focusNode();
+    if (focus >= 0 && focus < n) {
+        QColor sel = kSelectionColor;
+        sel.setAlphaF(0.18);
+        painter->fillRect(QRectF(r.left(), r.top() + focus * cell, r.width(), std::max(1.0, cell)), sel);
+        painter->fillRect(QRectF(r.left() + focus * cell, r.top(), std::max(1.0, cell), r.height()), sel);
+    }
+
+    // Waiting per rank / host: strip right of the matrix (white = least, blue = most waiting).
+    const QRectF strip(r.right() + 8, r.top(), kWaitStrip, r.height());
+    for (int i = 0; i < n; ++i)
+        painter->fillRect(QRectF(strip.left(), r.top() + i * cell, kWaitStrip, std::max(cell, 1.0 / dpr)),
+                          waitColor(m_nodeWait.value(i)));
+    painter->setPen(QPen(QColor(0x9c, 0xa3, 0xaf), 1));
+    painter->setBrush(Qt::NoBrush);
+    painter->drawRect(strip);
+
+    painter->setPen(kTextColor);
+    painter->drawText(QRectF(r.left(), kMatrixTop - 18, r.width(), 16), Qt::AlignCenter,
+                      tr("receiver →"));
+    painter->drawText(QRectF(r.left(), r.bottom() + 4, r.width(), 16), Qt::AlignCenter,
+                      tr("rows: sender · columns: receiver · colour: %1 (log scale)")
+                          .arg(m_weight == trace::GraphWeight::Wait ? tr("waiting time")
+                               : m_weight == trace::GraphWeight::Messages ? tr("messages") : tr("bytes")));
+    painter->save();
+    painter->translate(strip.right() + 14, r.center().y());
+    painter->rotate(90);
+    painter->drawText(QRectF(-r.height() / 2, -8, r.height(), 16), Qt::AlignCenter, tr("waiting per row"));
+    painter->restore();
+}
+
 void TraceGraphItem::clickAt(qreal x, qreal y)
 {
     const QPointF p(x, y);
-    const int node = nodeAt(p);
+    if (m_matrix) {
+        const QPoint c = matrixCellAt(p);
+        if (c.x() < 0)
+            return;
+        const int edge = edgeBetween(c.y(), c.x());
+        const GraphNode &sender = m_graph.nodes[c.y()];
+        if (edge < 0) {
+            if (sender.kind == GraphNode::Kind::Rank)
+                setSelectedRank(sender.rank == m_selectedRank ? -1 : sender.rank);
+            return;
+        }
+        if (sender.kind == GraphNode::Kind::Rank)
+            setSelectedRank(sender.rank);
+        // Then the edge details, as for a clicked line (below).
+    }
+    const int node = m_matrix ? -1 : nodeAt(p);
     if (node >= 0) {
         const GraphNode &n = m_graph.nodes[node];
         if (n.kind == GraphNode::Kind::Rank)
             setSelectedRank(n.rank == m_selectedRank ? -1 : n.rank);
         return;
     }
-    const int edge = edgeAt(p);
+    const QPoint cell = m_matrix ? matrixCellAt(p) : QPoint(-1, -1);
+    const int edge = m_matrix ? (cell.x() >= 0 ? edgeBetween(cell.y(), cell.x()) : -1) : edgeAt(p);
     if (edge < 0)
         return;
     const GraphEdge &e = m_graph.edges[edge];
@@ -549,7 +803,7 @@ bool TraceGraphItem::toggleExpandAt(qreal x, qreal y)
 {
     if (m_options.level != trace::GraphLevel::Nodes)
         return false;
-    const int node = nodeAt(QPointF(x, y));
+    const int node = m_matrix ? matrixCellAt(QPointF(x, y)).y() : nodeAt(QPointF(x, y));
     if (node < 0)
         return false;
     const GraphNode &n = m_graph.nodes[node];
@@ -574,6 +828,42 @@ void TraceGraphItem::collapseAll()
 QString TraceGraphItem::toolTipAt(qreal x, qreal y) const
 {
     const QPointF p(x, y);
+    if (m_matrix) {
+        const QPoint c = matrixCellAt(p);
+        if (c.x() < 0) {
+            // Waiting strip: the row's waiting.
+            const QRectF r = matrixRect();
+            const int n = m_graph.rankNodeCount;
+            if (n > 0 && p.x() >= r.right() + 8 && p.x() <= r.right() + 8 + kWaitStrip && p.y() >= r.top() && p.y() < r.bottom()) {
+                const int row = std::clamp(int((p.y() - r.top()) / r.height() * n), 0, n - 1);
+                const GraphNode &rn = m_graph.nodes[row];
+                const QString who = rn.kind == GraphNode::Kind::Rank ? tr("Rank %1 (%2)").arg(rn.rank).arg(rn.node) : nodeLabel(row);
+                return tr("%1: waiting %2").arg(who, formatMs(nodeWaitSeconds(row)));
+            }
+            return {};
+        }
+        auto name = [&](int i) {
+            const GraphNode &n = m_graph.nodes[i];
+            return n.kind == GraphNode::Kind::Rank ? tr("rank %1 (%2)").arg(n.rank).arg(n.node) : nodeLabel(i);
+        };
+        if (c.x() == c.y() && m_graph.nodes[c.x()].kind == GraphNode::Kind::Node) {
+            const GraphNode &n = m_graph.nodes[c.x()];
+            return tr("Inside compute node %1: %2 in %3 messages").arg(n.node)
+                .arg(formatBytes(double(n.internalBytes))).arg(n.internalMessages);
+        }
+        const int e = edgeBetween(c.y(), c.x());
+        QStringList lines;
+        lines << tr("%1 → %2").arg(name(c.y()), name(c.x()));
+        if (e < 0) {
+            lines << tr("no messages in this window");
+        } else {
+            const GraphEdge &ed = m_graph.edges[e];
+            lines << tr("%1 messages, %2").arg(ed.messages).arg(formatBytes(double(ed.bytes)))
+                  << tr("Receiver waiting (late sender): %1").arg(formatMs(ed.waitSeconds))
+                  << tr("Click: select the sender, details in Trace Options");
+        }
+        return lines.join(QLatin1Char('\n'));
+    }
     const int node = nodeAt(p);
     if (node >= 0) {
         const GraphNode &n = m_graph.nodes[node];
@@ -671,6 +961,11 @@ void TraceGraphItem::paint(QPainter *painter)
     painter->fillRect(QRectF(0, 0, width(), height()), kBackground);
     if (m_graph.nodes.isEmpty())
         return;
+    if (m_matrix) {
+        paintMatrix(painter);
+        paintHint(painter);
+        return;
+    }
     painter->setRenderHint(QPainter::Antialiasing, true);
 
     const int focus = focusNode();
@@ -777,7 +1072,7 @@ void TraceGraphItem::paint(QPainter *painter)
         // colour when the ranks of several hosts are shown, the selection colour when selected.
         QColor fill = n.kind == GraphNode::Kind::Communicator
             ? kCommunicatorColor
-            : mix(kWaitLowColor, kWaitHighColor, m_maxWait > 0 ? m_nodeWait.value(i) / m_maxWait : 0);
+            : waitColor(m_nodeWait.value(i));
         if (!lit[i])
             fill = mix(fill, kBackground, 0.75);
         painter->setBrush(fill);
@@ -837,6 +1132,11 @@ void TraceGraphItem::paint(QPainter *painter)
         painter->drawText(box, Qt::AlignCenter, text);
     }
 
+    paintHint(painter);
+}
+
+void TraceGraphItem::paintHint(QPainter *painter)
+{
     // Why no edges are drawn.
     QString hint;
     if (m_status == QLatin1String("zoom"))
@@ -851,6 +1151,8 @@ void TraceGraphItem::paint(QPainter *painter)
         hint = tr("Long window: the graph sums up many steps — zoom in to see single steps");
     if (!hint.isEmpty()) {
         painter->setPen(kHintColor);
-        painter->drawText(QRectF(0, 4, width(), 18), Qt::AlignHCenter | Qt::AlignTop, hint);
+        // Matrix: above it; graph: at the bottom, where it does not cover the top node's label.
+        const QRectF at = m_matrix ? QRectF(0, 4, width(), 18) : QRectF(0, height() - 20, width(), 18);
+        painter->drawText(at, Qt::AlignHCenter | Qt::AlignTop, hint);
     }
 }

@@ -105,6 +105,45 @@ Rectangle {
                         }
                     }
                 }
+                // View switch: Auto (by size) | Graph | Matrix, shared with Trace Options.
+                Row {
+                    spacing: 2
+                    Repeater {
+                        model: [
+                            { value: "auto", label: qsTr("Auto"), tip: qsTr("Graph for up to 128 ranks / nodes, communication matrix for more") },
+                            { value: "graph", label: qsTr("Graph"), tip: qsTr("Circles and lines: who talks to whom") },
+                            { value: "matrix", label: qsTr("Matrix"), tip: qsTr("Communication matrix: sender rows × receiver columns, colour = bytes, messages or waiting; scales to thousands of ranks") }
+                        ]
+                        delegate: Rectangle {
+                            required property var modelData
+                            readonly property bool active: graph.view === modelData.value
+                            width: viewText.implicitWidth + 12
+                            height: trace_graph_view.embedded ? 18 : 22
+                            radius: 3
+                            color: active ? "#1d4ed8" : (viewMouse.containsMouse ? "#666666" : "#5a5a5a")
+                            Text {
+                                id: viewText
+                                anchors.centerIn: parent
+                                text: modelData.label + (modelData.value === "auto" && parent.active
+                                      ? " (" + (graph.effectiveView === "matrix" ? qsTr("matrix") : qsTr("graph")) + ")" : "")
+                                color: "white"
+                                font.pointSize: 9
+                            }
+                            MouseArea {
+                                id: viewMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: {
+                                    if (trace_graph_view.traceState)
+                                        trace_graph_view.traceState.graphView = modelData.value
+                                }
+                            }
+                            ToolTip.visible: viewMouse.containsMouse
+                            ToolTip.delay: 500
+                            ToolTip.text: modelData.tip
+                        }
+                    }
+                }
                 Rectangle {
                     visible: graph.expandedCount > 0
                     width: collapseText.implicitWidth + 12
@@ -135,10 +174,11 @@ Rectangle {
                         var t = qsTr("%1 edges").arg(graph.edgeCount)
                         if (graph.communicatorsMerged)
                             t += qsTr(" · communicators merged")
-                        if (graph.shownEdgeCount < graph.edgeCount)
+                        if (graph.shownEdgeCount < graph.edgeCount && graph.effectiveView !== "matrix")
                             t += qsTr(" (heaviest %1 shown)").arg(graph.shownEdgeCount)
                         if (graph.maxWaitSeconds > 0)
-                            t += qsTr(" · max. waiting per rank %1 ms").arg((graph.maxWaitSeconds * 1000).toFixed(3))
+                            t += (graph.effectiveLevel === "nodes" ? qsTr(" · max. waiting per node %1 ms") : qsTr(" · max. waiting per rank %1 ms"))
+                                 .arg((graph.maxWaitSeconds * 1000).toFixed(3))
                         return t
                     }
                 }
@@ -169,7 +209,7 @@ Rectangle {
                 // Colours as in the 3D view (Cores3D.qml): P2P green, collectives black,
                 // waiting per process white to blue. New: communicator node, host border.
                 Repeater {
-                    model: [
+                    model: graph.effectiveView === "matrix" ? [] : [
                         { label: qsTr("P2P message"), colour: "#00d500", dashed: false },
                         { label: qsTr("Collective → communicator"), colour: "#000000", dashed: true }
                     ]
@@ -203,6 +243,7 @@ Rectangle {
                 }
                 Row {
                     spacing: 4
+                    visible: graph.effectiveView !== "matrix"
                     Canvas {
                         width: 14
                         height: 14
@@ -232,7 +273,7 @@ Rectangle {
                 }
                 Row {
                     spacing: 4
-                    visible: graph.effectiveLevel === "ranks"
+                    visible: graph.effectiveLevel === "ranks" && graph.effectiveView !== "matrix"
                     Rectangle {
                         width: 12
                         height: 12
@@ -251,7 +292,7 @@ Rectangle {
                 }
                 Row {
                     spacing: 4
-                    visible: graph.effectiveLevel === "nodes"
+                    visible: graph.effectiveLevel === "nodes" && graph.effectiveView !== "matrix"
                     Rectangle {
                         width: 12
                         height: 12
@@ -273,7 +314,8 @@ Rectangle {
                     spacing: 4
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
-                        text: qsTr("Waiting (late sender): 0")
+                        text: qsTr("Waiting per %1: %2 ms").arg(graph.effectiveLevel === "nodes" ? qsTr("node") : qsTr("rank"))
+                                  .arg((graph.minWaitSeconds * 1000).toFixed(3))
                         color: "#374151"
                         font.pointSize: 11
                     }
@@ -300,7 +342,7 @@ Rectangle {
                     text: {
                         var w = graph.weight === "messages" ? qsTr("number of messages")
                               : graph.weight === "wait" ? qsTr("waiting time") : qsTr("bytes")
-                        return qsTr("Edge width: %1").arg(w)
+                        return graph.effectiveView === "matrix" ? qsTr("Cell colour: %1").arg(w) : qsTr("Edge width: %1").arg(w)
                     }
                     color: "#374151"
                     font.pointSize: 11
@@ -324,7 +366,9 @@ Rectangle {
                     wrapMode: Text.WordWrap
                     color: "#374151"
                     font.pointSize: 10
-                    text: graph.effectiveLevel === "nodes"
+                    text: graph.effectiveView === "matrix"
+                          ? qsTr("Communication matrix: row = sender, column = receiver, darker = more. Bands next to the diagonal are neighbour exchanges, blocks are compute nodes; the strip on the right is the waiting of each row (white = least, blue = most). Click a cell to select the sender.")
+                          : graph.effectiveLevel === "nodes"
                           ? qsTr("Each circle is one compute node (all its ranks together). Lines: messages between ranks of different nodes. Green ring: messages inside the node. Double-click a node to show its ranks.")
                           : qsTr("Each circle is one MPI rank, border colour = its compute node. Lines: messages, arrow from sender to receiver. Click a rank to select it, hover for details.")
                 }
@@ -354,7 +398,48 @@ Rectangle {
                         + "• Black dashed lines: collectives (MPI_Allreduce, …) to a diamond per communicator.\n"
                         + "• Fill white → blue: waiting time (late sender), as in the 3D view.\n"
                         + "• Auto: ranks when zoomed in to single steps (≤ 50 ms) or for ≤ 64 ranks, nodes otherwise.\n"
-                        + "Hover a circle or line for its numbers; double-click a node to open it into its ranks.")
+                        + "• Matrix: sender rows × receiver columns; for many ranks (Auto: more than 128) it shows the pattern where circles would overlap.\n"
+                        + "• Yellow box: findings of the window – communication pattern, share of traffic inside the compute nodes, ranks that wait far more than the others, senders that make others wait (click one to select the rank).\n"
+                        + "Hover a circle, line or cell for its numbers; double-click a node to open it into its ranks.")
+                }
+            }
+        }
+
+        // Findings of the window (pattern, locality, waiting outliers, late senders).
+        Rectangle {
+            Layout.fillWidth: true
+            visible: graph.findings.length > 0 && !trace_graph_view.embedded
+            Layout.preferredHeight: visible ? findingsColumn.implicitHeight + 8 : 0
+            color: "#fffbeb"
+            border.color: "#fde68a"
+            Column {
+                id: findingsColumn
+                anchors.fill: parent
+                anchors.margins: 4
+                anchors.leftMargin: 8
+                spacing: 1
+                Repeater {
+                    model: graph.findings
+                    delegate: Text {
+                        required property string modelData
+                        required property int index
+                        readonly property int rank: graph.findingRanks[index]
+                        width: findingsColumn.width
+                        elide: Text.ElideRight
+                        text: (rank >= 0 ? "▸ " : "• ") + modelData
+                        color: rank >= 0 && findingMouse.containsMouse ? "#1d4ed8" : "#374151"
+                        font.pointSize: 10
+                        MouseArea {
+                            id: findingMouse
+                            anchors.fill: parent
+                            hoverEnabled: rank >= 0
+                            cursorShape: rank >= 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: {
+                                if (rank >= 0 && trace_graph_view.traceState)
+                                    trace_graph_view.traceState.selectedRank = rank
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -375,6 +460,7 @@ Rectangle {
             communicators: trace_graph_view.traceState && trace_graph_view.traceState.graphCommunicators ? trace_graph_view.traceState.graphCommunicators : "auto"
             layout: trace_graph_view.traceState ? trace_graph_view.traceState.graphLayout : "circle"
             maxEdges: trace_graph_view.traceState ? trace_graph_view.traceState.graphMaxEdges : 500
+            view: trace_graph_view.traceState && trace_graph_view.traceState.graphView ? trace_graph_view.traceState.graphView : "auto"
 
             onSelectedRankChanged: {
                 if (trace_graph_view.traceState && trace_graph_view.traceState.selectedRank !== selectedRank)
