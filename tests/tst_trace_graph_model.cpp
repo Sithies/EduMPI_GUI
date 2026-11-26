@@ -698,6 +698,36 @@ private slots:
         QCOMPARE(layoutName(GraphLayout::Torus), QStringLiteral("torus"));
     }
 
+    // Collective calls rebuilt from a window: ring4's MPI_Allreduce in second 1, where rank 2
+    // arrives late (1200 ms) and the others wait for it.
+    void collectiveCallsAndLateArrival()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeRing4Otf2(tmp.path());
+        QVERIFY(!anchor.isEmpty());
+        auto store = build(anchor);
+        QVERIFY(store);
+        const QVector<CollectiveInstance> inst = collectiveInstances(*store, 1000 * kMs, 2000 * kMs);
+        QCOMPARE(inst.size(), 1);
+        QCOMPARE(inst[0].function, QStringLiteral("MPI_Allreduce"));
+        QCOMPARE(inst[0].ranks.size(), 4);
+        QCOMPARE(inst[0].lastRank, 2);
+        QCOMPARE(inst[0].lastEnterNs, 1200 * kMs);
+        QVERIFY(inst[0].firstEnterNs < inst[0].lastEnterNs);
+        QVERIFY(inst[0].totalWaitSeconds > 0);
+        QVERIFY(collectiveInstances(*store, 0, 1000 * kMs).isEmpty());
+
+        const QVector<GraphFinding> f = analyzeCollectives(inst, 1000 * kMs, 4);
+        QCOMPARE(f.size(), 2);
+        QCOMPARE(f[0].kind, QStringLiteral("lateatcollective"));
+        QCOMPARE(f[0].category, QStringLiteral("collectives"));
+        QCOMPARE(f[0].rank, 2);
+        QVERIFY(!f[0].action.isEmpty());
+        QCOMPARE(f[1].kind, QStringLiteral("collectiveops"));
+        QVERIFY2(f[1].metric.startsWith(QStringLiteral("MPI_Allreduce")), qPrintable(f[1].metric));
+        QVERIFY(analyzeCollectives({}, 1000 * kMs, 4).isEmpty());
+    }
+
     // The pattern of a real trace: the ring of writeManyMessagesOtf2 (r -> r + 1).
     void detectsPatternOfTrace()
     {

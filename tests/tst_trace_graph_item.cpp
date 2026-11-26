@@ -637,6 +637,33 @@ private slots:
         QVERIFY(d.value(QStringLiteral("longestWaitSeconds")).toDouble() > 0.2);
     }
 
+    // Stepping from collective call to collective call.
+    void stepsThroughCollectives()
+    {
+        TraceTimelineModel model;
+        TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
+        model.addSnapshot({build(m_ring4)});
+        item.setModel(&model);
+        item.setWidth(600);
+        item.setHeight(400);
+        item.setViewStartNs(0);
+        item.setViewEndNs(2500 * kMs);
+        QCOMPARE(item.collectiveCount(), 1);
+        const QVariantMap next = item.stepCollective(1);
+        QVERIFY(next.value(QStringLiteral("found")).toBool());
+        QCOMPARE(next.value(QStringLiteral("lastRank")).toInt(), 2);
+        QVERIFY(next.value(QStringLiteral("fromNs")).toLongLong() < 1200 * kMs);
+        QVERIFY(next.value(QStringLiteral("toNs")).toLongLong() > 1200 * kMs);
+        QVERIFY(next.value(QStringLiteral("label")).toString().contains(QStringLiteral("MPI_Allreduce")));
+        // The view follows (as TraceGraph.qml does); from there no earlier / later one.
+        item.setViewStartNs(next.value(QStringLiteral("fromNs")).toLongLong());
+        item.setViewEndNs(next.value(QStringLiteral("toNs")).toLongLong());
+        QVERIFY(!item.stepCollective(-1).value(QStringLiteral("found")).toBool());
+        QVERIFY(!item.stepCollective(1).value(QStringLiteral("found")).toBool());
+    }
+
     // Wait colours span the window's least to most waiting rank (white to blue).
     void waitScaleFromLeastToMost()
     {

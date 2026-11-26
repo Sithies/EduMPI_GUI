@@ -151,6 +151,26 @@ QVector<GraphFinding> analyzeCommGraph(const CommGraph &rankGraph, int gridColum
 // change of the total waiting, the ranks and links whose waiting grew / shrank most.
 QVector<GraphFinding> compareCommGraphs(const CommGraph &current, const CommGraph &reference);
 
+// One call of a collective operation by all its ranks (an instance), rebuilt from the
+// window's activities: the participations of one communicator that waited for the same last
+// arrival (enter + late sender = the instance's last enter).
+struct CollectiveInstance {
+    quint64 comm = 0;
+    QString function;
+    qint64 firstEnterNs = 0;
+    qint64 lastEnterNs = 0; // the last rank's arrival: the others wait until then
+    qint64 endNs = 0;       // last leave
+    int lastRank = -1;      // the rank that arrived last
+    double totalWaitSeconds = 0; // waiting of all members (wait at collective)
+    QVector<int> ranks;
+};
+// Instances whose last arrival lies in [fromNs, toNs), sorted by first enter.
+QVector<CollectiveInstance> collectiveInstances(const TimelineStore &store, qint64 fromNs, qint64 toNs);
+
+// Findings about the collectives of the window (category "collectives"): which ranks arrive
+// last and make everyone wait, and which operations cost the most waiting.
+QVector<GraphFinding> analyzeCollectives(const QVector<CollectiveInstance> &instances, qint64 windowNs, int ranks);
+
 // Rank -> compute node assignment that keeps more P2P volume inside the nodes: block tiles of
 // the process grid (gridColumns > 0) and a greedy grouping by communication, nodes of the
 // current size. Returns the share of the volume inside nodes now and with the best found

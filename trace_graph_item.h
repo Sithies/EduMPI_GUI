@@ -90,6 +90,8 @@ class TraceGraphItem : public QQuickPaintedItem
     Q_PROPERTY(QString edgeFilter READ edgeFilter WRITE setEdgeFilter NOTIFY displayChanged)
     // Reference window for comparisons (setReference / clearReference).
     Q_PROPERTY(bool hasReference READ hasReference NOTIFY referenceChanged)
+    // Collective calls in the window (stepCollective).
+    Q_PROPERTY(int collectiveCount READ collectiveCount NOTIFY graphChanged)
     Q_PROPERTY(QString referenceLabel READ referenceLabel NOTIFY referenceChanged)
     // Finding whose ranks / link are highlighted (-1 = none); the rest of the graph is dimmed.
     Q_PROPERTY(int highlightedFinding READ highlightedFinding WRITE setHighlightedFinding NOTIFY highlightChanged)
@@ -155,6 +157,11 @@ public:
     Q_INVOKABLE void zoomToFinding(int index);
     // Zooms to a rank (its node at the nodes level); false if not in the graph.
     Q_INVOKABLE bool zoomToRank(int rank);
+    // Steps to the next (direction > 0) / previous collective call of the loaded window:
+    // returns {found, fromNs, toNs (a view around it), label, lastRank, function}; found = false
+    // when the window has no further one (the caller then moves the window on).
+    Q_INVOKABLE QVariantMap stepCollective(int direction);
+    int collectiveCount() const { return int(m_collInstances.size()); }
     // The current window (ranks) as the reference for comparisons; clearReference drops it.
     Q_INVOKABLE void setReference();
     Q_INVOKABLE void clearReference();
@@ -303,6 +310,9 @@ private:
     trace::CommGraph m_reference;
     QString m_referenceLabel;
     QHash<quint64, double> m_referenceLinkWait; // (sender << 32 | receiver) -> waiting per second
+    QVector<trace::CollectiveInstance> m_collInstances; // of the window, by first enter
+    qint64 m_navFirst = -1;    // first enter of the collective stepped to last
+    qint64 m_navViewFrom = -1; // the view start set for it (a changed view resets the anchor)
     QVector<QVariantList> m_findingSeries;      // per finding: waiting over time of its ranks
     QVector<QVariantList> m_findingBaseline;    // per finding: of all ranks
     int m_maxEdges = kDefaultMaxEdges;

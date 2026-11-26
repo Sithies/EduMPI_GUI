@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace trace {
 
@@ -1098,6 +1099,137 @@ QVector<GraphFinding> compareCommGraphs(const CommGraph &cur, const CommGraph &r
         f.title = QStringLiteral("Link that got worse");
         f.metric = QStringLiteral("%1 → %2: +%3/s").arg(bf).arg(bt).arg(msText(bestD));
         f.detail = QStringLiteral("rank %1 waits for rank %2 %3 per second more than in the reference").arg(bt).arg(bf).arg(msText(bestD));
+        f.text = f.title + QStringLiteral(": ") + f.metric;
+        out.append(f);
+    }
+    return out;
+}
+
+QVector<CollectiveInstance> collectiveInstances(const TimelineStore &store, qint64 fromNs, qint64 toNs)
+{
+    QHash<QPair<quint64, qint64>, int> index; // (comm, last enter in µs) -> instance
+    QVector<CollectiveInstance> out;
+    QVector<qint64> lastSeen;                 // latest enter seen per instance
+    for (const RankRow &r : store.rows) {
+        // Instances whose last arrival is in the window: members may have entered before it.
+        auto first = std::lower_bound(r.activities.cbegin(), r.activities.cend(), fromNs - 10'000'000'000LL,
+                                      [](const Activity &a, qint64 t) { return a.startNs < t; });
+        for (auto it = first; it != r.activities.cend() && it->startNs < toNs; ++it) {
+            const Activity &a = *it;
+            if (a.category != Category::Collective || a.linkCount == 0)
+                continue;
+            const CollectiveEntry &c = store.collectives[r.links[a.firstLink]];
+            const qint64 lastEnter = a.startNs + qint64(std::llround(c.lateSender * 1e9));
+            if (lastEnter < fromNs || lastEnter >= toNs)
+                continue;
+            const QPair<quint64, qint64> key{c.comm, lastEnter / 1000};
+            auto idx = index.find(key);
+            if (idx == index.end()) {
+                idx = index.insert(key, int(out.size()));
+                CollectiveInstance inst;
+                inst.comm = c.comm;
+                inst.function = a.function < store.functions.size() ? store.functions[a.function] : QString();
+                inst.firstEnterNs = a.startNs;
+                inst.lastEnterNs = lastEnter;
+                inst.endNs = a.endNs;
+                out.append(inst);
+                lastSeen.append(std::numeric_limits<qint64>::min());
+            }
+            CollectiveInstance &inst = out[*idx];
+            inst.firstEnterNs = std::min(inst.firstEnterNs, a.startNs);
+            inst.endNs = std::max(inst.endNs, a.endNs);
+            inst.totalWaitSeconds += c.lateSender;
+            inst.ranks.append(r.rank);
+            // The last to arrive: the latest enter.
+            if (inst.lastRank < 0 || a.startNs > lastSeen[*idx]) {
+                inst.lastRank = r.rank;
+                lastSeen[*idx] = a.startNs;
+            }
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const CollectiveInstance &x, const CollectiveInstance &y) {
+        return x.firstEnterNs != y.firstEnterNs ? x.firstEnterNs < y.firstEnterNs : x.comm < y.comm;
+    });
+    return out;
+}
+
+QVector<GraphFinding> analyzeCollectives(const QVector<CollectiveInstance> &inst, qint64 windowNs, int ranks)
+{
+    QVector<GraphFinding> out;
+    if (inst.isEmpty())
+        return out;
+    double total = 0;
+    QHash<int, int> lastCount;     // rank -> calls where it arrived last
+    QHash<int, double> caused;     // rank -> waiting of the others in those calls
+    struct Op {
+        int calls = 0;
+        double wait = 0;
+        int members = 0;
+    };
+    QMap<QString, Op> ops;
+    for (const CollectiveInstance &c : inst) {
+        total += c.totalWaitSeconds;
+        if (c.ranks.size() > 1 && c.lastRank >= 0) {
+            lastCount[c.lastRank] += 1;
+            caused[c.lastRank] += c.totalWaitSeconds;
+        }
+        Op &o = ops[c.function.isEmpty() ? QStringLiteral("collective") : c.function];
+        o.calls += 1;
+        o.wait += c.totalWaitSeconds;
+        o.members += int(c.ranks.size());
+    }
+    if (total <= 0)
+        return out;
+    // Ranks that keep everyone waiting.
+    QVector<int> order = caused.keys().toVector();
+    std::sort(order.begin(), order.end(), [&](int a, int b) { return caused[a] > caused[b]; });
+    const double meanCaused = total / std::max(1, ranks);
+    if (!order.isEmpty()) {
+        GraphFinding f;
+        f.kind = QStringLiteral("lateatcollective");
+        f.category = QStringLiteral("collectives");
+        const int top = order.first();
+        f.rank = top;
+        f.value = caused[top];
+        QVector<int> rl;
+        for (int k = 0; k < std::min<qsizetype>(5, order.size()); ++k)
+            if (caused[order[k]] >= 0.1 * caused[top]) {
+                f.ranks.append(order[k]);
+                rl.append(order[k]);
+            }
+        const double share = caused[top] / total;
+        f.severity = share >= 0.2 || caused[top] >= 5 * meanCaused ? 2 : share >= 0.05 ? 1 : 0;
+        f.title = QStringLiteral("Last to arrive at collectives");
+        f.metric = QStringLiteral("rank %1: last in %2 of %3 calls").arg(rankList(rl, 3)).arg(lastCount.value(top)).arg(inst.size());
+        f.detail = QStringLiteral("the others wait %1 for rank %2 in total (%3 % of all waiting at collectives, %4)")
+                       .arg(msText(caused[top])).arg(top).arg(qRound(100 * share)).arg(msText(total));
+        f.action = QStringLiteral("These ranks reach the collective late: give them less work before it, or overlap with a non-blocking collective (MPI_Iallreduce …)");
+        f.text = f.title + QStringLiteral(": ") + f.metric;
+        out.append(f);
+    }
+    // Operations by waiting.
+    {
+        QVector<QString> names = ops.keys().toVector();
+        std::sort(names.begin(), names.end(), [&](const QString &a, const QString &b) { return ops[a].wait > ops[b].wait; });
+        GraphFinding f;
+        f.kind = QStringLiteral("collectiveops");
+        f.category = QStringLiteral("collectives");
+        f.title = QStringLiteral("Waiting by collective");
+        const Op &top = ops[names.first()];
+        f.metric = QStringLiteral("%1: %2× , Ø %3 per rank and call")
+                       .arg(names.first()).arg(top.calls).arg(msText(top.members > 0 ? top.wait / top.members : 0));
+        QStringList parts;
+        for (int k = 0; k < std::min<qsizetype>(4, names.size()); ++k) {
+            const Op &o = ops[names[k]];
+            parts << QStringLiteral("%1 %2 (%3 calls)").arg(names[k]).arg(msText(o.wait)).arg(o.calls);
+        }
+        f.detail = QStringLiteral("waiting at collectives in this window: %1").arg(parts.join(QStringLiteral(", ")));
+        const double perRank = total / std::max(1, ranks);
+        if (windowNs > 0 && perRank / (windowNs / 1e9) > 0.1) {
+            f.severity = 1;
+            f.action = QStringLiteral("More than a tenth of the time is spent waiting in collectives: balance the work before them, or call them less often");
+        }
+        f.value = total;
         f.text = f.title + QStringLiteral(": ") + f.metric;
         out.append(f);
     }

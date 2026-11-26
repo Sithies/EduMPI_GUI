@@ -689,6 +689,7 @@ void TraceGraphItem::rebuild()
     int gridColumns = 0;
     std::shared_ptr<const TimelineStore> seriesStore;
     m_rankGraph = CommGraph();
+    m_collInstances.clear();
     if (overview) {
         m_overviewRankHost.clear();
         for (const auto &row : overview->rows)
@@ -716,6 +717,8 @@ void TraceGraphItem::rebuild()
             rankGraphFindings += trace::compareCommGraphs(rankGraph, m_reference);
         m_rankGraph = rankGraph;
         seriesStore = detail;
+        m_collInstances = trace::collectiveInstances(*detail, from, to);
+        rankGraphFindings += trace::analyzeCollectives(m_collInstances, to - from, rankGraph.rankNodeCount);
     } else {
         // Nodes without edges, so the layout is already in place.
         m_graph = trace::buildCommGraph(*overview, 0, 0, m_options);
@@ -1628,6 +1631,50 @@ void TraceGraphItem::clearReference()
     emit referenceChanged();
     emit displayChanged();
     rebuild();
+}
+
+QVariantMap TraceGraphItem::stepCollective(int direction)
+{
+    QVariantMap r;
+    r.insert(QStringLiteral("found"), false);
+    if (m_collInstances.isEmpty())
+        return r;
+    // From the collective stepped to last if the view is still the one set for it, else from
+    // the view's edge.
+    const bool fromLast = m_navFirst >= 0 && m_navViewFrom == windowStart();
+    const qint64 anchor = fromLast ? m_navFirst : (direction > 0 ? windowStart() - 1 : windowEnd() + 1);
+    int pick = -1;
+    if (direction > 0) {
+        for (int i = 0; i < m_collInstances.size(); ++i)
+            if (m_collInstances[i].firstEnterNs > anchor) {
+                pick = i;
+                break;
+            }
+    } else {
+        for (int i = int(m_collInstances.size()) - 1; i >= 0; --i)
+            if (m_collInstances[i].firstEnterNs < anchor) {
+                pick = i;
+                break;
+            }
+    }
+    if (pick < 0)
+        return r;
+    const trace::CollectiveInstance &c = m_collInstances[pick];
+    const qint64 span = std::max<qint64>(c.endNs - c.firstEnterNs, 1000);
+    const qint64 pad = std::max<qint64>(span / 5, 5000);
+    m_navFirst = c.firstEnterNs;
+    m_navViewFrom = std::max<qint64>(0, c.firstEnterNs - pad);
+    const double meanWait = c.ranks.isEmpty() ? 0 : c.totalWaitSeconds / c.ranks.size();
+    r.insert(QStringLiteral("found"), true);
+    r.insert(QStringLiteral("fromNs"), m_navViewFrom);
+    r.insert(QStringLiteral("toNs"), c.endNs + pad);
+    r.insert(QStringLiteral("lastRank"), c.lastRank);
+    r.insert(QStringLiteral("function"), c.function);
+    r.insert(QStringLiteral("label"),
+             tr("%1 (%2 ranks): last rank %3 arrives %4 after the first; the others wait %5 on average")
+                 .arg(c.function.isEmpty() ? tr("collective") : c.function).arg(c.ranks.size()).arg(c.lastRank)
+                 .arg(formatMs((c.lastEnterNs - c.firstEnterNs) / 1e9)).arg(formatMs(meanWait)));
+    return r;
 }
 
 bool TraceGraphItem::zoomToRank(int rank)

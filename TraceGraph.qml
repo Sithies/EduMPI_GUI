@@ -20,6 +20,25 @@ Rectangle {
 
     readonly property var timelineModel: listNodes ? listNodes.timeline : null
 
+    // Next / previous collective call: view around it, its last arriver selected; none left in
+    // the loaded window: the window moves on by its length (click again once loaded).
+    function stepCollective(direction) {
+        if (!traceState)
+            return
+        var r = graph.stepCollective(direction)
+        if (r.found) {
+            collectiveLabel.text = r.label
+            traceState.selectedRank = r.lastRank
+            traceState.viewRequested(r.fromNs, r.toNs)
+            return
+        }
+        var span = Math.max(traceState.viewEndNs - traceState.viewStartNs, 1000000)
+        var start = direction > 0 ? traceState.viewEndNs : traceState.viewStartNs - span
+        collectiveLabel.text = direction > 0 ? qsTr("no further collective here – moved on, click again")
+                                             : qsTr("no earlier collective here – moved back, click again")
+        traceState.viewRequested(Math.max(0, start), Math.max(0, start) + span)
+    }
+
     function formatBytes(bytes) {
         var units = ["B", "KB", "MB", "GB", "TB"]
         var u = 0
@@ -404,6 +423,45 @@ Rectangle {
                         font.pointSize: 10
                     }
                 }
+                // Step from collective call to collective call (window follows; the rank that
+                // arrived last is selected). At the end of the loaded window the window moves on.
+                Row {
+                    spacing: 4
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("Collectives:")
+                        font.bold: true
+                        color: "#111827"
+                        font.pointSize: 10
+                    }
+                    Button {
+                        implicitHeight: 22
+                        implicitWidth: 30
+                        text: "◀"
+                        onClicked: trace_graph_view.stepCollective(-1)
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("Previous collective call")
+                    }
+                    Button {
+                        implicitHeight: 22
+                        implicitWidth: 30
+                        text: "▶"
+                        onClicked: trace_graph_view.stepCollective(1)
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("Next collective call")
+                    }
+                    Text {
+                        id: collectiveLabel
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Math.min(implicitWidth, 520)
+                        elide: Text.ElideRight
+                        text: graph.collectiveCount > 0 ? qsTr("%1 calls in this window").arg(graph.collectiveCount) : qsTr("none in this window")
+                        color: "#374151"
+                        font.pointSize: 10
+                    }
+                }
             }
         }
 
@@ -576,6 +634,7 @@ Rectangle {
             property var collapsed: ({})
             readonly property var categories: [
                 { key: "waiting", label: qsTr("Waiting") },
+                { key: "collectives", label: qsTr("Collectives") },
                 { key: "load", label: qsTr("Load") },
                 { key: "structure", label: qsTr("Structure") },
                 { key: "messages", label: qsTr("Messages") },
@@ -725,6 +784,8 @@ Rectangle {
                                                         case "chain": return "⛓"
                                                         case "link": return "⇄"
                                                         case "size": return "✉"
+                                                        case "lateatcollective": return "⏱"
+                                                        case "collectiveops": return "∑"
                                                         }
                                                         return "≠"
                                                     }
