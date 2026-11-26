@@ -377,6 +377,48 @@ private slots:
         QCOMPARE(error, QStringLiteral("Cancelled"));
     }
 
+    // Progress: several calls with the same total (= meta.eventCount), done never decreasing,
+    // the last call done == total.
+    void reportsProgress()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeManyMessagesOtf2(tmp.path(), 4, 2000);
+        QVERIFY(!anchor.isEmpty());
+        TraceAggregator agg;
+        TraceMeta meta;
+        QString error;
+        QVector<QPair<quint64, quint64>> calls;
+        QVERIFY2(readOtf2(anchor, agg, &meta, &error, nullptr,
+                          [&](quint64 done, quint64 total) { calls.append({done, total}); }),
+                 qPrintable(error));
+        QVERIFY2(calls.size() >= 5, qPrintable(QString::number(calls.size())));
+        for (int i = 0; i < calls.size(); ++i) {
+            QCOMPARE(calls[i].second, meta.eventCount);
+            if (i > 0)
+                QVERIFY(calls[i].first >= calls[i - 1].first);
+        }
+        QCOMPARE(calls.last().first, meta.eventCount);
+    }
+
+    // Cancelled from the progress callback (the GUI's cancel button sets the flag there).
+    void cancelsDuringRead()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeManyMessagesOtf2(tmp.path(), 4, 2000);
+        QVERIFY(!anchor.isEmpty());
+        TraceAggregator agg;
+        TraceMeta meta;
+        QString error;
+        std::atomic_bool cancel{false};
+        int calls = 0;
+        QVERIFY(!readOtf2(anchor, agg, &meta, &error, &cancel, [&](quint64, quint64) {
+            ++calls;
+            cancel.store(true);
+        }));
+        QCOMPARE(error, QStringLiteral("Cancelled"));
+        QCOMPARE(calls, 1);
+    }
+
     void resolvesPaths()
     {
         QTemporaryDir tmp;

@@ -526,6 +526,67 @@ private slots:
         QCOMPARE(snap.requestToNs, 1001 * kMs);
     }
 
+    // loadProgress(percent, detail): the load reports 0 .. 100 (non-decreasing, each percent at
+    // most once, detail = false) before timelineReady; a detail read reports with detail = true.
+    void reportsLoadProgress()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        Trace_Data_Source src(m_many);
+        QSignalSpy progress(&src, &Trace_Data_Source::loadProgress);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        int progressBeforeTimeline = -1;
+        connect(&src, &Trace_Data_Source::timelineReady, this,
+                [&] { if (progressBeforeTimeline < 0) progressBeforeTimeline = int(progress.count()); });
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        QVERIFY2(progress.count() >= 5, qPrintable(QString::number(progress.count())));
+        QCOMPARE(progressBeforeTimeline, int(progress.count()));
+        int last = -1;
+        for (const QList<QVariant> &args : std::as_const(progress)) {
+            const int percent = args.at(0).toInt();
+            QVERIFY(percent > last);
+            QVERIFY(percent >= 0 && percent <= 100);
+            QCOMPARE(args.at(1).toBool(), false);
+            last = percent;
+        }
+        QCOMPARE(last, 100);
+
+        progress.clear();
+        src.requestDetail(1000 * kMs, 1001 * kMs);
+        QCOMPARE(timeline.count(), 2);
+        QVERIFY(!progress.isEmpty());
+        for (const QList<QVariant> &args : std::as_const(progress))
+            QCOMPARE(args.at(1).toBool(), true);
+    }
+
+    // TraceTimelineModel::detailProgress: 0 when a request is forwarded, follows
+    // setDetailProgress while loading, ignored when no load is pending.
+    void modelTracksDetailProgress()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "1");
+        Trace_Data_Source src(m_many);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        TraceTimelineModel model;
+        model.addSnapshot(timeline.last().at(0).value<trace::TimelineSnapshot>());
+        QVERIFY(model.windowed());
+        model.setDetailProgress(50); // no load pending
+        QCOMPARE(model.detailProgress(), 0);
+
+        QSignalSpy requested(&model, &TraceTimelineModel::detailRequested);
+        QSignalSpy progressChanged(&model, &TraceTimelineModel::detailProgressChanged);
+        QVERIFY(model.requestDetail(1000 * kMs, 1001 * kMs));
+        QTRY_COMPARE(requested.count(), 1);
+        QVERIFY(model.loadingDetail());
+        QCOMPARE(model.detailProgress(), 0);
+        model.setDetailProgress(40);
+        QCOMPARE(model.detailProgress(), 40);
+        QVERIFY(progressChanged.count() >= 1);
+    }
+
     void detailRequestLoadsOnlyWindow()
     {
         qputenv("EDUMPI_TRACE_BUDGET_MB", "1");

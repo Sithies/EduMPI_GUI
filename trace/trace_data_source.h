@@ -76,6 +76,10 @@ signals:
 
     void loadFailed(QString message);
     void traceInfoReady(QString name, int ranks, double durationSeconds, int unmatched);
+    // Share of the trace read so far (0 .. 100), each value at most once per read: the load
+    // (detail = false, ends with 100 before timelineReady) and each detail read (detail = true;
+    // a read that is superseded or cancelled stops early).
+    void loadProgress(int percent, bool detail);
 
     // After the load (before clusterComponentsReady) and after each detail load.
     void timelineReady(trace::TimelineSnapshot snapshot);
@@ -89,6 +93,8 @@ private:
     void emitBucketRows(const QVector<const trace::BucketRow *> &rows);
     void emitDetailRows(const QVector<const trace::DetailRow *> &details);
     void processDetailRequest();
+    // readOtf2 progress callback emitting loadProgress whenever the percentage changes.
+    trace::ReadProgress progressReporter(bool detail);
 
     QString m_input;
     trace::TraceSummary m_summary;

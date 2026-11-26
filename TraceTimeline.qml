@@ -118,7 +118,7 @@ Rectangle {
                 Text {
                     visible: trace_timeline_view.timelineModel !== null && trace_timeline_view.timelineModel.loadingDetail
                     color: "#ffffff"
-                    text: qsTr("Loading details…")
+                    text: qsTr("Loading details… %1 %").arg(trace_timeline_view.timelineModel ? trace_timeline_view.timelineModel.detailProgress : 0)
                 }
                 Text {
                     color: "#cccccc"

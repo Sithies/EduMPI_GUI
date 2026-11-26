@@ -27,6 +27,7 @@ private slots:
         QSignalSpy info(&ca, &Cluster_Architecture::traceInfoReady);
         QSignalSpy dataIn(&ca, &Cluster_Architecture::dataIn);
         QSignalSpy failed(&ca, &Cluster_Architecture::traceLoadFailed);
+        QSignalSpy progress(&ca, &Cluster_Architecture::traceLoadProgress);
 
         QVERIFY(ca.startTraceSource(m_anchor));
         // A second source cannot be started while one is running.
@@ -34,6 +35,10 @@ private slots:
 
         QTRY_COMPARE(built.count(), 1);
         QVERIFY(failed.isEmpty());
+
+        // The load reported its progress up to 100 % before the components were built.
+        QVERIFY(!progress.isEmpty());
+        QCOMPARE(progress.last().at(0).toInt(), 100);
 
         QCOMPARE(info.count(), 1);
         QCOMPARE(info.first().at(1).toInt(), 4);

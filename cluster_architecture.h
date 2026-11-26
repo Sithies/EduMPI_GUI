@@ -180,6 +180,9 @@ signals:
     //Signals of the trace data source (startTraceSource)
     void traceLoadFailed(QString message);
     void traceInfoReady(QString name, int ranks, double durationSeconds, int unmatched);
+    // Share (0 .. 100) of the trace read by the initial load; detail loads report through
+    // the timeline model (TraceTimelineModel::detailProgress).
+    void traceLoadProgress(int percent);
     void timelineChanged();
     void traceWindowShown(double fromSeconds, double toSeconds, bool exact);
 

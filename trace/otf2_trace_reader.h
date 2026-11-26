@@ -4,6 +4,7 @@
 #include <QString>
 
 #include <atomic>
+#include <functional>
 
 #include "trace_aggregator.h"
 #include "trace_sink.h"
@@ -24,7 +25,12 @@ QString resolveTracePath(const QString &urlOrPath, QString *error);
 // (may be null) holds the final values afterwards (traceLengthNs extended to the last
 // event). Returns false with a readable *error for unreadable / non-OTF2 input, and with
 // "Cancelled" once *cancel becomes true.
+//
+// progress (optional) is called on the reading thread while the events are read, about 200
+// times per read: done = events read so far, total = meta.eventCount; the last call (after
+// all events) has done == total. Not called if the read fails before the first event.
+using ReadProgress = std::function<void(quint64 done, quint64 total)>;
 bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QString *error,
-              const std::atomic_bool *cancel = nullptr);
+              const std::atomic_bool *cancel = nullptr, const ReadProgress &progress = {});
 
 } // namespace trace

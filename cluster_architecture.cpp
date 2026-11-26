@@ -134,6 +134,12 @@ bool Cluster_Architecture::startTraceSource(const QString &tracePathOrUrl){
         if (auto *m = qobject_cast<TraceTimelineModel *>(m_timeline))
             m->addSnapshot(snapshot);
     });
+    connect(src, &Trace_Data_Source::loadProgress, this, [this](int percent, bool detail) {
+        if (!detail)
+            emit traceLoadProgress(percent);
+        else if (auto *m = qobject_cast<TraceTimelineModel *>(m_timeline))
+            m->setDetailProgress(percent);
+    });
     connect(model, &TraceTimelineModel::detailRequested, src, &Trace_Data_Source::requestDetail,
             Qt::DirectConnection);
     connect(src, &Trace_Data_Source::traceWindowShown, this, [this](qint64 fromNs, qint64 toNs, bool exact) {

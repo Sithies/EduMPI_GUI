@@ -731,7 +731,7 @@ bool prepareLocations(OTF2_Reader *reader, const QList<OTF2_LocationRef> &locati
     return true;
 }
 
-OTF2_ErrorCode readEvents(OTF2_Reader *reader, EventTranslator &tr)
+OTF2_ErrorCode readEvents(OTF2_Reader *reader, EventTranslator &tr, quint64 total, const ReadProgress &progress)
 {
     OTF2_GlobalEvtReader *ger = OTF2_Reader_GetGlobalEvtReader(reader);
     if (!ger)
@@ -747,10 +747,24 @@ OTF2_ErrorCode readEvents(OTF2_Reader *reader, EventTranslator &tr)
     const OTF2_ErrorCode regRc = OTF2_Reader_RegisterGlobalEvtCallbacks(reader, ger, cb, &tr);
     OTF2_GlobalEvtReaderCallbacks_Delete(cb);
 
-    uint64_t read = 0;
-    const OTF2_ErrorCode rc = regRc != OTF2_SUCCESS
-        ? regRc
-        : OTF2_Reader_ReadAllGlobalEvents(reader, ger, &read);
+    // Read in chunks of about 0.5 % of the events to report progress in between.
+    OTF2_ErrorCode rc = regRc;
+    if (rc == OTF2_SUCCESS) {
+        const uint64_t chunk = std::clamp<quint64>(total / 200, 1000, quint64(1) << 20);
+        quint64 done = 0;
+        for (;;) {
+            uint64_t read = 0;
+            rc = OTF2_Reader_ReadGlobalEvents(reader, ger, chunk, &read);
+            done += read;
+            if (rc != OTF2_SUCCESS || tr.cancelled())
+                break;
+            const bool finished = read < chunk;
+            if (progress)
+                progress(finished ? std::max(done, total) : std::min(done, total), total);
+            if (finished)
+                break;
+        }
+    }
     OTF2_Reader_CloseGlobalEvtReader(reader, ger);
     OTF2_Reader_CloseEvtFiles(reader);
     return rc;
@@ -766,7 +780,7 @@ bool fail(QString *error, const QString &msg)
 } // namespace
 
 bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QString *error,
-              const std::atomic_bool *cancel)
+              const std::atomic_bool *cancel, const ReadProgress &progress)
 {
     const QFileInfo anchor(anchorFile);
     if (!anchor.isFile())
@@ -822,7 +836,7 @@ bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QStri
     if (!selected.isEmpty()) {
         if (!prepareLocations(reader.get(), selected, &err))
             return fail(error, err);
-        const OTF2_ErrorCode rc = readEvents(reader.get(), tr);
+        const OTF2_ErrorCode rc = readEvents(reader.get(), tr, m.eventCount, progress);
         if (tr.cancelled())
             return fail(error, QStringLiteral("Cancelled"));
         if (rc != OTF2_SUCCESS)

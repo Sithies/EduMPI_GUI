@@ -2,7 +2,11 @@ cmake_minimum_required(VERSION 3.19)
 
 project(GUI_Cluster VERSION 1.0.0 LANGUAGES CXX)
 
-set(CMAKE_BUILD_TYPE Debug)
+# Release unless chosen from outside (-DCMAKE_BUILD_TYPE=..., multi-config generators):
+# a forced Debug build made loading large traces about 7x slower.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 
 set(QT_QML_GENERATE_QMLLS_INI ON)
 

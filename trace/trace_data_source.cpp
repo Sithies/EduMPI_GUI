@@ -140,7 +140,7 @@ void Trace_Data_Source::threadbuildClusterComponents()
     TraceMeta meta;
     const quint64 budget = memoryBudgetBytes();
     BudgetedTimelineSink sink(agg, budget);
-    if (!readOtf2(anchor, sink, &meta, &error, &m_cancel)) {
+    if (!readOtf2(anchor, sink, &meta, &error, &m_cancel, progressReporter(false))) {
         emit loadFailed(error.isEmpty() ? QStringLiteral("Cannot read trace: %1").arg(anchor) : error);
         return;
     }
@@ -404,6 +404,17 @@ void Trace_Data_Source::requestDetail(qint64 fromNs, qint64 toNs)
         QMetaObject::invokeMethod(this, &Trace_Data_Source::processDetailRequest, Qt::QueuedConnection);
 }
 
+trace::ReadProgress Trace_Data_Source::progressReporter(bool detail)
+{
+    return [this, detail, last = -1](quint64 done, quint64 total) mutable {
+        const int percent = total == 0 ? 100 : int(std::min<quint64>(done, total) * 100 / total);
+        if (percent == last)
+            return;
+        last = percent;
+        emit loadProgress(percent, detail);
+    };
+}
+
 void Trace_Data_Source::processDetailRequest()
 {
     qint64 from = 0;
@@ -455,7 +466,7 @@ void Trace_Data_Source::processDetailRequest()
         builder.setByteCap(cap, &m_detailCancel);
         TraceMeta meta;
         QString error;
-        const bool ok = readOtf2(m_anchor, builder, &meta, &error, &m_detailCancel);
+        const bool ok = readOtf2(m_anchor, builder, &meta, &error, &m_detailCancel, progressReporter(true));
         if (gen != m_detailGen.load())
             return; // superseded: the newer request is answered instead
         if (m_cancel.load()) { // the source was stopped during the read

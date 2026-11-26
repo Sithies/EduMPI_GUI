@@ -34,7 +34,11 @@ Window {
 
     property string tracePath: ""
     property real traceDuration: 0
-    property string traceHeader: qsTr("Trace: loading %1").arg(tracePath)
+    property string traceHeader: loadProgress < 0 ? qsTr("Trace: loading %1").arg(tracePath)
+                                                  : qsTr("Trace: loading %1 · %2 %").arg(tracePath).arg(loadProgress)
+    // Share of the trace read by the initial load (-1 = not reported yet); the header and the
+    // progress bar below the busy indicator show it until the views are built.
+    property int loadProgress: -1
     // "Window: … s" after "Show window in 3D/2D/Matrix"; cleared when the bottom bar moves.
     property string traceWindowNote: ""
 
@@ -146,6 +150,9 @@ Window {
                     ascreen.push(page, props)
                 }
             }
+            onTraceLoadProgress: (percent)=>{
+                          run_analysis_win.loadProgress = percent
+                      }
             onTraceInfoReady: (name, ranks, durationSeconds, unmatched)=>{
                           run_analysis_win.traceDuration = durationSeconds
                           run_analysis_win.traceState.name = name
@@ -222,6 +229,37 @@ Window {
             prop_width: 40
             prop_color: "#00FF00"
             running: true
+        }
+
+        // Load progress below the busy indicator: reading the events, then building the views
+        // (aggregation, matrices) after 100 %.
+        Column {
+            id: loadProgressPanel
+            visible: busyindicator.visible && run_analysis_win.loadProgress >= 0
+            anchors.horizontalCenter: ascreen.horizontalCenter
+            anchors.top: busyindicator.bottom
+            anchors.topMargin: 16
+            spacing: 6
+
+            Rectangle {
+                width: 260
+                height: 6
+                radius: 3
+                color: "#4d4d4d"
+                Rectangle {
+                    width: parent.width * Math.max(0, run_analysis_win.loadProgress) / 100
+                    height: parent.height
+                    radius: parent.radius
+                    color: "#00FF00"
+                }
+            }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                color: "#4d4d4d" // the view area is white while loading
+                text: run_analysis_win.loadProgress < 100
+                      ? qsTr("Reading trace… %1 %").arg(run_analysis_win.loadProgress)
+                      : qsTr("Preparing views…")
+            }
         }
 
         Sidebar_Trace{
