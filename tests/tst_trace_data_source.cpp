@@ -2,6 +2,9 @@
 
 #include "memory_budget.h"
 #include "otf2_fixture.h"
+#include "otf2_trace_reader.h"
+#include "timeline_builder.h"
+#include "timeline_store.h"
 #include "timeline_snapshot.h"
 #include "trace_data_source.h"
 #include "trace_timeline_model.h"
@@ -505,6 +508,62 @@ private slots:
         const qint64 cap = timeline.last().at(0).value<trace::TimelineSnapshot>().maxDetailWindowNs;
         QVERIFY(cap > 0);
         QVERIFY(cap < store->traceLengthNs);
+    }
+
+    // The decision is made from the bytes actually kept, not from the (pessimistic) estimate:
+    // a budget the estimate rejects but the real store fits loads the complete store.
+    void budgetAboveRealSizeLoadsFullStore()
+    {
+        trace::TraceMeta meta;
+        quint64 kept = 0;
+        {
+            trace::TraceAggregator agg;
+            trace::TimelineBuilder builder(agg, 0, std::numeric_limits<qint64>::max(), true, 0);
+            QString error;
+            QVERIFY2(trace::readOtf2(m_many, builder, &meta, &error), qPrintable(error));
+            kept = builder.keptBytes();
+        }
+        const quint64 mib = 1024 * 1024;
+        const quint64 pyramid = trace::pyramidBytes(8, trace::kDefaultPyramidLevels);
+        const quint64 budgetMb = (kept * 2 + pyramid) / mib + 1; // planTimelineLoad: (budget - pyramid) / 2
+        const double estimate = double(trace::estimateTimelineBytes(meta.eventCount, meta.hasMetrics, 8,
+                                                                    trace::kDefaultPyramidLevels));
+        QVERIFY2(estimate * 1.5 > double(budgetMb * mib),
+                 qPrintable(QStringLiteral("estimate %1, budget %2 MB").arg(estimate).arg(budgetMb)));
+
+        qputenv("EDUMPI_TRACE_BUDGET_MB", QByteArray::number(budgetMb));
+        Trace_Data_Source src(m_many);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        const auto store = lastStore(timeline);
+        QVERIFY(store);
+        QVERIFY(store->complete);
+    }
+
+    // Windowed after a downgrade: the detail-window cap comes from the bytes per event measured
+    // before the downgrade, which are below the estimate, so the cap is at least the estimate's.
+    void downgradedLoadMeasuresDetailWindowCap()
+    {
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "8");
+        Trace_Data_Source src(m_many);
+        QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+        load(src);
+        if (QTest::currentTestFailed())
+            return;
+        const trace::TimelineSnapshot overview = timeline.last().at(0).value<trace::TimelineSnapshot>();
+        QVERIFY(overview.store && !overview.store->complete);
+        trace::TraceMeta meta;
+        {
+            trace::TraceAggregator agg;
+            QString error;
+            QVERIFY(trace::readOtf2(m_many, agg, &meta, &error));
+        }
+        const qint64 estimated = trace::maxDetailWindowNs(meta, 8, 8 * 1024 * 1024);
+        QVERIFY2(overview.maxDetailWindowNs > estimated,
+                 qPrintable(QStringLiteral("%1 <= %2").arg(overview.maxDetailWindowNs).arg(estimated)));
+        QVERIFY(overview.maxDetailWindowNs < overview.store->traceLengthNs);
     }
 
     // A stopped source still answers a detail request (null store), so that the model's

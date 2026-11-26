@@ -45,6 +45,17 @@ public:
     bool overBudget() const { return m_overBudget; }
     quint64 keptBytes() const { return m_keptBytes; }
 
+    // Downgrade cap for a complete build (keepActivities, whole range; 0 = none, the default),
+    // counted like setByteCap. A record that would take the count past capBytes switches the
+    // build to a pyramid-only overview instead of failing it: everything kept so far is
+    // dropped (long user spans stay, as in an overview build) and the read continues. The
+    // result equals an overview built with keepActivities = false. Unlike setByteCap the read
+    // is not cancelled.
+    void setDowngradeCap(quint64 capBytes) { m_downgradeCap = capBytes; }
+    bool downgraded() const { return m_downgraded; }
+    // keptBytes() when the downgrade happened (0 = not downgraded).
+    quint64 keptBytesAtDowngrade() const { return m_keptAtDowngrade; }
+
     // Call once, after agg.finish().
     std::shared_ptr<TimelineStore> finish();
 
@@ -82,6 +93,8 @@ private:
     void addMessage(const P2PSend *send, const P2PRecv *recv, double lateSender, double lateReceiver);
     // Accounts bytes for a record about to be kept; false (and over budget) past the cap.
     bool reserve(quint64 bytes);
+    // Drops the kept records and continues as a pyramid-only overview (setDowngradeCap).
+    void downgrade();
 
     TraceAggregator &m_agg;
     std::shared_ptr<TimelineStore> m_store;
@@ -94,6 +107,9 @@ private:
     std::atomic_bool *m_capCancel = nullptr;
     quint64 m_keptBytes = 0;
     bool m_overBudget = false;
+    quint64 m_downgradeCap = 0;
+    bool m_downgraded = false;
+    quint64 m_keptAtDowngrade = 0;
     qint64 m_minOverviewSpanNs = 0; // declared length / 4096 (level-1 bin width)
     QVector<double> m_binsPerNs; // per level
     qint64 m_maxNs = 0;

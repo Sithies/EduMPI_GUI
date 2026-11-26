@@ -734,6 +734,78 @@ private slots:
         }
     }
 
+    // Downgrade cap: a full build that crosses the cap drops everything kept so far and
+    // continues as a pyramid-only overview; the result equals an overview built as such from
+    // the start (pyramid, long user spans, unmatched count) and the read is not cancelled.
+    void downgradeCapSwitchesToOverview()
+    {
+        QTemporaryDir tmp;
+        const QStringList anchors{writeWaitallOtf2(tmp.filePath(QStringLiteral("wa"))),
+                                  writeNonblockingOtf2(tmp.filePath(QStringLiteral("nb"))),
+                                  writePhasesOtf2(tmp.filePath(QStringLiteral("ph"))),
+                                  writeManyMessagesOtf2(tmp.filePath(QStringLiteral("many")), 4, 3000)};
+        for (const QString &a : anchors) {
+            const Built full = build(a);
+            QVERIFY(full.store && full.store->complete);
+            const Built overview = build(a, 0, kAll, false, 4);
+            QVERIFY(overview.store);
+
+            TraceAggregator agg;
+            TimelineBuilder builder(agg, 0, kAll, true, 4);
+            std::atomic_bool cancel{false};
+            const quint64 cap = std::max<quint64>(64, (full.store->bytesUsed() - pyramidBytes(int(full.store->rows.size()), 4)) / 3);
+            builder.setDowngradeCap(cap);
+            TraceMeta meta;
+            QString error;
+            QVERIFY2(readOtf2(a, builder, &meta, &error, &cancel), qPrintable(error));
+            QVERIFY(!cancel.load());
+            QVERIFY2(builder.downgraded(), qPrintable(a));
+            QVERIFY(!builder.overBudget());
+            QVERIFY(builder.keptBytesAtDowngrade() > 0);
+            QVERIFY(builder.keptBytesAtDowngrade() <= cap);
+            agg.finish(meta.traceLengthNs);
+            const auto store = builder.finish();
+            QVERIFY(store);
+            QVERIFY(!store->complete);
+            QVERIFY(store->messages.isEmpty());
+            QVERIFY(store->collectives.isEmpty());
+            QCOMPARE(store->unmatchedMessages, overview.store->unmatchedMessages);
+            QCOMPARE(store->rows.size(), overview.store->rows.size());
+            for (int r = 0; r < store->rows.size(); ++r) {
+                const RankRow &got = store->rows[r];
+                const RankRow &want = overview.store->rows[r];
+                QVERIFY(got.activities.isEmpty());
+                QVERIFY(got.links.isEmpty());
+                QCOMPARE(got.userSpans.size(), want.userSpans.size());
+                for (int i = 0; i < got.userSpans.size(); ++i) {
+                    QCOMPARE(got.userSpans[i].startNs, want.userSpans[i].startNs);
+                    QCOMPARE(got.userSpans[i].endNs, want.userSpans[i].endNs);
+                    QCOMPARE(store->functions.value(got.userSpans[i].function),
+                             overview.store->functions.value(want.userSpans[i].function));
+                }
+            }
+            QCOMPARE(store->pyramid.levels, overview.store->pyramid.levels);
+            QVERIFY2(store->pyramid.data == overview.store->pyramid.data, qPrintable(a));
+        }
+    }
+
+    // Below the downgrade cap the build stays complete.
+    void downgradeCapNotReachedKeepsFullStore()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeWaitallOtf2(tmp.path());
+        TraceAggregator agg;
+        TimelineBuilder builder(agg, 0, kAll, true, 4);
+        builder.setDowngradeCap(256 * 1024 * 1024);
+        TraceMeta meta;
+        QString error;
+        QVERIFY(readOtf2(anchor, builder, &meta, &error));
+        QVERIFY(!builder.downgraded());
+        QCOMPARE(builder.keptBytesAtDowngrade(), quint64(0));
+        agg.finish(meta.traceLengthNs);
+        QVERIFY(builder.finish()->complete);
+    }
+
     void estimateIsUpperBound()
     {
         QTemporaryDir tmp;

@@ -17,6 +17,9 @@ namespace {
 constexpr quint64 kMiB = 1024ull * 1024ull;
 constexpr quint64 kFallbackBytes = 2048ull * kMiB;
 constexpr double kBuildHeadroom = 1.5;
+// Process memory per kept byte during a complete load (vector growth, pending links, the
+// aggregator's per-second tables), measured with a 1 GB / 1024-rank trace: ~2.
+constexpr double kLoadHeadroom = 2.0;
 constexpr qint64 kMinWindowNs = 10'000; // 10 us, the smallest zoom window
 } // namespace
 
@@ -81,21 +84,24 @@ void setMemoryBudgetSettingMB(int mb)
     settings.setValue(QStringLiteral("trace/memoryBudgetMB"), std::max(0, mb));
 }
 
-TimelineLoadPlan planTimelineLoad(const TraceMeta &meta, int ranks, quint64 budget)
+TimelineLoadPlan planTimelineLoad(int ranks, quint64 budget)
 {
     TimelineLoadPlan plan;
     plan.pyramidLevels = kDefaultPyramidLevels;
     while (plan.pyramidLevels > 1 && pyramidBytes(ranks, plan.pyramidLevels) > budget / 2)
         --plan.pyramidLevels;
-    const quint64 estimate = estimateTimelineBytes(meta.eventCount, meta.hasMetrics, ranks, plan.pyramidLevels);
-    plan.full = double(estimate) * kBuildHeadroom <= double(budget);
+    const quint64 pyramid = pyramidBytes(ranks, plan.pyramidLevels);
+    const quint64 rest = budget > pyramid ? budget - pyramid : 0;
+    plan.downgradeCapBytes = std::max<quint64>(quint64(double(rest) / kLoadHeadroom), 1);
     return plan;
 }
 
-qint64 maxDetailWindowNs(const TraceMeta &meta, int ranks, quint64 budget)
+qint64 maxDetailWindowNs(const TraceMeta &meta, int ranks, quint64 budget, double bytesPerEvent)
 {
     const qint64 length = std::max<qint64>(meta.traceLengthNs, kMinWindowNs);
-    const double all = double(estimateTimelineBytes(meta.eventCount, meta.hasMetrics, ranks, 0)) * kBuildHeadroom;
+    const double bytes = bytesPerEvent > 0 ? bytesPerEvent * double(meta.eventCount)
+                                           : double(estimateTimelineBytes(meta.eventCount, meta.hasMetrics, ranks, 0));
+    const double all = bytes * kBuildHeadroom;
     const double allowed = double(budget / 4);
     if (all <= allowed)
         return length;

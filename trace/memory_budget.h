@@ -25,22 +25,24 @@ void setMemoryBudgetSettingMB(int mb);
 constexpr int kDefaultPyramidLevels = 4;
 
 struct TimelineLoadPlan {
-    bool full = false; // keep all activities (complete store); else pyramid-only overview
     int pyramidLevels = 1;
+    // TimelineBuilder::setDowngradeCap for the load: the load starts as a complete build and
+    // switches to a pyramid-only overview once the kept records reach this many bytes.
+    quint64 downgradeCapBytes = 1;
 };
 
 // Levels: the most (<= kDefaultPyramidLevels, >= 1) with pyramidBytes(ranks, levels) <= budget / 2.
-// Full mode if estimateTimelineBytes(...) * 1.5 <= budget (headroom for vector growth and the
-// builder's pending links / member lists during the build). The estimate is based on the
-// archive's total event count, so unlike a detail window it does not depend on how the events
-// are distributed over time; the full-mode build therefore has no runtime byte cap.
-TimelineLoadPlan planTimelineLoad(const TraceMeta &meta, int ranks, quint64 budget);
+// Downgrade cap: (budget - pyramid) / 1.5 (headroom for vector growth and the builder's
+// pending links / member lists), at least 1. The decision between complete store and overview
+// is thus made from the bytes really kept while reading, not from an estimate.
+TimelineLoadPlan planTimelineLoad(int ranks, quint64 budget);
 
-// Longest detail window [ns] whose estimated share of the timeline (events evenly spread over
-// the run), with the same 1.5 headroom, stays within budget / 4: the overview (<= budget / 2),
-// the detail still shown and the one being built then fit into the budget together.
+// Longest detail window [ns] whose share of the timeline (events evenly spread over the run),
+// with the same 1.5 headroom, stays within budget / 4: the overview (<= budget / 2), the detail
+// still shown and the one being built then fit into the budget together. bytesPerEvent: kept
+// bytes per OTF2 event measured during the load (0 = unknown: estimateTimelineBytes is used).
 // Returns the trace length if everything fits, at least 10 us. A window denser than average is
 // stopped at runtime by the builder's byte cap (budget / 4, Trace_Data_Source::processDetailRequest).
-qint64 maxDetailWindowNs(const TraceMeta &meta, int ranks, quint64 budget);
+qint64 maxDetailWindowNs(const TraceMeta &meta, int ranks, quint64 budget, double bytesPerEvent = 0);
 
 } // namespace trace

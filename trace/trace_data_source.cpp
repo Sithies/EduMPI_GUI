@@ -55,9 +55,11 @@ struct DetailGroupKey {
     }
 };
 
-// Sink that decides on the load mode once the archive's metadata is known (begin()): it
-// buffers the addRank calls, then creates the TimelineBuilder (in front of agg) for the
-// whole run, keeping activities in full mode only.
+// Sink for the load: buffers the addRank calls until begin(), then creates the TimelineBuilder
+// (in front of agg) as a complete build with the plan's downgrade cap, so that it falls back
+// to a pyramid-only overview only when the records really kept exceed the budget. Notes how
+// many events had been read at the downgrade (setEventsRead from the read's progress) to
+// measure the bytes per event.
 class BudgetedTimelineSink : public TraceSink
 {
 public:
@@ -66,19 +68,29 @@ public:
     void addRank(int rank, const QString &node) override { m_ranks.append({rank, node}); }
     void begin(const TraceMeta &meta) override
     {
-        m_plan = planTimelineLoad(meta, int(m_ranks.size()), m_budget);
-        m_builder.emplace(m_agg, 0, std::numeric_limits<qint64>::max(), m_plan.full, m_plan.pyramidLevels);
+        m_plan = planTimelineLoad(int(m_ranks.size()), m_budget);
+        m_builder.emplace(m_agg, 0, std::numeric_limits<qint64>::max(), true, m_plan.pyramidLevels);
+        m_builder->setDowngradeCap(m_plan.downgradeCapBytes);
         for (const auto &r : std::as_const(m_ranks))
             m_builder->addRank(r.first, r.second);
         m_builder->begin(meta);
     }
-    void addCall(const MpiCall &call) override { sink().addCall(call); }
-    void addSend(const P2PSend &send) override { sink().addSend(send); }
-    void addRecv(const P2PRecv &recv) override { sink().addRecv(recv); }
-    void addCollective(const Collective &coll) override { sink().addCollective(coll); }
-    void addUserRegion(const UserRegion &region) override { sink().addUserRegion(region); }
+    void addCall(const MpiCall &call) override { sink().addCall(call); noteDowngrade(); }
+    void addSend(const P2PSend &send) override { sink().addSend(send); noteDowngrade(); }
+    void addRecv(const P2PRecv &recv) override { sink().addRecv(recv); noteDowngrade(); }
+    void addCollective(const Collective &coll) override { sink().addCollective(coll); noteDowngrade(); }
+    void addUserRegion(const UserRegion &region) override { sink().addUserRegion(region); noteDowngrade(); }
 
+    void setEventsRead(quint64 events) { m_eventsRead = events; }
     int rankCount() const { return int(m_ranks.size()); }
+    // Kept bytes per event before the downgrade; 0 if not downgraded or downgraded within the
+    // first progress step (too few events to measure).
+    double bytesPerEvent() const
+    {
+        if (!m_builder || !m_builder->downgraded() || m_eventsAtDowngrade == 0)
+            return 0;
+        return double(m_builder->keptBytesAtDowngrade()) / double(m_eventsAtDowngrade);
+    }
     // Call after agg.finish(); null if begin() never ran.
     std::shared_ptr<TimelineStore> finish() { return m_builder ? m_builder->finish() : nullptr; }
 
@@ -89,12 +101,22 @@ private:
             begin(TraceMeta{});
         return *m_builder;
     }
+    void noteDowngrade()
+    {
+        if (!m_noted && m_builder->downgraded()) {
+            m_noted = true;
+            m_eventsAtDowngrade = m_eventsRead;
+        }
+    }
 
     TraceAggregator &m_agg;
     quint64 m_budget;
     QVector<QPair<int, QString>> m_ranks;
     TimelineLoadPlan m_plan;
     std::optional<TimelineBuilder> m_builder;
+    quint64 m_eventsRead = 0;
+    quint64 m_eventsAtDowngrade = 0;
+    bool m_noted = false;
 };
 
 qint64 floorDiv(qint64 a, qint64 b)
@@ -140,7 +162,12 @@ void Trace_Data_Source::threadbuildClusterComponents()
     TraceMeta meta;
     const quint64 budget = memoryBudgetBytes();
     BudgetedTimelineSink sink(agg, budget);
-    if (!readOtf2(anchor, sink, &meta, &error, &m_cancel, progressReporter(false))) {
+    const ReadProgress report = progressReporter(false);
+    const auto progress = [&sink, &report](quint64 done, quint64 total) {
+        sink.setEventsRead(done);
+        report(done, total);
+    };
+    if (!readOtf2(anchor, sink, &meta, &error, &m_cancel, progress)) {
         emit loadFailed(error.isEmpty() ? QStringLiteral("Cannot read trace: %1").arg(anchor) : error);
         return;
     }
@@ -176,7 +203,7 @@ void Trace_Data_Source::threadbuildClusterComponents()
 
     emit traceInfoReady(m_meta.name, m_summary.rankCount, double(m_meta.traceLengthNs) / 1e9,
                         m_summary.unmatchedMessages);
-    m_maxDetailWindowNs = maxDetailWindowNs(m_meta, m_rankCount, m_budget);
+    m_maxDetailWindowNs = maxDetailWindowNs(m_meta, m_rankCount, m_budget, sink.bytesPerEvent());
     TimelineSnapshot overview{m_overview};
     overview.maxDetailWindowNs = m_maxDetailWindowNs;
     emit timelineReady(overview);
