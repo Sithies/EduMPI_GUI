@@ -575,10 +575,13 @@ void TraceGraphItem::zoomToFinding(int index)
         resetView();
         return;
     }
-    const double margin = 60;
+    // Room around the box: a few node spacings, so the neighbours stay in view.
+    const double pad = 3 * m_unitSpacing * radius();
+    box.adjust(-pad, -pad, pad, pad);
+    const double margin = 40;
     const double z = std::clamp(std::min((width() - 2 * margin) / std::max(box.width(), 1.0),
                                          (height() - 2 * margin) / std::max(box.height(), 1.0)),
-                                1.0, std::min(kMaxZoom, 12.0));
+                                1.0, 6.0);
     m_zoom = z;
     // The box centre to the middle of the view.
     m_pan = -(box.center() - center()) * m_zoom;
@@ -1140,6 +1143,24 @@ void TraceGraphItem::paint(QPainter *painter)
                 painter->setBrush(c);
                 painter->drawPolygon(head);
             }
+        }
+    }
+
+    // Edges among the highlighted ranks also when they are not among the heaviest drawn.
+    if (highlight) {
+        QSet<int> drawn(m_drawn.cbegin(), m_drawn.cend());
+        for (int i = 0; i < m_graph.edges.size(); ++i) {
+            const GraphEdge &e = m_graph.edges[i];
+            if (drawn.contains(i) || e.kind != GraphEdge::Kind::P2P || !m_highlightNodes[e.from] || !m_highlightNodes[e.to])
+                continue;
+            const EdgePath path = edgePath(e);
+            QPen pen(kP2PColor, 2);
+            pen.setCapStyle(Qt::RoundCap);
+            painter->setPen(pen);
+            painter->setBrush(Qt::NoBrush);
+            QPainterPath pp(path.from);
+            pp.quadTo(path.control, path.to);
+            painter->drawPath(pp);
         }
     }
 

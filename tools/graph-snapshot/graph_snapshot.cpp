@@ -232,6 +232,10 @@ int main(int argc, char **argv)
                     graph->zoomToFinding(kv.section(QLatin1Char('='), 1).toInt());
                     continue;
                 }
+                if (key == QLatin1String("highlight") && graph) {
+                    graph->setHighlightedFinding(kv.section(QLatin1Char('='), 1).toInt());
+                    continue;
+                }
                 if (key == QLatin1String("resetView") && graph) {
                     graph->resetView();
                     graph->setHighlightedFinding(-1);
