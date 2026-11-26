@@ -71,6 +71,11 @@ struct ReadOptions {
     // sink gets addRank / begin() as usual, then restoreMatchState and the records from the
     // checkpoint on. Records of the same window equal those of a read from the start.
     std::shared_ptr<const ReadCheckpoint> resumeFrom;
+    // Reads the OTF2 events on a worker thread while the calling thread runs the sink: same
+    // calls in the same order, all on the calling thread (progress too). Only for reads of the
+    // whole trace (no resumeFrom, no early stop: TraceSink::stopAfterNs() < 0 or unbounded);
+    // ignored otherwise.
+    bool pipelined = false;
 };
 bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QString *error,
               const ReadOptions &options);

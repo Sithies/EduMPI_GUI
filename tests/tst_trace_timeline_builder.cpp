@@ -820,6 +820,7 @@ private slots:
                                   writeNonblockingOtf2(tmp.filePath(QStringLiteral("nb"))),
                                   writePhasesOtf2(tmp.filePath(QStringLiteral("ph")))};
         const double windows[][2] = {{0.0, 0.05}, {0.1, 0.12}, {0.3, 0.35}, {0.5, 0.52}, {0.62, 0.7}, {0.9, 1.0}};
+        for (const bool pipelined : {false, true})
         for (const QString &anchor : anchors) {
             TraceIndex index;
             TraceMeta meta;
@@ -829,6 +830,7 @@ private slots:
                 ReadOptions opt;
                 opt.buildIndex = &index;
                 opt.indexCheckpoints = 32;
+                opt.pipelined = pipelined; // checkpoints' matching state saved through the queue
                 QString error;
                 QVERIFY2(readOtf2(anchor, builder, &meta, &error, opt), qPrintable(error));
             }

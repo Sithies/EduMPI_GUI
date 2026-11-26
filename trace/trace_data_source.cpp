@@ -182,6 +182,9 @@ void Trace_Data_Source::threadbuildClusterComponents()
     options.progress = progress;
     options.buildIndex = &index;
     options.indexCheckpoints = kIndexCheckpoints;
+    // Reading and evaluating in parallel (two threads); with a single core it would only add
+    // the hand-over.
+    options.pipelined = QThread::idealThreadCount() >= 2;
     if (!readOtf2(anchor, sink, &meta, &error, options)) {
         emit loadFailed(error.isEmpty() ? QStringLiteral("Cannot read trace: %1").arg(anchor) : error);
         return;

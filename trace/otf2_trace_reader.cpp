@@ -11,7 +11,14 @@
 #include <otf2/otf2.h>
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdarg>
+#include <deque>
+#include <limits>
+#include <optional>
+#include <thread>
+#include <variant>
+#include <vector>
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -533,7 +540,7 @@ public:
             cp->positions.insert(loc, m_locations.value(loc).delivered + 1);
         cp->locations = m_locations;
         cp->maxNs = m_maxNs;
-        cp->match = m_sink.saveMatchState();
+        m_sink.saveMatchStateInto(&cp->match);
         m_index->append(ns, std::move(cp));
     }
 
@@ -1012,6 +1019,107 @@ OTF2_ErrorCode readEvents(OTF2_Reader *reader, EventTranslator &tr, quint64 tota
     return rc;
 }
 
+// Pipelined reads: the reader thread's EventTranslator writes into a RecordPipe, which hands
+// the records in batches through a bounded queue to the calling thread (drainInto).
+class RecordPipe : public TraceSink
+{
+public:
+    explicit RecordPipe(const std::atomic_bool *cancel) : m_cancel(cancel) { m_batch.reserve(kBatch); }
+
+    // Producer side (reader thread).
+    void addRank(int, const QString &) override {} // ranks go to the sink directly
+    void addCall(const MpiCall &call) override { put(call); }
+    void addSend(const P2PSend &send) override { put(send); }
+    void addRecv(const P2PRecv &recv) override { put(recv); }
+    void addCollective(const Collective &coll) override { put(coll); }
+    void addUserRegion(const UserRegion &region) override { put(region); }
+    void saveMatchStateInto(std::shared_ptr<const MatchState> *target) override { put(SaveMatch{target}); }
+    void progress(quint64 done, quint64 total)
+    {
+        put(Progress{done, total});
+        flush(); // progress reaches the sink without waiting for a full batch
+    }
+    void close()
+    {
+        flush();
+        std::lock_guard lock(m_mutex);
+        m_closed = true;
+        m_notEmpty.notify_all();
+    }
+
+    // Consumer side (calling thread): until close(); records are dropped once *cancel is set.
+    void drainInto(TraceSink &sink, const ReadProgress &progress)
+    {
+        for (;;) {
+            std::vector<Record> batch;
+            {
+                std::unique_lock lock(m_mutex);
+                m_notEmpty.wait(lock, [this] { return !m_queue.empty() || m_closed; });
+                if (m_queue.empty())
+                    return;
+                batch = std::move(m_queue.front());
+                m_queue.pop_front();
+                m_notFull.notify_one();
+            }
+            if (m_cancel && m_cancel->load(std::memory_order_relaxed))
+                continue;
+            for (Record &r : batch) {
+                std::visit([&](auto &rec) { deliver(sink, progress, rec); }, r);
+            }
+        }
+    }
+
+private:
+    struct SaveMatch {
+        std::shared_ptr<const MatchState> *target;
+    };
+    struct Progress {
+        quint64 done;
+        quint64 total;
+    };
+    using Record = std::variant<MpiCall, P2PSend, P2PRecv, Collective, UserRegion, SaveMatch, Progress>;
+    static constexpr size_t kBatch = 16384;
+    static constexpr size_t kMaxBatches = 8; // bounds the memory of records in flight
+
+    template <typename T>
+    void put(T &&record)
+    {
+        m_batch.emplace_back(std::forward<T>(record));
+        if (m_batch.size() >= kBatch)
+            flush();
+    }
+    void flush()
+    {
+        if (m_batch.empty())
+            return;
+        std::unique_lock lock(m_mutex);
+        m_notFull.wait(lock, [this] { return m_queue.size() < kMaxBatches; });
+        m_queue.push_back(std::move(m_batch));
+        m_batch = {};
+        m_batch.reserve(kBatch);
+        m_notEmpty.notify_one();
+    }
+    static void deliver(TraceSink &s, const ReadProgress &, const MpiCall &r) { s.addCall(r); }
+    static void deliver(TraceSink &s, const ReadProgress &, const P2PSend &r) { s.addSend(r); }
+    static void deliver(TraceSink &s, const ReadProgress &, const P2PRecv &r) { s.addRecv(r); }
+    static void deliver(TraceSink &s, const ReadProgress &, const Collective &r) { s.addCollective(r); }
+    static void deliver(TraceSink &s, const ReadProgress &, const UserRegion &r) { s.addUserRegion(r); }
+    static void deliver(TraceSink &s, const ReadProgress &, const SaveMatch &r) { s.saveMatchStateInto(r.target); }
+    static void deliver(TraceSink &, const ReadProgress &p, const Progress &r)
+    {
+        if (p)
+            p(r.done, r.total);
+    }
+
+    const std::atomic_bool *m_cancel;
+    std::vector<Record> m_batch;
+    std::mutex m_mutex;
+    std::condition_variable m_notEmpty;
+    std::condition_variable m_notFull;
+    std::deque<std::vector<Record>> m_queue;
+    bool m_closed = false;
+};
+
 bool fail(QString *error, const QString &msg)
 {
     if (error)
@@ -1060,7 +1168,15 @@ bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QStri
     for (auto it = ranks.cbegin(); it != ranks.cend(); ++it)
         sink.addRank(it.value(), nodeNameOf(defs, defs.locationGroups.value(it.key()).parent));
 
-    EventTranslator tr(sink, defs, cancel);
+    // Pipelined: only whole-trace reads (no resume, no early stop).
+    const qint64 stopAfter = sink.stopAfterNs();
+    const bool pipelined = options.pipelined && !options.resumeFrom
+        && (stopAfter < 0 || stopAfter == std::numeric_limits<qint64>::max());
+    std::optional<RecordPipe> pipe;
+    if (pipelined)
+        pipe.emplace(cancel);
+
+    EventTranslator tr(pipe ? static_cast<TraceSink &>(*pipe) : sink, defs, cancel);
     QList<OTF2_LocationRef> selected;
     TraceMeta m;
     for (auto it = defs.locations.cbegin(); it != defs.locations.cend(); ++it) {
@@ -1084,7 +1200,7 @@ bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QStri
         ? QDateTime()
         : QDateTime::fromMSecsSinceEpoch(qint64(defs.realtime / 1'000'000), QTimeZone::UTC);
     sink.begin(m);
-    tr.setStopAfter(sink.stopAfterNs());
+    tr.setStopAfter(pipelined ? -1 : stopAfter);
 
     // Resuming: locations that delivered all their events before the checkpoint are not read.
     QList<OTF2_LocationRef> toRead = selected;
@@ -1101,32 +1217,58 @@ bool readOtf2(const QString &anchorFile, TraceSink &sink, TraceMeta *meta, QStri
         tr.resume(*resume);
     }
 
-    if (!toRead.isEmpty()) {
-        if (!prepareLocations(reader.get(), toRead, &err))
-            return fail(error, err);
-        if (resume) {
-            for (OTF2_LocationRef loc : std::as_const(toRead)) {
-                const uint64_t next = resume->positions.value(loc, 1);
-                if (next <= 1)
-                    continue;
-                OTF2_EvtReader *er = OTF2_Reader_GetEvtReader(reader.get(), loc);
-                if (!er || OTF2_EvtReader_Seek(er, next) != OTF2_SUCCESS)
-                    return fail(error, QStringLiteral("Cannot seek in the trace (location %1)").arg(loc));
+    // The event part: on the calling thread, or (pipelined) on a worker thread whose records the
+    // calling thread passes on to the sink meanwhile. Error texts are made on the reading thread
+    // (Otf2ErrorCapture is per thread).
+    const auto readPart = [&](const ReadProgress &progress, QString *readError) -> bool {
+        if (!toRead.isEmpty()) {
+            if (!prepareLocations(reader.get(), toRead, readError))
+                return false;
+            if (resume) {
+                for (OTF2_LocationRef loc : std::as_const(toRead)) {
+                    const uint64_t next = resume->positions.value(loc, 1);
+                    if (next <= 1)
+                        continue;
+                    OTF2_EvtReader *er = OTF2_Reader_GetEvtReader(reader.get(), loc);
+                    if (!er || OTF2_EvtReader_Seek(er, next) != OTF2_SUCCESS) {
+                        *readError = QStringLiteral("Cannot seek in the trace (location %1)").arg(loc);
+                        return false;
+                    }
+                }
+            }
+            if (options.buildIndex) {
+                options.buildIndex->clear();
+                tr.setIndex(options.buildIndex, selected, options.indexCheckpoints, m.traceLengthNs);
+            }
+            const OTF2_ErrorCode rc = readEvents(reader.get(), tr, total, progress);
+            if (tr.cancelled()) {
+                *readError = QStringLiteral("Cancelled");
+                return false;
+            }
+            if (rc != OTF2_SUCCESS) {
+                *readError = QStringLiteral("Cannot read OTF2 events: %1").arg(Otf2ErrorCapture::message(rc));
+                return false;
             }
         }
-        if (options.buildIndex) {
-            options.buildIndex->clear();
-            tr.setIndex(options.buildIndex, selected, options.indexCheckpoints, m.traceLengthNs);
-        }
-        const OTF2_ErrorCode rc = readEvents(reader.get(), tr, total, options.progress);
-        if (tr.cancelled())
-            return fail(error, QStringLiteral("Cancelled"));
-        if (rc != OTF2_SUCCESS)
-            return fail(error, QStringLiteral("Cannot read OTF2 events: %1").arg(Otf2ErrorCapture::message(rc)));
-    }
+        m.traceLengthNs = std::max(m.traceLengthNs, tr.maxEventNs());
+        tr.closeAll(m.traceLengthNs);
+        return true;
+    };
 
-    m.traceLengthNs = std::max(m.traceLengthNs, tr.maxEventNs());
-    tr.closeAll(m.traceLengthNs);
+    bool ok = false;
+    if (pipe) {
+        std::thread worker([&] {
+            Otf2ErrorCapture workerCapture;
+            ok = readPart([&](quint64 done, quint64 all) { pipe->progress(done, all); }, &err);
+            pipe->close();
+        });
+        pipe->drainInto(sink, options.progress);
+        worker.join();
+    } else {
+        ok = readPart(options.progress, &err);
+    }
+    if (!ok)
+        return fail(error, err);
 
     if (meta)
         *meta = m;

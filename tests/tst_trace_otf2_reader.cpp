@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QThread>
 
 #include <otf2/otf2.h>
 
@@ -36,6 +37,52 @@ struct RecordingSink : TraceSink {
     void addRecv(const P2PRecv &) override { ++calls; }
     void addCollective(const Collective &) override { ++calls; }
     void addUserRegion(const UserRegion &r) override { userRegions.append(r); }
+};
+// Logs every sink call (and the thread it came on) as text, in order.
+struct LoggingSink : TraceSink {
+    QStringList log;
+    bool allOnThread = true;
+    QThread *const thread = QThread::currentThread();
+    void noteThread()
+    {
+        if (QThread::currentThread() != thread)
+            allOnThread = false;
+    }
+    void begin(const TraceMeta &m) override
+    {
+        noteThread();
+        log << QStringLiteral("begin %1 %2 %3").arg(m.name).arg(m.eventCount).arg(m.traceLengthNs);
+    }
+    void addRank(int rank, const QString &node) override
+    {
+        noteThread();
+        log << QStringLiteral("rank %1 %2").arg(rank).arg(node);
+    }
+    void addCall(const MpiCall &c) override
+    {
+        noteThread();
+        log << QStringLiteral("call %1 %2 %3 %4").arg(c.rank).arg(c.function).arg(c.enterNs).arg(c.leaveNs);
+    }
+    void addSend(const P2PSend &x) override
+    {
+        noteThread();
+        log << QStringLiteral("send %1>%2 %3 %4 %5 %6").arg(x.rank).arg(x.peer).arg(x.tag).arg(x.bytes).arg(x.enterNs).arg(x.leaveNs);
+    }
+    void addRecv(const P2PRecv &x) override
+    {
+        noteThread();
+        log << QStringLiteral("recv %1<%2 %3 %4 %5 %6").arg(x.rank).arg(x.peer).arg(x.tag).arg(x.bytes).arg(x.enterNs).arg(x.leaveNs);
+    }
+    void addCollective(const Collective &x) override
+    {
+        noteThread();
+        log << QStringLiteral("coll %1 %2 %3 %4 %5").arg(x.rank).arg(x.comm).arg(x.function).arg(x.enterNs).arg(x.leaveNs);
+    }
+    void addUserRegion(const UserRegion &u) override
+    {
+        noteThread();
+        log << QStringLiteral("user %1 %2 %3 %4 %5").arg(u.rank).arg(u.function).arg(u.depth).arg(u.enterNs).arg(u.leaveNs);
+    }
 };
 } // namespace
 
@@ -375,6 +422,69 @@ private slots:
         const std::atomic_bool cancel{true};
         QVERIFY(!readOtf2(anchor, agg, &meta, &error, &cancel));
         QCOMPARE(error, QStringLiteral("Cancelled"));
+    }
+
+    // Pipelined read (ReadOptions::pipelined: OTF2 read on a worker thread): the sink gets the
+    // same calls in the same order, all on the calling thread, and the same progress calls.
+    void pipelinedReadDeliversSameRecords()
+    {
+        QTemporaryDir tmp;
+        const QStringList anchors{writeManyMessagesOtf2(tmp.filePath(QStringLiteral("many")), 4, 3000),
+                                  writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))),
+                                  writeWaitallOtf2(tmp.filePath(QStringLiteral("wa"))),
+                                  writeNonblockingOtf2(tmp.filePath(QStringLiteral("nb"))),
+                                  writePhasesOtf2(tmp.filePath(QStringLiteral("ph")))};
+        for (const QString &anchor : anchors) {
+            const auto run = [&](bool pipelined, bool *sameThread) {
+                LoggingSink sink;
+                ReadOptions opt;
+                opt.pipelined = pipelined;
+                opt.progress = [&sink](quint64 done, quint64 total) {
+                    sink.log << QStringLiteral("progress %1/%2").arg(done).arg(total);
+                    sink.noteThread();
+                };
+                TraceMeta meta;
+                QString error;
+                if (!readOtf2(anchor, sink, &meta, &error, opt))
+                    sink.log << QStringLiteral("error ") + error;
+                *sameThread = sink.allOnThread == true;
+                return sink.log;
+            };
+            bool directThread = false;
+            bool pipeThread = false;
+            const QStringList direct = run(false, &directThread);
+            const QStringList pipelined = run(true, &pipeThread);
+            QVERIFY(direct.size() > 10);
+            QVERIFY2(pipeThread, qPrintable(anchor));
+            QCOMPARE(pipelined.size(), direct.size());
+            for (int i = 0; i < direct.size(); ++i)
+                QVERIFY2(pipelined[i] == direct[i],
+                         qPrintable(QStringLiteral("%1 #%2: %3 vs %4").arg(anchor).arg(i).arg(pipelined[i], direct[i])));
+        }
+    }
+
+    // Cancelling a pipelined read (from the progress callback, on the calling thread) ends it
+    // with "Cancelled"; the worker thread is joined, nothing hangs.
+    void cancelsPipelinedRead()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeManyMessagesOtf2(tmp.path(), 4, 20000);
+        QVERIFY(!anchor.isEmpty());
+        TraceAggregator agg;
+        std::atomic_bool cancel{false};
+        ReadOptions opt;
+        opt.pipelined = true;
+        opt.cancel = &cancel;
+        int calls = 0;
+        opt.progress = [&](quint64, quint64) {
+            if (++calls == 2)
+                cancel.store(true);
+        };
+        TraceMeta meta;
+        QString error;
+        QVERIFY(!readOtf2(anchor, agg, &meta, &error, opt));
+        QCOMPARE(error, QStringLiteral("Cancelled"));
+        QCOMPARE(calls, 2); // records after the cancel are dropped, progress included
     }
 
     // Progress: several calls with the same total (= meta.eventCount), done never decreasing,

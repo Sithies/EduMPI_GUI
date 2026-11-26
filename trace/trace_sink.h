@@ -41,6 +41,9 @@ public:
     // before a read that resumes from a checkpoint (after begin()). Sinks without matching
     // state ignore both; forwarding sinks pass them on to their aggregator.
     virtual std::shared_ptr<const MatchState> saveMatchState() const { return {}; }
+    // Saves into *target once all records before this call are processed: at once here; a
+    // pipelined read (ReadOptions::pipelined) does it when the sink reaches this point.
+    virtual void saveMatchStateInto(std::shared_ptr<const MatchState> *target) { *target = saveMatchState(); }
     virtual void restoreMatchState(const std::shared_ptr<const MatchState> &state) { Q_UNUSED(state); }
 };
 
