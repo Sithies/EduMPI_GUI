@@ -1459,6 +1459,288 @@ QVector<QPointF> spectralCoordinates(const Backbone &b, const std::atomic_bool *
     return out;
 }
 
+// Eigen-decomposition of a small symmetric matrix (Jacobi rotations): eigenvalues ascending,
+// eigenvectors as columns of vecs (row-major dim x dim).
+void jacobiEigen(QVector<double> a, int dim, QVector<double> &values, QVector<double> &vecs)
+{
+    vecs = QVector<double>(dim * dim, 0.0);
+    for (int i = 0; i < dim; ++i)
+        vecs[i * dim + i] = 1;
+    for (int sweep = 0; sweep < 100; ++sweep) {
+        double off = 0;
+        for (int p = 0; p < dim; ++p)
+            for (int q = p + 1; q < dim; ++q)
+                off += a[p * dim + q] * a[p * dim + q];
+        if (off < 1e-22)
+            break;
+        for (int p = 0; p < dim; ++p)
+            for (int q = p + 1; q < dim; ++q) {
+                const double apq = a[p * dim + q];
+                if (std::abs(apq) < 1e-300)
+                    continue;
+                const double theta = (a[q * dim + q] - a[p * dim + p]) / (2 * apq);
+                const double t = (theta >= 0 ? 1.0 : -1.0) / (std::abs(theta) + std::sqrt(theta * theta + 1));
+                const double c = 1 / std::sqrt(t * t + 1), s = t * c;
+                for (int k = 0; k < dim; ++k) {
+                    const double akp = a[k * dim + p], akq = a[k * dim + q];
+                    a[k * dim + p] = c * akp - s * akq;
+                    a[k * dim + q] = s * akp + c * akq;
+                }
+                for (int k = 0; k < dim; ++k) {
+                    const double apk = a[p * dim + k], aqk = a[q * dim + k];
+                    a[p * dim + k] = c * apk - s * aqk;
+                    a[q * dim + k] = s * apk + c * aqk;
+                }
+                for (int k = 0; k < dim; ++k) {
+                    const double vkp = vecs[k * dim + p], vkq = vecs[k * dim + q];
+                    vecs[k * dim + p] = c * vkp - s * vkq;
+                    vecs[k * dim + q] = s * vkp + c * vkq;
+                }
+            }
+    }
+    // Sort ascending.
+    QVector<int> order(dim);
+    for (int i = 0; i < dim; ++i)
+        order[i] = i;
+    std::sort(order.begin(), order.end(), [&](int x, int y) { return a[x * dim + x] < a[y * dim + y]; });
+    values.resize(dim);
+    QVector<double> sorted(dim * dim);
+    for (int j = 0; j < dim; ++j) {
+        values[j] = a[order[j] * dim + order[j]];
+        for (int k = 0; k < dim; ++k)
+            sorted[k * dim + j] = vecs[k * dim + order[j]];
+    }
+    vecs = sorted;
+}
+
+// The k smallest non-trivial eigenvectors of the (log-weighted) Laplacian by block power
+// iteration on cI - L with orthonormalisation (constant vector deflated).
+QVector<QVector<double>> laplacianEigenvectors(const Backbone &b, int k, const std::atomic_bool *cancel)
+{
+    const int n = b.n;
+    QVector<QVector<std::pair<int, double>>> adj = b.adj;
+    QVector<double> deg(n, 0.0);
+    double maxDeg = 0;
+    for (int i = 0; i < n; ++i) {
+        for (auto &[j, w] : adj[i]) {
+            w = 1.0 + std::log1p(w) * 0; // structure only: equal weights
+            deg[i] += w;
+        }
+        maxDeg = std::max(maxDeg, deg[i]);
+    }
+    const double c = 2 * maxDeg + 1e-9;
+    QVector<QVector<double>> v(k, QVector<double>(n));
+    for (int e = 0; e < k; ++e)
+        for (int i = 0; i < n; ++i)
+            v[e][i] = std::sin(0.37 + i * (e + 1) * 1.618 + e) + 1e-3 * ((i * 7 + e) % 11);
+    auto orthonormalise = [&] {
+        for (int e = 0; e < k; ++e) {
+            double mean = 0;
+            for (double q : v[e])
+                mean += q / n;
+            for (double &q : v[e])
+                q -= mean;
+            for (int f = 0; f < e; ++f) {
+                double dot = 0;
+                for (int i = 0; i < n; ++i)
+                    dot += v[e][i] * v[f][i];
+                for (int i = 0; i < n; ++i)
+                    v[e][i] -= dot * v[f][i];
+            }
+            double norm = 0;
+            for (double q : v[e])
+                norm += q * q;
+            norm = std::sqrt(std::max(norm, 1e-300));
+            for (double &q : v[e])
+                q /= norm;
+        }
+    };
+    orthonormalise();
+    const int iterations = std::clamp(n * 3, 400, 3000);
+    QVector<double> nv(n);
+    for (int it = 0; it < iterations; ++it) {
+        if (cancel && (it & 63) == 0 && cancel->load())
+            break;
+        for (int e = 0; e < k; ++e) {
+            for (int i = 0; i < n; ++i) {
+                double lv = deg[i] * v[e][i];
+                for (const auto &[j, w] : adj[i])
+                    lv -= w * v[e][j];
+                nv[i] = c * v[e][i] - lv;
+            }
+            v[e] = nv;
+        }
+        orthonormalise();
+    }
+    return v;
+}
+
+// Splits a 4-dimensional (degenerate) eigenspace of a square torus into its two circle planes:
+// the quadratic forms Q with u_i^T Q u_i equal for all nodes are the plane projections; one
+// orthogonal to the identity, eigen-decomposed, separates them. Returns 4 vectors (plane 1, 2).
+QVector<QVector<double>> splitPlanes(const QVector<QVector<double>> &v, int n)
+{
+    constexpr int kD = 10;
+    const int pairs[kD][2] = {{0, 0}, {1, 1}, {2, 2}, {3, 3}, {0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}};
+    QVector<double> mean(kD, 0.0);
+    QVector<QVector<double>> f(n, QVector<double>(kD));
+    for (int i = 0; i < n; ++i)
+        for (int d = 0; d < kD; ++d) {
+            const double x = v[pairs[d][0]][i] * v[pairs[d][1]][i] * n * (pairs[d][0] == pairs[d][1] ? 1 : 2);
+            f[i][d] = x;
+            mean[d] += x / n;
+        }
+    QVector<double> ata(kD * kD, 0.0);
+    for (int i = 0; i < n; ++i)
+        for (int x = 0; x < kD; ++x)
+            for (int y = 0; y < kD; ++y)
+                ata[x * kD + y] += (f[i][x] - mean[x]) * (f[i][y] - mean[y]);
+    QVector<double> id(kD, 0.0);
+    for (int d = 0; d < 4; ++d)
+        id[d] = 0.5;
+    double trace = 0;
+    for (int x = 0; x < kD; ++x)
+        trace += ata[x * kD + x];
+    for (int x = 0; x < kD; ++x)
+        for (int y = 0; y < kD; ++y)
+            ata[x * kD + y] += (trace + 1) * id[x] * id[y]; // the identity is not wanted
+    QVector<double> vals, vecs;
+    jacobiEigen(ata, kD, vals, vecs);
+    QVector<double> q(16, 0.0);
+    for (int d = 0; d < kD; ++d) {
+        const double x = vecs[d * kD + 0];
+        const int r = pairs[d][0], c = pairs[d][1];
+        q[r * 4 + c] += x;
+        if (r != c)
+            q[c * 4 + r] += x;
+    }
+    QVector<double> qv, qe;
+    jacobiEigen(q, 4, qv, qe);
+    QVector<QVector<double>> out(4, QVector<double>(n, 0.0));
+    const int order[4] = {3, 2, 1, 0}; // plane 1: two largest, plane 2: two smallest
+    for (int k = 0; k < 4; ++k)
+        for (int i = 0; i < n; ++i)
+            for (int d = 0; d < 4; ++d)
+                out[k][i] += v[d][i] * qe[d * 4 + order[k]];
+    return out;
+}
+
+// Angle of each node in the plane of two vectors, and how circular the points are
+// (coefficient of variation of the radius; 0 = a perfect circle).
+QVector<double> anglesOf(const QVector<double> &x, const QVector<double> &y, double *spread)
+{
+    const int n = int(x.size());
+    QVector<double> ang(n);
+    double sum = 0, sum2 = 0;
+    for (int i = 0; i < n; ++i) {
+        ang[i] = std::atan2(y[i], x[i]);
+        const double r = std::hypot(x[i], y[i]);
+        sum += r;
+        sum2 += r * r;
+    }
+    const double mean = sum / std::max(1, n);
+    *spread = mean > 0 ? std::sqrt(std::max(0.0, sum2 / n - mean * mean)) / mean : 1;
+    return ang;
+}
+
+// |mean of exp(i (a - m b))|: 1 when angle a is m times angle b (a harmonic), 0 when unrelated.
+double harmonicOf(const QVector<double> &a, const QVector<double> &b, int m)
+{
+    double c = 0, s = 0;
+    for (int i = 0; i < a.size(); ++i) {
+        c += std::cos(a[i] - m * b[i]);
+        s += std::sin(a[i] - m * b[i]);
+    }
+    return std::hypot(c, s) / std::max<qsizetype>(1, a.size());
+}
+
+// Torus coordinates without knowing the numbering: the smallest non-trivial Laplacian
+// eigenvectors (Rayleigh-Ritz on 8 power-iterated vectors) come in pairs of equal eigenvalue;
+// each pair of a torus direction puts the nodes on a circle. The first circle pair and the next
+// one that is not a harmonic of it (2x, 3x the first angle) give the two angles. A degenerate
+// group of four (square torus) is split by splitPlanes. Empty if no two circles are found.
+QVector<QPointF> torusCoordinates(const Backbone &b, const std::atomic_bool *cancel)
+{
+    const int n = b.n;
+    if (n < 9)
+        return {};
+    constexpr int kK = 8;
+    QVector<QVector<double>> v = laplacianEigenvectors(b, kK, cancel);
+    // Rayleigh-Ritz: eigenpairs within the subspace.
+    auto lap = [&](const QVector<double> &x) {
+        QVector<double> y(n);
+        for (int i = 0; i < n; ++i) {
+            double d = 0, s = 0;
+            for (const auto &[j, w] : b.adj[i]) {
+                d += 1;
+                s += x[j];
+            }
+            y[i] = d * x[i] - s;
+        }
+        return y;
+    };
+    QVector<QVector<double>> lv(kK);
+    for (int e = 0; e < kK; ++e)
+        lv[e] = lap(v[e]);
+    QVector<double> m(kK * kK);
+    for (int x = 0; x < kK; ++x)
+        for (int y = 0; y < kK; ++y) {
+            double dot = 0;
+            for (int i = 0; i < n; ++i)
+                dot += v[x][i] * lv[y][i];
+            m[x * kK + y] = dot;
+        }
+    for (int x = 0; x < kK; ++x)
+        for (int y = x + 1; y < kK; ++y)
+            m[x * kK + y] = m[y * kK + x] = 0.5 * (m[x * kK + y] + m[y * kK + x]);
+    QVector<double> vals, vecs;
+    jacobiEigen(m, kK, vals, vecs);
+    QVector<QVector<double>> u(kK, QVector<double>(n, 0.0));
+    for (int e = 0; e < kK; ++e)
+        for (int i = 0; i < n; ++i)
+            for (int d = 0; d < kK; ++d)
+                u[e][i] += v[d][i] * vecs[d * kK + e];
+
+    // Groups of (nearly) equal eigenvalues; pairs are circle candidates.
+    QVector<QPair<QVector<double>, QVector<double>>> circles;
+    for (int e = 0; e < kK;) {
+        int f = e + 1;
+        while (f < kK && std::abs(vals[f] - vals[e]) <= 0.03 * std::max(1e-9, std::abs(vals[e])))
+            ++f;
+        const int size = f - e;
+        if (size == 2) {
+            circles.append({u[e], u[e + 1]});
+        } else if (size == 4) {
+            const QVector<QVector<double>> p = splitPlanes({u[e], u[e + 1], u[e + 2], u[e + 3]}, n);
+            circles.append({p[0], p[1]});
+            circles.append({p[2], p[3]});
+        }
+        e = f;
+    }
+    if (circles.size() < 2)
+        return {};
+    double spread1 = 1;
+    const QVector<double> a1 = anglesOf(circles[0].first, circles[0].second, &spread1);
+    if (spread1 > 0.35)
+        return {};
+    for (int c = 1; c < circles.size(); ++c) {
+        double spread2 = 1;
+        const QVector<double> a2 = anglesOf(circles[c].first, circles[c].second, &spread2);
+        if (spread2 > 0.35)
+            continue;
+        bool harmonic = false;
+        for (int mult = 2; mult <= 4 && !harmonic; ++mult)
+            harmonic = harmonicOf(a2, a1, mult) > 0.7 || harmonicOf(a2, a1, -mult) > 0.7;
+        if (harmonic || harmonicOf(a2, a1, 1) > 0.7 || harmonicOf(a2, a1, -1) > 0.7)
+            continue;
+        QVector<QPointF> out(n);
+        for (int i = 0; i < n; ++i)
+            out[i] = QPointF(a1[i] / kPi * 0.95, a2[i] / kPi * 0.95);
+        return out;
+    }
+    return {};
+}
+
 QVector<QPointF> circleInOrder(const QVector<int> &order, int n)
 {
     QVector<QPointF> p(n);
@@ -1497,6 +1779,20 @@ QVector<QPointF> dataLayout(const CommGraph &g, const Backbone &b, GraphLayout l
     }
     case GraphLayout::Spectral:
         return withCommunicators(g, normalised(spectralCoordinates(b, cancel)));
+    case GraphLayout::Torus: {
+        // Communicators below the picture (the torus fills the square). No torus found: the
+        // circle (scores low against the others).
+        QVector<QPointF> p = torusCoordinates(b, cancel);
+        if (p.size() != n)
+            return basicLayout(g, GraphLayout::Circle, 0);
+        for (QPointF &x : p)
+            x = QPointF(x.x(), x.y() * 0.8 - 0.1);
+        const int comms = int(g.nodes.size()) - n;
+        p.resize(g.nodes.size());
+        for (int k = 0; k < comms; ++k)
+            p[n + k] = QPointF(comms > 1 ? -0.9 + 1.8 * k / (comms - 1) : 0.0, 0.92);
+        return p;
+    }
     case GraphLayout::SpectralCircle: {
         const QVector<QPointF> sc = spectralCoordinates(b, cancel);
         QVector<int> order(n);
@@ -1625,6 +1921,7 @@ QString layoutName(GraphLayout layout)
     case GraphLayout::Stress: return QStringLiteral("stress");
     case GraphLayout::Spectral: return QStringLiteral("spectral");
     case GraphLayout::SpectralCircle: return QStringLiteral("spectral circle");
+    case GraphLayout::Torus: return QStringLiteral("torus");
     }
     return {};
 }
@@ -1665,6 +1962,14 @@ LayoutChoice autoLayout(const CommGraph &graph, int gridColumns, const QVector<Q
     QVector<GraphLayout> candidates{GraphLayout::Stress};
     if (gridColumns > 0)
         candidates.append(GraphLayout::Grid);
+    // The torus candidate only for graphs shaped like a 2D torus: (almost) every node with
+    // 4 neighbours in the backbone.
+    int four = 0;
+    for (int i = 0; i < b.n; ++i)
+        four += b.adj[i].size() == 4 ? 1 : 0;
+    const bool regular4 = b.n >= 9 && four >= 0.9 * b.n;
+    if (regular4)
+        candidates << GraphLayout::Torus;
     candidates << GraphLayout::Circle << GraphLayout::SpectralCircle << GraphLayout::Spectral;
     // Each candidate: neighbourhood preservation (partners next to each other, crowding
     // penalised) and distance faithfulness (1 - normalised stress against the hop distances).
@@ -1692,6 +1997,29 @@ LayoutChoice autoLayout(const CommGraph &graph, int gridColumns, const QVector<Q
         cands.append(std::move(c));
     }
     best.score = -1;
+    // A torus cut open clearly beats a folded stress picture: taken when its neighbourhood
+    // preservation is high and far above the stress layout's (a periodic grid; a detected
+    // process grid that is as good stays).
+    {
+        const Cand *torus = nullptr, *stress = nullptr, *grid = nullptr;
+        for (const Cand &c : std::as_const(cands)) {
+            if (c.layout == GraphLayout::Torus)
+                torus = &c;
+            else if (c.layout == GraphLayout::Stress)
+                stress = &c;
+            else if (c.layout == GraphLayout::Grid)
+                grid = &c;
+        }
+        if (regular4 && torus && torus->np >= 0.85 && (!stress || torus->np >= stress->np + 0.25)) {
+            const Cand &pick = grid && grid->np >= torus->np - 0.01 ? *grid : *torus;
+            for (const Cand &c : std::as_const(cands))
+                best.scores.append({c.layout, c.faithful});
+            best.layout = pick.layout;
+            best.positions = pick.pos;
+            best.score = pick.faithful;
+            return best;
+        }
+    }
     for (const Cand &c : std::as_const(cands)) {
         best.scores.append({c.layout, c.faithful});
         if (maxNp >= 0.3 && c.np + 1e-9 < 0.4 * maxNp)

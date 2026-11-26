@@ -29,7 +29,10 @@ enum class GraphLevel { Ranks, Nodes };
 // Stress: distances in the picture follow the hop distances in the graph (pivot MDS +
 // stress majorization); Spectral: the two smallest non-trivial Laplacian eigenvectors;
 // SpectralCircle: the circle in the order of the spectral angle (neighbours next to each other).
-enum class GraphLayout { Circle, Grid, Stress, Spectral, SpectralCircle };
+// Torus: a periodic grid (torus) cut open flat without knowing the numbering: the four
+// smallest non-trivial Laplacian eigenvectors of a torus form two circles; their two angles are
+// x and y (links across the cut are drawn as stubs at the border).
+enum class GraphLayout { Circle, Grid, Stress, Spectral, SpectralCircle, Torus };
 
 struct GraphOptions {
     bool p2p = true;

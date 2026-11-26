@@ -136,6 +136,22 @@ QVector<QPair<int, int>> syntheticEdges(const QString &name, int ranks)
             if (r + cols < ranks)
                 e.append({r, r + cols}), e.append({r + cols, r});
         }
+    } else if (name == QLatin1String("torus2d") || name == QLatin1String("torus2d-shuffled")) {
+        // 16-wide periodic grid; "-shuffled": ranks numbered randomly (no pattern to detect).
+        const int cols = 16, rows = std::max(1, ranks / cols);
+        QVector<int> perm(cols * rows);
+        for (int i = 0; i < perm.size(); ++i)
+            perm[i] = i;
+        if (name.endsWith(QLatin1String("shuffled")))
+            for (int i = int(perm.size()) - 1; i > 0; --i)
+                std::swap(perm[i], perm[int(rng.bounded(i + 1))]);
+        for (int r = 0; r < cols * rows; ++r) {
+            const int x = r % cols, y = r / cols;
+            e.append({perm[r], perm[y * cols + (x + 1) % cols]});
+            e.append({perm[r], perm[((y + 1) % rows) * cols + x]});
+            e.append({perm[y * cols + (x + 1) % cols], perm[r]});
+            e.append({perm[((y + 1) % rows) * cols + x], perm[r]});
+        }
     } else if (name == QLatin1String("torus3d")) {
         const int k = 4; // 4 x 4 x (ranks / 16)
         const int z = std::max(1, ranks / (k * k));

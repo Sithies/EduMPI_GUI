@@ -257,8 +257,8 @@ Rectangle {
                 }
                 ComboBox {
                     Layout.fillWidth: true
-                    readonly property var values: ["auto", "circle", "grid", "stress", "spectral", "spectral circle"]
-                    model: [qsTr("Auto (from the data)"), qsTr("Circle"), qsTr("Grid"), qsTr("Stress"), qsTr("Spectral"), qsTr("Spectral circle")]
+                    readonly property var values: ["auto", "circle", "grid", "torus", "stress", "spectral", "spectral circle"]
+                    model: [qsTr("Auto (from the data)"), qsTr("Circle"), qsTr("Grid"), qsTr("Torus"), qsTr("Stress"), qsTr("Spectral"), qsTr("Spectral circle")]
                     currentIndex: traceState ? Math.max(0, values.indexOf(traceState.graphLayout)) : 0
                     onActivated: (index) => traceState.graphLayout = values[index]
                 }

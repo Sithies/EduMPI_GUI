@@ -283,6 +283,8 @@ void TraceGraphItem::setLayout(const QString &layout)
         fixed = trace::GraphLayout::Spectral;
     else if (layout == QLatin1String("spectral circle") || layout == QLatin1String("spectralcircle"))
         fixed = trace::GraphLayout::SpectralCircle;
+    else if (layout == QLatin1String("torus"))
+        fixed = trace::GraphLayout::Torus;
     else if (layout != QLatin1String("circle"))
         mode = LayoutMode::Auto;
     if (mode == m_layoutMode && (mode == LayoutMode::Auto || fixed == m_fixedLayout))
@@ -907,11 +909,23 @@ int TraceGraphItem::nodeAt(QPointF p) const
     return -1;
 }
 
+bool TraceGraphItem::isWrapEdge(const GraphEdge &e) const
+{
+    // Torus layout: a link across the cut (more than half the picture apart in x or y).
+    if (m_layout != trace::GraphLayout::Torus || e.kind != GraphEdge::Kind::P2P || e.from >= m_unitPos.size()
+        || e.to >= m_unitPos.size())
+        return false;
+    const QPointF d = m_unitPos[e.to] - m_unitPos[e.from];
+    return std::abs(d.x()) > 0.95 || std::abs(d.y()) > 0.95;
+}
+
 int TraceGraphItem::edgeAt(QPointF p) const
 {
     // Topmost (heaviest) first.
     for (int k = int(m_drawn.size()) - 1; k >= 0; --k) {
         const GraphEdge &e = m_graph.edges[m_drawn[k]];
+        if (isWrapEdge(e))
+            continue;
         const EdgePath path = edgePath(e);
         const double tolerance = std::max(4.0, edgeWidth(e) / 2 + 2);
         QPointF prev = path.from;
@@ -1155,6 +1169,21 @@ void TraceGraphItem::paint(QPainter *painter)
         const GraphEdge &e = m_graph.edges[i];
         const EdgePath path = edgePath(e);
         const bool dim = highlight ? !(lit[e.from] && lit[e.to]) : (focus >= 0 && e.from != focus && e.to != focus);
+        if (isWrapEdge(e)) {
+            // Across the torus cut: a short stub at each end, pointing out of the picture.
+            const QPointF du = m_unitPos[e.to] - m_unitPos[e.from];
+            const QPointF dir(std::abs(du.x()) > 0.95 ? (du.x() > 0 ? -1.0 : 1.0) : 0.0,
+                              std::abs(du.y()) > 0.95 ? (du.y() > 0 ? -1.0 : 1.0) : 0.0);
+            const double len = std::clamp(nodeSpacing() * 0.6, 4.0, 18.0);
+            QColor c = edgeColorOf(i);
+            c.setAlphaF(dim ? 0.12 : 0.7);
+            QPen pen(c, std::max(1.0, edgeWidth(e) * 0.7));
+            pen.setStyle(Qt::DotLine);
+            painter->setPen(pen);
+            painter->drawLine(path.from, path.from + dir * len);
+            painter->drawLine(path.to, path.to - dir * len);
+            continue;
+        }
         QColor c = edgeColorOf(i);
         // Inside one compute node lighter, between nodes strong.
         const bool inside = e.kind == GraphEdge::Kind::P2P && m_graph.groups.size() > 1

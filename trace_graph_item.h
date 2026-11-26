@@ -237,6 +237,7 @@ private:
     EdgePath edgePath(const trace::GraphEdge &edge) const;
     int focusNode() const; // graph node of the selected rank, -1 if none
     int nodeAt(QPointF p) const;
+    bool isWrapEdge(const trace::GraphEdge &e) const;
     int edgeAt(QPointF p) const;
     QString nodeLabel(int node) const;
     QPointF basePosition(int node) const; // position at zoom 1

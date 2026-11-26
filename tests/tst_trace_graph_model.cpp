@@ -542,7 +542,7 @@ private slots:
         QCOMPARE(c.layout, GraphLayout::Stress);
         QVERIFY2(neighbourhoodPreservation(g, c.positions) > 0.95, qPrintable(QString::number(neighbourhoodPreservation(g, c.positions))));
         QCOMPARE(c.positions.size(), g.nodes.size());
-        QCOMPARE(c.scores.size(), 4); // stress, circle, spectral circle, spectral
+        QCOMPARE(c.scores.size(), 4); // stress, circle, spectral circle, spectral (not torus-shaped)
         // Same structure, same signature (cache key); a changed edge changes it.
         QCOMPARE(backboneSignature(handGraph(n, 32, grid)), c.signature);
         QVERIFY(backboneSignature(handGraph(n, 32, ring)) != c.signature);
@@ -660,6 +660,42 @@ private slots:
         QCOMPARE(worse->fromRank, 0);
         QCOMPARE(worse->toRank, 1);
         QVERIFY(find(cmp, QStringLiteral("compare-ranks"))->ranks.contains(1));
+    }
+
+    // Torus layout: a periodic grid with ranks numbered at random (no pattern to detect) is
+    // cut open into a flat grid; a cylinder and a plain grid are not.
+    void torusLayoutWithoutNumbering()
+    {
+        auto torus = [](int cols, int rows, bool periodicY) {
+            QVector<int> perm(cols * rows);
+            for (int i = 0; i < perm.size(); ++i)
+                perm[i] = i;
+            quint32 seed = 12345;
+            for (int i = int(perm.size()) - 1; i > 0; --i) {
+                seed = seed * 1103515245u + 12345u;
+                std::swap(perm[i], perm[int((seed >> 8) % quint32(i + 1))]);
+            }
+            QVector<std::tuple<int, int, quint64, double>> e;
+            for (int y = 0; y < rows; ++y)
+                for (int x = 0; x < cols; ++x) {
+                    const int r = y * cols + x;
+                    e.append({perm[r], perm[y * cols + (x + 1) % cols], 100, 0.0});
+                    if (periodicY || y + 1 < rows)
+                        e.append({perm[r], perm[((y + 1) % rows) * cols + x], 100, 0.0});
+                }
+            return handGraph(cols * rows, 16, e);
+        };
+        const CommGraph square = torus(16, 16, true);
+        const LayoutChoice c = autoLayout(square);
+        QCOMPARE(c.layout, GraphLayout::Torus);
+        QVERIFY2(neighbourhoodPreservation(square, c.positions) > 0.9,
+                 qPrintable(QString::number(neighbourhoodPreservation(square, c.positions))));
+        const CommGraph oblong = torus(16, 8, true);
+        QCOMPARE(autoLayout(oblong).layout, GraphLayout::Torus);
+        QVERIFY(neighbourhoodPreservation(oblong, layoutGraph(oblong, GraphLayout::Torus)) > 0.85);
+        // Cylinder (periodic in x only) and the detected-pattern-free plain grid: not a torus.
+        QVERIFY(autoLayout(torus(16, 8, false)).layout != GraphLayout::Torus);
+        QCOMPARE(layoutName(GraphLayout::Torus), QStringLiteral("torus"));
     }
 
     // The pattern of a real trace: the ring of writeManyMessagesOtf2 (r -> r + 1).

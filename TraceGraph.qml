@@ -111,10 +111,10 @@ Rectangle {
                     implicitHeight: trace_graph_view.embedded ? 18 : 22
                     implicitWidth: 170
                     font.pointSize: 9
-                    readonly property var values: ["auto", "circle", "grid", "stress", "spectral", "spectral circle"]
+                    readonly property var values: ["auto", "circle", "grid", "torus", "stress", "spectral", "spectral circle"]
                     model: [
                         qsTr("Layout: Auto") + (graph.layout === "auto" ? " (" + graph.effectiveLayout + ")" : ""),
-                        qsTr("Layout: Circle"), qsTr("Layout: Grid"), qsTr("Layout: Stress"),
+                        qsTr("Layout: Circle"), qsTr("Layout: Grid"), qsTr("Layout: Torus"), qsTr("Layout: Stress"),
                         qsTr("Layout: Spectral"), qsTr("Layout: Spectral circle")
                     ]
                     currentIndex: Math.max(0, values.indexOf(graph.layout))
@@ -128,6 +128,7 @@ Rectangle {
                         + "• Circle: ranks in order, grouped by compute node\n"
                         + "• Grid: the process grid of a detected 2D stencil\n"
                         + "• Stress: distances in the picture follow the hops between ranks (grids become grids, rings rings, clusters clusters)\n"
+                        + "• Torus: a periodic grid (edges wrap around) cut open flat, found from the data; links across the cut are short dotted stubs at the border\n"
                         + "• Spectral: from the eigenvectors of the communication graph\n"
                         + "• Spectral circle: a circle in which partners sit next to each other")
                 }
