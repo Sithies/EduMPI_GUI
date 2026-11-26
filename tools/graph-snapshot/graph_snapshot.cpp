@@ -18,11 +18,14 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QRandomGenerator>
+#include <QTemporaryDir>
 #include <QTimer>
 
 #include <cstdio>
 #include <memory>
 
+#include "otf2_fixture.h"
 #include "otf2_trace_reader.h"
 #include "timeline_builder.h"
 #include "trace_aggregator.h"
@@ -74,15 +77,72 @@ Item {
     property string graphWeight: 'bytes'
     property string graphLevel: 'auto'
     property string graphCommunicators: 'auto'
-    property string graphLayout: 'circle'
+    property string graphLayout: 'auto'
     property int graphMaxEdges: 500
-    property string graphView: 'auto'
     property var lastEdge: null
     signal viewRequested(real startNs, real endNs)
   }
   TraceGraph { objectName: 'graph'; anchors.fill: parent; listNodes: ({timeline: tlModel}); traceState: parent.state }
 }
 )";
+
+// Synthetic patterns (tests/otf2_fixture.h writeEdgesOtf2) for layouts without the trace
+// generator: ring, tree (binomial reduce), clusters (all-to-all blocks chained), random
+// (3 random partners each), master (master-worker), stencil (2D, not periodic), torus3d.
+QVector<QPair<int, int>> syntheticEdges(const QString &name, int ranks)
+{
+    QVector<QPair<int, int>> e;
+    QRandomGenerator rng(7);
+    if (name == QLatin1String("ring")) {
+        for (int r = 0; r < ranks; ++r) {
+            e.append({r, (r + 1) % ranks});
+            e.append({(r + 1) % ranks, r});
+        }
+    } else if (name == QLatin1String("tree")) {
+        for (int r = 1; r < ranks; ++r)
+            e.append({r, r & (r - 1)}); // binomial tree: r -> r without its lowest bit
+    } else if (name == QLatin1String("clusters")) {
+        const int block = 16;
+        for (int b = 0; b * block < ranks; ++b) {
+            for (int i = b * block; i < std::min(ranks, (b + 1) * block); ++i)
+                for (int j = b * block; j < std::min(ranks, (b + 1) * block); ++j)
+                    if (i != j)
+                        e.append({i, j});
+            if ((b + 1) * block < ranks)
+                e.append({b * block, (b + 1) * block});
+        }
+    } else if (name == QLatin1String("random")) {
+        for (int r = 0; r < ranks; ++r)
+            for (int k = 0; k < 3; ++k) {
+                const int t = int(rng.bounded(ranks));
+                if (t != r)
+                    e.append({r, t});
+            }
+    } else if (name == QLatin1String("master")) {
+        for (int r = 1; r < ranks; ++r) {
+            e.append({0, r});
+            e.append({r, 0});
+        }
+    } else if (name == QLatin1String("stencil")) {
+        const int cols = 16;
+        for (int r = 0; r < ranks; ++r) {
+            if (r % cols + 1 < cols && r + 1 < ranks)
+                e.append({r, r + 1}), e.append({r + 1, r});
+            if (r + cols < ranks)
+                e.append({r, r + cols}), e.append({r + cols, r});
+        }
+    } else if (name == QLatin1String("torus3d")) {
+        const int k = 4; // 4 x 4 x (ranks / 16)
+        const int z = std::max(1, ranks / (k * k));
+        for (int r = 0; r < k * k * z; ++r) {
+            const int x = r % k, y = (r / k) % k, w = r / (k * k);
+            e.append({r, (x + 1) % k + y * k + w * k * k});
+            e.append({r, x + ((y + 1) % k) * k + w * k * k});
+            e.append({r, x + y * k + ((w + 1) % z) * k * k});
+        }
+    }
+    return e;
+}
 
 } // namespace
 
@@ -98,9 +158,22 @@ int main(int argc, char **argv)
     p.addOption({QStringLiteral("window"), QStringLiteral("FROM:TO in ms (repeatable)"), QStringLiteral("ms")});
     p.addOption({QStringLiteral("view"), QStringLiteral("NAME:key=value,... (repeatable)"), QStringLiteral("view")});
     p.addOption({QStringLiteral("size"), QStringLiteral("WxH"), QStringLiteral("size"), QStringLiteral("1400x900")});
+    p.addOption({QStringLiteral("synthetic"), QStringLiteral("pattern instead of --trace: ring, tree, clusters, random, master, stencil, torus3d"),
+                 QStringLiteral("name")});
+    p.addOption({QStringLiteral("ranks"), QStringLiteral("ranks of a synthetic pattern"), QStringLiteral("n"), QStringLiteral("128")});
     p.process(app);
 
-    const QString anchor = p.value(QStringLiteral("trace"));
+    QString anchor = p.value(QStringLiteral("trace"));
+    QTemporaryDir synthDir;
+    if (p.isSet(QStringLiteral("synthetic"))) {
+        const QString name = p.value(QStringLiteral("synthetic"));
+        anchor = writeEdgesOtf2(synthDir.filePath(name), p.value(QStringLiteral("ranks")).toInt(),
+                                syntheticEdges(name, p.value(QStringLiteral("ranks")).toInt()), 3);
+        if (anchor.isEmpty()) {
+            std::fprintf(stderr, "cannot write the synthetic trace %s\n", qPrintable(name));
+            return 1;
+        }
+    }
     const QDir out(p.value(QStringLiteral("out")));
     QDir().mkpath(out.absolutePath());
     const QStringList size = p.value(QStringLiteral("size")).split(QLatin1Char('x'));
@@ -144,15 +217,26 @@ int main(int argc, char **argv)
         root->setSize(QSizeF(width, height));
         win.show();
         QObject *state = obj->property("state").value<QObject *>();
+        auto *graph = obj->findChild<TraceGraphItem *>();
+        if (graph)
+            graph->setSynchronousLayout(true);
         state->setProperty("viewStartNs", double(from));
         state->setProperty("viewEndNs", double(to));
-        auto *graph = obj->findChild<TraceGraphItem *>();
 
         for (const QString &v : std::as_const(views)) {
             const QString name = v.section(QLatin1Char(':'), 0, 0);
             const QStringList sets = v.section(QLatin1Char(':'), 1).split(QLatin1Char(','), Qt::SkipEmptyParts);
             for (const QString &kv : sets) {
                 const QString key = kv.section(QLatin1Char('='), 0, 0);
+                if (key == QLatin1String("zoomToFinding") && graph) {
+                    graph->zoomToFinding(kv.section(QLatin1Char('='), 1).toInt());
+                    continue;
+                }
+                if (key == QLatin1String("resetView") && graph) {
+                    graph->resetView();
+                    graph->setHighlightedFinding(-1);
+                    continue;
+                }
                 const QString val = kv.section(QLatin1Char('='), 1);
                 bool isNum = false;
                 const double num = val.toDouble(&isNum);
@@ -162,11 +246,14 @@ int main(int argc, char **argv)
             }
             spin(400);
             const QImage img = win.grabWindow();
-            const QString file = out.filePath(QStringLiteral("%1-%2ms_%3.png").arg(from / kMs).arg(to / kMs).arg(name));
+            const QString prefix = p.isSet(QStringLiteral("synthetic")) ? p.value(QStringLiteral("synthetic"))
+                                                                         : QStringLiteral("%1-%2ms").arg(from / kMs).arg(to / kMs);
+            const QString file = out.filePath(QStringLiteral("%1_%2.png").arg(prefix, name));
             img.save(file);
-            std::printf("%s  read %lld ms  status '%s' level %s edges %d shown %d\n", qPrintable(file),
+            std::printf("%s  read %lld ms  status '%s' level %s layout %s edges %d shown %d\n", qPrintable(file),
                         (long long)readMs, qPrintable(graph ? graph->status() : QStringLiteral("?")),
                         qPrintable(graph ? graph->effectiveLevel() : QString()),
+                        qPrintable(graph ? graph->effectiveLayout() : QString()),
                         graph ? graph->edgeCount() : -1, graph ? graph->shownEdgeCount() : -1);
             std::fflush(stdout);
         }

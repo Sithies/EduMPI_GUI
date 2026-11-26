@@ -4,10 +4,12 @@
 #include <QPointF>
 #include <QQuickPaintedItem>
 #include <QHash>
+#include <QTimer>
 #include <QVariantMap>
 #include <QVector>
 #include <QtQml/qqmlregistration.h>
 
+#include <atomic>
 #include <memory>
 
 #include "graph_model.h"
@@ -49,8 +51,13 @@ class TraceGraphItem : public QQuickPaintedItem
     Q_PROPERTY(bool communicatorsMerged READ communicatorsMerged NOTIFY graphChanged)
     // Compute nodes opened into their ranks (double-click, nodes level only).
     Q_PROPERTY(int expandedCount READ expandedCount NOTIFY graphChanged)
-    // "circle" or "grid"
+    // "auto" (default), "circle" or "grid". Auto: the process grid when the ranks form a 2D
+    // stencil (trace::detectPattern), the circle otherwise. Grid with a detected stencil places
+    // the ranks by their grid position.
     Q_PROPERTY(QString layout READ layout WRITE setLayout NOTIFY displayChanged)
+    Q_PROPERTY(QString effectiveLayout READ effectiveLayout NOTIFY graphChanged)
+    // View transform: zoom (1 = fit) and pan in pixels; wheel / pinch / drag in QML.
+    Q_PROPERTY(double zoom READ zoom NOTIFY viewTransformChanged)
     // Heaviest edges drawn (0 = all); edges of the selected rank are always drawn.
     Q_PROPERTY(int maxEdges READ maxEdges WRITE setMaxEdges NOTIFY displayChanged)
     // "" (graph drawn), "zoom" (window too long to load its messages), "dense" (too dense for the
@@ -63,27 +70,26 @@ class TraceGraphItem : public QQuickPaintedItem
     // Smallest waiting time of one rank / host: the white end of the scale (so that differences
     // show even when every rank waits a lot, e.g. in long windows).
     Q_PROPERTY(double minWaitSeconds READ minWaitSeconds NOTIFY graphChanged)
-    // "auto" (default), "graph" or "matrix". Matrix: communication matrix (sender rows x receiver
-    // columns, colour = weight), scales to thousands of ranks. Auto: graph for up to
-    // kAutoMatrixLimit ranks / hosts, matrix above.
-    Q_PROPERTY(QString view READ view WRITE setView NOTIFY displayChanged)
-    // View actually drawn: "graph" or "matrix".
-    Q_PROPERTY(QString effectiveView READ effectiveView NOTIFY graphChanged)
     // Findings of the window (trace::analyzeCommGraph on the ranks): pattern, locality, waiting
-    // outliers, late senders. Lines of text; ranks of the lines in findingRanks (-1 = none).
+    // outliers, slow nodes, late senders. findings: one line each; findingList: maps with kind,
+    // title, metric, detail, severity (0..2), rank, ranks, nodes, fromRank, toRank.
     Q_PROPERTY(QStringList findings READ findings NOTIFY graphChanged)
     Q_PROPERTY(QVariantList findingRanks READ findingRanks NOTIFY graphChanged)
+    Q_PROPERTY(QVariantList findingList READ findingMaps NOTIFY graphChanged)
+    // Finding whose ranks / link are highlighted (-1 = none); the rest of the graph is dimmed.
+    Q_PROPERTY(int highlightedFinding READ highlightedFinding WRITE setHighlightedFinding NOTIFY highlightChanged)
 
 public:
     static constexpr int kDefaultMaxEdges = 500;
     static constexpr int kArrowHeadLimit = 300; // no arrow heads when more edges are drawn
-    static constexpr int kLabelLimit = 64;      // rank labels only up to this many ranks
+    static constexpr int kLabelLimit = 64;      // rank labels only up to this many ranks (at zoom 1)
+    static constexpr double kMaxZoom = 60;
+    static constexpr double kLabelSpacing = 16; // rank labels once neighbours are this far apart
     // Auto level: ranks for at most this many ranks, or for windows up to kAutoRanksWindowNs.
     static constexpr int kAutoRankLimit = 64;
     static constexpr qint64 kAutoRanksWindowNs = 50'000'000; // 50 ms
     static constexpr int kAutoCommunicatorLimit = 8;
-    // Auto view: communication matrix from this many rank / host nodes on.
-    static constexpr int kAutoMatrixLimit = 128;
+
     // Hint to zoom in from this window length on (the graph sums up many steps).
     static constexpr qint64 kLongWindowNs = 1'000'000'000; // 1 s
 
@@ -114,6 +120,24 @@ public:
     int expandedCount() const { return int(m_options.expandedNodes.size()); }
     QString layout() const;
     void setLayout(const QString &layout);
+    QString effectiveLayout() const;
+    // Layouts computed on the calling thread (tests, snapshots); default: in the background.
+    void setSynchronousLayout(bool on);
+    bool layoutBusy() const { return m_layoutBusy; }
+    double zoom() const { return m_zoom; }
+    QPointF pan() const { return m_pan; }
+    int highlightedFinding() const { return m_highlightFinding; }
+    void setHighlightedFinding(int index);
+    QVariantList findingMaps() const;
+    // Graph nodes highlighted by the current finding.
+    const QVector<bool> &highlightedNodes() const { return m_highlightNodes; }
+
+    // Zooms by factor around (x, y), keeping that point in place (1 .. kMaxZoom).
+    Q_INVOKABLE void zoomAt(qreal x, qreal y, qreal factor);
+    Q_INVOKABLE void panBy(qreal dx, qreal dy);
+    Q_INVOKABLE void resetView();
+    // Zooms to the ranks / nodes of a finding (and highlights it).
+    Q_INVOKABLE void zoomToFinding(int index);
     int maxEdges() const { return m_maxEdges; }
     void setMaxEdges(int n);
     QString status() const { return m_status; }
@@ -121,17 +145,10 @@ public:
     int shownEdgeCount() const { return int(m_drawn.size()); }
     double maxWaitSeconds() const { return m_maxWait; }
     double minWaitSeconds() const { return m_minWait; }
-    QString view() const;
-    void setView(const QString &view);
-    QString effectiveView() const { return m_matrix ? QStringLiteral("matrix") : QStringLiteral("graph"); }
     QStringList findings() const;
     QVariantList findingRanks() const;
     const QVector<trace::GraphFinding> &findingList() const { return m_findings; }
-    // Matrix view: pixel rectangle of the matrix and the cell (row = sender, column = receiver
-    // graph node) at a point, or -1 / -1.
-    QRectF matrixRect() const;
-    QPoint matrixCellAt(QPointF p) const;
-    QPointF matrixCellCenter(int fromNode, int toNode) const;
+
     double nodeWaitSeconds(int node) const { return m_nodeWait.value(node); }
 
     // Rank node: toggles selectedRank; edge: emits edgeClicked; elsewhere nothing.
@@ -161,6 +178,8 @@ signals:
     // Keys: kind ("p2p" / "collective"), from, to (labels), fromRank, toRank (-1 if not a rank),
     // comm (collectives), bytes, messages, waitSeconds, directed, fromNs, toNs.
     void edgeClicked(QVariantMap details);
+    void viewTransformChanged();
+    void highlightChanged();
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -186,11 +205,16 @@ private:
     int nodeAt(QPointF p) const;
     int edgeAt(QPointF p) const;
     QString nodeLabel(int node) const;
+    QPointF basePosition(int node) const; // position at zoom 1
+    QPointF viewCenter() const { return center() + m_pan; }
+    double nodeSpacing() const;           // distance of neighbouring rank / host nodes on screen
+    void updateSpacing();                 // m_unitSpacing from m_unitPos
+    void updateHighlight();
+    void relayout(); // positions for m_graph (cache / background / synchronous)
+    void setPositions(const QVector<QPointF> &positions, trace::GraphLayout layout, bool animate);
     double edgeWidth(const trace::GraphEdge &edge) const;
     void setStatus(const QString &status);
-    void paintMatrix(QPainter *painter);
     void paintHint(QPainter *painter);
-    int edgeBetween(int fromNode, int toNode) const; // P2P edge index, -1 if none
     QColor waitColor(double seconds) const;
 
     QPointer<TraceTimelineModel> m_model;
@@ -199,11 +223,35 @@ private:
     int m_selectedRank = -1;
     trace::GraphOptions m_options;
     trace::GraphWeight m_weight = trace::GraphWeight::Bytes;
-    trace::GraphLayout m_layout = trace::GraphLayout::Circle;
+    trace::GraphLayout m_layout = trace::GraphLayout::Circle; // effective
     enum class Mode : quint8 { Auto, Off, On }; // level: On = nodes; communicators: On = merged
     Mode m_levelMode = Mode::Auto;
     Mode m_commMode = Mode::Auto;
     bool m_commMerged = false;
+    enum class LayoutMode : quint8 { Auto, Fixed };
+    LayoutMode m_layoutMode = LayoutMode::Auto;
+    trace::GraphLayout m_fixedLayout = trace::GraphLayout::Circle;
+    int m_gridColumns = 0;          // detected stencil grid (0 = none)
+    bool m_syncLayout = false;
+    bool m_layoutBusy = false;
+    quint64 m_layoutGeneration = 0;
+    std::shared_ptr<std::atomic_bool> m_layoutCancel;
+    struct CachedLayout {
+        trace::GraphLayout layout;
+        QVector<QPointF> positions;
+    };
+    QHash<quint64, CachedLayout> m_layoutCache;
+    QTimer *m_animTimer = nullptr;
+    QVector<QPointF> m_animFrom;
+    QVector<QPointF> m_animTo;
+    int m_animStep = 0;
+    QHash<int, QString> m_overviewRankHost; // rank -> compute node
+    double m_zoom = 1;
+    double m_unitSpacing = 0.1;
+    QPointF m_pan;
+    int m_highlightFinding = -1;
+    QVector<bool> m_highlightNodes;
+    int m_highlightEdge = -1;
     int m_maxEdges = kDefaultMaxEdges;
 
     trace::CommGraph m_graph;
@@ -213,9 +261,6 @@ private:
     QVector<double> m_nodeWait; // waiting (late sender) per graph node, seconds
     double m_maxWait = 0;       // largest waiting of a rank / host node
     double m_minWait = 0;       // smallest waiting of a rank / host node
-    Mode m_viewMode = Mode::Auto; // On = matrix, Off = graph
-    bool m_matrix = false;
-    QHash<quint64, int> m_p2pIndex; // (from << 32 | to) -> P2P edge, for the matrix
     QVector<trace::GraphFinding> m_findings;
     quint64 m_maxInternal = 0;  // largest traffic inside one compute node (nodes level)
     QString m_status = QStringLiteral("empty");

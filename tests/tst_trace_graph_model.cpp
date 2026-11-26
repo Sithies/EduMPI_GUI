@@ -496,7 +496,7 @@ private slots:
         QVERIFY(loc);
         QVERIFY(std::abs(loc->value - 28.0 / 32) < 1e-9);
         // Rank 10 waits most: an outlier, and rank 9 is the late sender that causes it.
-        QVERIFY(find(QStringLiteral("waiting"), 10));
+        QVERIFY(find(QStringLiteral("outlier"), 10));
         QVERIFY(find(QStringLiteral("cause"), 9));
         QVERIFY(!find(QStringLiteral("cause"), 3));
         const GraphFinding *link = find(QStringLiteral("link"));
@@ -511,6 +511,51 @@ private slots:
         const QVector<GraphFinding> quiet = analyzeCommGraph(stencil(8, 8, 8));
         QCOMPARE(quiet.size(), 2);
         QVERIFY(analyzeCommGraph(CommGraph()).isEmpty());
+    }
+
+    // Layouts from the data, without knowing the pattern: a grid comes out as a grid, a ring as
+    // a ring, tree and star as such (neighbours next to each other); collapsed pictures lose.
+    void autoLayoutFollowsStructure()
+    {
+        // 12 x 8 grid, not periodic.
+        QVector<std::tuple<int, int, quint64, double>> grid, ring, tree, star;
+        const int cols = 12, n = 96;
+        for (int r = 0; r < n; ++r) {
+            if (r % cols + 1 < cols)
+                grid.append({r, r + 1, 100, 0.0});
+            if (r + cols < n)
+                grid.append({r, r + cols, 100, 0.0});
+            ring.append({r, (r + 1) % n, 100, 0.0});
+            if (r > 0) {
+                tree.append({r, r & (r - 1), 100, 0.0});
+                star.append({r, 0, 100, 0.0});
+            }
+        }
+        const CommGraph g = handGraph(n, 32, grid);
+        const LayoutChoice c = autoLayout(g);
+        QCOMPARE(c.layout, GraphLayout::Stress);
+        QVERIFY2(neighbourhoodPreservation(g, c.positions) > 0.95, qPrintable(QString::number(neighbourhoodPreservation(g, c.positions))));
+        QCOMPARE(c.positions.size(), g.nodes.size());
+        QCOMPARE(c.scores.size(), 4); // stress, circle, spectral circle, spectral
+        // Same structure, same signature (cache key); a changed edge changes it.
+        QCOMPARE(backboneSignature(handGraph(n, 32, grid)), c.signature);
+        QVERIFY(backboneSignature(handGraph(n, 32, ring)) != c.signature);
+        // With a detected stencil the process grid is a candidate as well.
+        QVERIFY(autoLayout(g, cols).scores.size() == 5);
+
+        // Ring: a circle (stress or circle), every neighbour next to it.
+        const CommGraph rg = handGraph(n, 32, ring);
+        QVERIFY(neighbourhoodPreservation(rg, autoLayout(rg).positions) > 0.95);
+        // Tree and star: the stress layout (the circle would hide them).
+        QCOMPARE(autoLayout(handGraph(n, 32, tree)).layout, GraphLayout::Stress);
+        QCOMPARE(autoLayout(handGraph(n, 32, star)).layout, GraphLayout::Stress);
+        // Without P2P edges: the circle.
+        QCOMPARE(autoLayout(handGraph(n, 32, {})).layout, GraphLayout::Circle);
+        // A collapsed picture scores 0 preservation (all nodes on one spot).
+        QCOMPARE(neighbourhoodPreservation(g, QVector<QPointF>(n, QPointF(0, 0))), 0.0);
+        // Positions stay in the unit square.
+        for (const QPointF &p : c.positions)
+            QVERIFY(std::abs(p.x()) <= 1.0 && std::abs(p.y()) <= 1.0);
     }
 
     // The pattern of a real trace: the ring of writeManyMessagesOtf2 (r -> r + 1).

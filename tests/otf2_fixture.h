@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QPair>
 #include <QString>
+#include <QVector>
 
 // OTF2 archives of the reference scenario "ring4" (see ring4_scenario.h), written with the
 // OTF2 writer API: 4 process location groups with one CPU thread each, system tree
@@ -42,3 +44,8 @@ QString writeMetricsOtf2(const QString &dir, bool withClass);
 // +10 us] from (r - 1) % ranks. About 6 * messagesPerRank events per rank. idleNs > 0 appends
 // that much idle time (main only) after the messages: all events dense at the start of the run.
 QString writeManyMessagesOtf2(const QString &dir, int ranks, int messagesPerRank, quint64 idleNs = 0);
+
+// Any communication pattern: ranks (first half on nodeA, rest on nodeB), one MPI_Send per
+// (sender, receiver) edge and round (4 KiB, tag 0, WORLD), each rank sends its round's messages
+// first and then receives. For layout and pattern tests (rings, trees, clusters, …).
+QString writeEdgesOtf2(const QString &dir, int ranks, const QVector<QPair<int, int>> &edges, int rounds = 3);

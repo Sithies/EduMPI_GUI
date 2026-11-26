@@ -63,9 +63,8 @@ Window {
         property string graphWeight: "bytes"     // "bytes", "messages" or "wait"
         property string graphLevel: "auto"       // "auto", "ranks" or "nodes"
         property string graphCommunicators: "auto" // "auto", "separate" or "merged"
-        property string graphLayout: "circle"    // "circle" or "grid"
+        property string graphLayout: "auto"      // "auto", "circle", "grid", "stress", "spectral", "spectral circle"
         property int graphMaxEdges: 500          // heaviest edges drawn, 0 = all
-        property string graphView: "auto"        // "auto", "graph" or "matrix"
         property var lastEdge: null
         property string name: ""
         // Loaded file or folder as a local path (the file dialog yields file:// URLs).

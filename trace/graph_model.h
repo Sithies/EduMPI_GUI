@@ -3,6 +3,8 @@
 #include <QPointF>
 #include <QString>
 #include <QVector>
+
+#include <atomic>
 #include <QtGlobal>
 
 #include "timeline_store.h"
@@ -22,7 +24,12 @@ namespace trace {
 
 enum class GraphWeight { Bytes, Messages, Wait };
 enum class GraphLevel { Ranks, Nodes };
-enum class GraphLayout { Circle, Grid };
+// Circle: graph order (ranks grouped by compute node). Grid: near-square grid, or the process
+// grid of a detected stencil (gridColumns). Data-driven (from the P2P edges, see autoLayout):
+// Stress: distances in the picture follow the hop distances in the graph (pivot MDS +
+// stress majorization); Spectral: the two smallest non-trivial Laplacian eigenvectors;
+// SpectralCircle: the circle in the order of the spectral angle (neighbours next to each other).
+enum class GraphLayout { Circle, Grid, Stress, Spectral, SpectralCircle };
 
 struct GraphOptions {
     bool p2p = true;
@@ -110,9 +117,19 @@ CommPattern detectPattern(const CommGraph &rankGraph);
 // "cause", "link"; rank: the rank the finding is about (-1 if none); text: one line for the GUI.
 struct GraphFinding {
     QString kind;
-    QString text;
-    int rank = -1;
+    QString text;       // one line: title, number and explanation together
+    int rank = -1;      // the rank the finding is mainly about
     double value = 0;
+    // For the GUI: short title, the key number, one sentence; severity 0 = information,
+    // 1 = worth a look, 2 = problem. ranks / nodes: what to highlight; fromRank / toRank: a link.
+    QString title;
+    QString metric;
+    QString detail;
+    int severity = 0;
+    QVector<int> ranks;
+    QStringList nodes;
+    int fromRank = -1;
+    int toRank = -1;
 };
 QVector<GraphFinding> analyzeCommGraph(const CommGraph &rankGraph);
 
@@ -124,6 +141,37 @@ QVector<double> nodeWaiting(const CommGraph &graph);
 // Circle: rank/host nodes on a circle in graph order (ranks grouped by node, as in the
 // overview), communicators on a small inner circle (one at the centre).
 // Grid: rank/host nodes row by row in a near-square grid, communicators in a row below it.
-QVector<QPointF> layoutGraph(const CommGraph &graph, GraphLayout layout);
+// gridColumns > 0 (Grid only): ranks at (rank % gridColumns, rank / gridColumns) by their rank
+// number, e.g. the process grid of a detected 2D stencil; other nodes row by row after them.
+// previous (data-driven layouts, optional): positions of the same nodes to start from, so that
+// a similar graph keeps a similar picture.
+QVector<QPointF> layoutGraph(const CommGraph &graph, GraphLayout layout, int gridColumns = 0,
+                             const QVector<QPointF> *previous = nullptr);
+
+QString layoutName(GraphLayout layout);
+
+// Layout chosen from the data: every candidate (Stress, Grid of a detected stencil, Circle,
+// SpectralCircle, Spectral) is computed on the backbone of the P2P edges (per node its
+// kBackbone heaviest edges; collectives left out, so that an MPI_Allreduce does not pull
+// everything together) and scored by neighbourhood preservation: the share of each node's
+// graph neighbours that are also among its nearest nodes in the picture (1 = every neighbour
+// next to it; nodes on top of each other count against it) and by distance faithfulness
+// (1 - normalised stress against the hop distances). Candidates with less than 40 % of the
+// best preservation drop out (a folded torus, a collapsed picture); of the rest the most
+// faithful wins, a later one (order above) only when better by 0.02. score = faithfulness.
+struct LayoutChoice {
+    GraphLayout layout = GraphLayout::Circle;
+    QVector<QPointF> positions;
+    double score = 0;
+    QVector<std::pair<GraphLayout, double>> scores; // all candidates
+    quint64 signature = 0;                          // of the backbone (same structure, same value)
+};
+constexpr int kBackbone = 6;
+LayoutChoice autoLayout(const CommGraph &graph, int gridColumns = 0, const QVector<QPointF> *previous = nullptr,
+                        const std::atomic_bool *cancel = nullptr);
+// Hash of the backbone's edges (structure only, not the weights).
+quint64 backboneSignature(const CommGraph &graph);
+// Neighbourhood preservation of positions for the graph's backbone (0 .. 1).
+double neighbourhoodPreservation(const CommGraph &graph, const QVector<QPointF> &positions);
 
 } // namespace trace

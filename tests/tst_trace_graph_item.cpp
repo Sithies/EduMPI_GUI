@@ -10,6 +10,7 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#include <cmath>
 #include <limits>
 
 #include "otf2_fixture.h"
@@ -81,6 +82,8 @@ class TstTraceGraphItem : public QObject
     void setupRing4(TraceTimelineModel &model, TraceGraphItem &item)
     {
         model.addSnapshot({build(m_ring4)});
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
         item.setModel(&model);
         item.setWidth(600);
         item.setHeight(400);
@@ -100,6 +103,8 @@ private slots:
     {
         TraceTimelineModel model;
         TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
         setupRing4(model, item);
         QCOMPARE(item.status(), QString());
         QCOMPARE(item.edgeCount(), 4);
@@ -128,6 +133,8 @@ private slots:
         TraceTimelineModel model;
         model.addSnapshot({build(m_ring4)});
         TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
         item.setModel(&model);
         item.setWidth(600);
         item.setHeight(400);
@@ -140,6 +147,8 @@ private slots:
     {
         TraceTimelineModel model;
         TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
         setupRing4(model, item);
         QSignalSpy changed(&item, &TraceGraphItem::graphChanged);
         item.setDirected(false);
@@ -165,6 +174,8 @@ private slots:
     {
         TraceTimelineModel model;
         TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
         setupRing4(model, item);
         item.setMaxEdges(1);
         QCOMPARE(item.shownEdgeCount(), 1);
@@ -179,6 +190,8 @@ private slots:
     {
         TraceTimelineModel model;
         TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
         setupRing4(model, item);
         QSignalSpy rank(&item, &TraceGraphItem::selectedRankChanged);
         const QPointF p2 = item.nodePosition(item.graph().indexOfRank(2));
@@ -211,6 +224,8 @@ private slots:
     {
         TraceTimelineModel model;
         TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
         setupRing4(model, item);
         item.setViewStartNs(1000 * kMs);
         item.setViewEndNs(2000 * kMs);
@@ -243,6 +258,8 @@ private slots:
         model.addSnapshot({overview, -1, -1, 1000 * kMs});
         QSignalSpy requests(&model, &TraceTimelineModel::detailRequested);
         TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
         item.setModel(&model);
         item.setWidth(600);
         item.setHeight(400);
@@ -290,6 +307,8 @@ private slots:
         TraceTimelineModel model;
         model.addSnapshot({build(anchor)});
         TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
         item.setWidth(900);
         item.setHeight(700);
         QElapsedTimer t;
@@ -311,6 +330,8 @@ private slots:
         TraceTimelineModel model;
         model.addSnapshot({build(anchor)});
         TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
         item.setWidth(600);
         item.setHeight(400);
         item.setModel(&model);
@@ -335,6 +356,8 @@ private slots:
     {
         TraceTimelineModel model;
         TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
         setupRing4(model, item); // ranks 0, 1 on nodeA; 2, 3 on nodeB; ring 0->1->2->3->0
         item.setLevel(QStringLiteral("nodes"));
         QCOMPARE(item.graph().rankNodeCount, 2);
@@ -379,6 +402,8 @@ private slots:
     {
         TraceTimelineModel model;
         TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
         setupRing4(model, item);
         item.setViewEndNs(0); // whole run: one communicator
         QCOMPARE(item.communicators(), QStringLiteral("auto"));
@@ -388,61 +413,111 @@ private slots:
         QCOMPARE(item.graph().nodes.size(), 5);
     }
 
-    // Many ranks: Auto switches to the communication matrix; cells, clicks, tooltips, findings.
-    void matrixForManyRanks()
+    // Many ranks: data-driven layout (synchronous here), zoom / pan, findings and highlighting.
+    void manyRanksLayoutZoomAndFindings()
     {
         QTemporaryDir tmp;
-        const QString anchor = writeManyMessagesOtf2(tmp.path(), 160, 2);
+        // 8 x 6 process grid (not periodic), so Auto lays the ranks out as a grid.
+        QVector<QPair<int, int>> edges;
+        const int cols = 8, n = 48;
+        for (int r = 0; r < n; ++r) {
+            if (r % cols + 1 < cols)
+                edges << QPair<int, int>{r, r + 1} << QPair<int, int>{r + 1, r};
+            if (r + cols < n)
+                edges << QPair<int, int>{r, r + cols} << QPair<int, int>{r + cols, r};
+        }
+        const QString anchor = writeEdgesOtf2(tmp.path(), n, edges, 2);
         QVERIFY(!anchor.isEmpty());
         TraceTimelineModel model;
         model.addSnapshot({build(anchor)});
         TraceGraphItem item;
+        item.setSynchronousLayout(true);
         item.setModel(&model);
         item.setWidth(900);
         item.setHeight(700);
         item.setLevel(QStringLiteral("ranks"));
+        item.setShowCollectives(false);
         QCOMPARE(item.status(), QString());
-        QCOMPARE(item.view(), QStringLiteral("auto"));
-        QCOMPARE(item.effectiveView(), QStringLiteral("matrix"));
-        QCOMPARE(item.graph().rankNodeCount, 160);
+        QCOMPARE(item.layout(), QStringLiteral("auto"));
+        QCOMPARE(item.effectiveLayout(), QStringLiteral("stress"));
+        // Grid neighbours next to each other in the picture: 1 and 9 are nearer to 0 than 2 or 16.
+        auto dist = [&](int a, int b) {
+            const QPointF d = item.nodePosition(item.graph().indexOfRank(a)) - item.nodePosition(item.graph().indexOfRank(b));
+            return std::hypot(d.x(), d.y());
+        };
+        QVERIFY(dist(0, 1) < dist(0, 2));
+        QVERIFY(dist(0, 8) < dist(0, 16));
+        QVERIFY(dist(0, 1) < dist(0, 47) / 4);
+        QVERIFY(nonWhite(render(item)) > 0);
 
-        // Rank 5 sends to rank 6: its cell is drawn (green), the cell 6 -> 5 is empty.
-        const int r5 = item.graph().indexOfRank(5), r6 = item.graph().indexOfRank(6);
-        const QImage img = render(item);
-        const QRectF m = item.matrixRect();
-        QVERIFY(m.width() > 100 && m.height() == m.width());
-        const QPointF filled = item.matrixCellCenter(r5, r6);
-        const QColor c = img.pixelColor(filled.toPoint());
-        QVERIFY2(c.green() > c.red() && c.green() > c.blue(), qPrintable(c.name()));
-        const QPointF empty = item.matrixCellCenter(r6, r5 + 40);
-        QCOMPARE(img.pixelColor(empty.toPoint()).name(), QStringLiteral("#fafafa"));
-        QCOMPARE(item.matrixCellAt(filled), QPoint(r6, r5));
-        QCOMPARE(item.matrixCellAt(QPointF(1, 1)), QPoint(-1, -1));
+        // Zoom around a point keeps that point; pan moves; reset.
+        const QPointF p0 = item.nodePosition(item.graph().indexOfRank(0));
+        item.zoomAt(p0.x(), p0.y(), 3);
+        QVERIFY(std::abs(item.zoom() - 3) < 1e-9);
+        const QPointF p0z = item.nodePosition(item.graph().indexOfRank(0));
+        QVERIFY(std::hypot(p0z.x() - p0.x(), p0z.y() - p0.y()) < 1e-6);
+        QVERIFY(dist(0, 1) > 0);
+        item.panBy(10, -5);
+        const QPointF p0p = item.nodePosition(item.graph().indexOfRank(0));
+        QVERIFY(std::abs(p0p.x() - p0z.x() - 10) < 1e-6 && std::abs(p0p.y() - p0z.y() + 5) < 1e-6);
+        item.zoomAt(0, 0, 0.001); // clamped to 1
+        QCOMPARE(item.zoom(), 1.0);
+        item.resetView();
+        QCOMPARE(item.pan(), QPointF());
 
-        // Hover and click on the cell: sender selected, edge details emitted.
-        QVERIFY2(item.toolTipAt(filled.x(), filled.y()).contains(QStringLiteral("rank 5")), qPrintable(item.toolTipAt(filled.x(), filled.y())));
-        QSignalSpy clicked(&item, &TraceGraphItem::edgeClicked);
-        item.clickAt(filled.x(), filled.y());
-        QCOMPARE(item.selectedRank(), 5);
-        QCOMPARE(clicked.count(), 1);
-        QCOMPARE(clicked.first().first().toMap().value(QStringLiteral("toRank")).toInt(), 6);
+        // Findings as maps; highlighting a finding lights its ranks; zoom to it.
+        QVERIFY(!item.findingMaps().isEmpty());
+        const QVariantMap pattern = item.findingMaps().first().toMap();
+        QCOMPARE(pattern.value(QStringLiteral("kind")).toString(), QStringLiteral("pattern"));
+        QVERIFY2(pattern.value(QStringLiteral("metric")).toString().contains(QStringLiteral("8 × 6")),
+                 qPrintable(pattern.value(QStringLiteral("metric")).toString()));
+        // A finding with ranks: pick one (outlier / late sender / link) if present.
+        int withRanks = -1;
+        for (int i = 0; i < item.findingMaps().size(); ++i)
+            if (!item.findingMaps()[i].toMap().value(QStringLiteral("ranks")).toList().isEmpty())
+                withRanks = i;
+        if (withRanks >= 0) {
+            QSignalSpy changed(&item, &TraceGraphItem::highlightChanged);
+            item.zoomToFinding(withRanks);
+            QCOMPARE(item.highlightedFinding(), withRanks);
+            QCOMPARE(changed.count(), 1);
+            const int r = item.findingMaps()[withRanks].toMap().value(QStringLiteral("ranks")).toList().first().toInt();
+            QVERIFY(item.highlightedNodes().value(item.graph().indexOfRank(r)));
+            QVERIFY(item.zoom() >= 1);
+            QVERIFY(nonWhite(render(item)) > 0);
+            item.setHighlightedFinding(-1);
+            QVERIFY(!item.highlightedNodes().contains(true));
+        }
 
-        // Findings: the ring r -> r + 1 of the fixture.
-        QVERIFY(!item.findings().isEmpty());
-        QVERIFY2(item.findings().first().contains(QStringLiteral("pipeline")), qPrintable(item.findings().first()));
-        QCOMPARE(item.findings().size(), item.findingRanks().size());
+        // Fixed layouts.
+        item.setLayout(QStringLiteral("circle"));
+        QCOMPARE(item.effectiveLayout(), QStringLiteral("circle"));
+        item.setLayout(QStringLiteral("grid"));
+        QCOMPARE(item.effectiveLayout(), QStringLiteral("grid"));
+        // The detected 8-wide grid: rank 9 right below rank 1.
+        const QPointF g1 = item.nodePosition(item.graph().indexOfRank(1));
+        const QPointF g9 = item.nodePosition(item.graph().indexOfRank(9));
+        QVERIFY(std::abs(g1.x() - g9.x()) < 1e-6 && g9.y() > g1.y());
+    }
 
-        // Forced graph view and back; compute nodes: 2 hosts -> graph again under Auto.
-        item.setView(QStringLiteral("graph"));
-        QCOMPARE(item.effectiveView(), QStringLiteral("graph"));
-        item.setView(QStringLiteral("auto"));
-        item.setLevel(QStringLiteral("nodes"));
-        QCOMPARE(item.effectiveView(), QStringLiteral("graph"));
-        item.setView(QStringLiteral("matrix"));
-        QCOMPARE(item.effectiveView(), QStringLiteral("matrix"));
-        QVERIFY(!render(item).isNull());
-        // Findings come from the ranks also at the nodes level.
-        QVERIFY(item.findings().first().contains(QStringLiteral("pipeline")));
+    // Layout in the background: positions arrive later; the old ones stay meanwhile.
+    void layoutInBackground()
+    {
+        QTemporaryDir tmp;
+        QVector<QPair<int, int>> edges;
+        for (int r = 1; r < 64; ++r)
+            edges << QPair<int, int>{r, r & (r - 1)};
+        const QString anchor = writeEdgesOtf2(tmp.path(), 64, edges, 2);
+        QVERIFY(!anchor.isEmpty());
+        TraceTimelineModel model;
+        model.addSnapshot({build(anchor)});
+        TraceGraphItem item;
+        item.setWidth(600);
+        item.setHeight(500);
+        item.setModel(&model);
+        item.setLevel(QStringLiteral("ranks"));
+        QTRY_VERIFY(!item.layoutBusy());
+        QCOMPARE(item.effectiveLayout(), QStringLiteral("stress"));
     }
 
     // Wait colours span the window's least to most waiting rank (white to blue).
@@ -450,6 +525,8 @@ private slots:
     {
         TraceTimelineModel model;
         TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
         setupRing4(model, item);
         QCOMPARE(item.minWaitSeconds(), 0.0);
         QVERIFY(item.maxWaitSeconds() > item.minWaitSeconds());
@@ -489,7 +566,6 @@ private slots:
                   "    property string graphCommunicators: 'auto'\n"
                   "    property string graphLayout: 'circle'\n"
                   "    property int graphMaxEdges: 500\n"
-                  "    property string graphView: 'auto'\n"
                   "    property var lastEdge: null\n"
                   "    signal viewRequested(real startNs, real endNs)\n"
                   "  }\n"
@@ -518,10 +594,10 @@ private slots:
         QCOMPARE(own->edgeCount(), 5); // ring + 3 -> 2 (1 -> 2 adds to the ring's edge), no star
         state->setProperty("graphWeight", QStringLiteral("messages"));
         QCOMPARE(own->weight(), QStringLiteral("messages"));
-        state->setProperty("graphView", QStringLiteral("matrix"));
-        QCOMPARE(own->effectiveView(), QStringLiteral("matrix"));
-        state->setProperty("graphView", QStringLiteral("auto"));
-        QCOMPARE(own->effectiveView(), QStringLiteral("graph"));
+        state->setProperty("graphLayout", QStringLiteral("grid"));
+        QCOMPARE(own->layout(), QStringLiteral("grid"));
+        state->setProperty("graphLayout", QStringLiteral("circle"));
+        QCOMPARE(own->effectiveLayout(), QStringLiteral("circle"));
 
         // Own view: the overview bar moves the window through viewRequested.
         QMetaObject::invokeMethod(state, "viewRequested", Q_ARG(double, 1000.0 * kMs), Q_ARG(double, 2000.0 * kMs));

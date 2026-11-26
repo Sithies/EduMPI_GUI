@@ -57,7 +57,9 @@ set_tests_properties(trace_graph_item PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=of
 # Not a test: renders TraceGraph.qml for windows of a real trace into PNGs (tools/graph-snapshot).
 qt_add_executable(trace_graph_snapshot
     ${PROJECT_SOURCE_DIR}/tools/graph-snapshot/graph_snapshot.cpp
+    otf2_fixture.h otf2_fixture.cpp
     ${PROJECT_SOURCE_DIR}/trace_timeline_item.h ${PROJECT_SOURCE_DIR}/trace_timeline_item.cpp
     ${PROJECT_SOURCE_DIR}/trace_graph_item.h ${PROJECT_SOURCE_DIR}/trace_graph_item.cpp)
 target_link_libraries(trace_graph_snapshot PRIVATE Qt6::Gui Qt6::Quick Qt6::Qml edumpi_trace)
 target_compile_definitions(trace_graph_snapshot PRIVATE EDUMPI_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+target_include_directories(trace_graph_snapshot PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

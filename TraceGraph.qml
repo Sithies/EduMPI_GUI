@@ -105,43 +105,90 @@ Rectangle {
                         }
                     }
                 }
-                // View switch: Auto (by size) | Graph | Matrix, shared with Trace Options.
+                // Layout: Auto (chosen from the data) or a fixed one, shared with Trace Options.
+                ComboBox {
+                    id: layoutBox
+                    implicitHeight: trace_graph_view.embedded ? 18 : 22
+                    implicitWidth: 170
+                    font.pointSize: 9
+                    readonly property var values: ["auto", "circle", "grid", "stress", "spectral", "spectral circle"]
+                    model: [
+                        qsTr("Layout: Auto") + (graph.layout === "auto" ? " (" + graph.effectiveLayout + ")" : ""),
+                        qsTr("Layout: Circle"), qsTr("Layout: Grid"), qsTr("Layout: Stress"),
+                        qsTr("Layout: Spectral"), qsTr("Layout: Spectral circle")
+                    ]
+                    currentIndex: Math.max(0, values.indexOf(graph.layout))
+                    contentItem: Text {
+                        leftPadding: 6
+                        text: layoutBox.displayText
+                        color: "white"
+                        font: layoutBox.font
+                        verticalAlignment: Text.AlignVCenter
+                        elide: Text.ElideRight
+                    }
+                    background: Rectangle {
+                        radius: 3
+                        color: layoutBox.hovered ? "#666666" : "#5a5a5a"
+                    }
+                    onActivated: (index) => {
+                        if (trace_graph_view.traceState)
+                            trace_graph_view.traceState.graphLayout = values[index]
+                    }
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 500
+                    ToolTip.text: qsTr("Auto computes several layouts from who talks to whom and keeps the one where communication partners end up next to each other:\n"
+                        + "• Circle: ranks in order, grouped by compute node\n"
+                        + "• Grid: the process grid of a detected 2D stencil\n"
+                        + "• Stress: distances in the picture follow the hops between ranks (grids become grids, rings rings, clusters clusters)\n"
+                        + "• Spectral: from the eigenvectors of the communication graph\n"
+                        + "• Spectral circle: a circle in which partners sit next to each other")
+                }
+                // Zoom: − / + / Fit (also mouse wheel or pinch; drag to move).
                 Row {
                     spacing: 2
                     Repeater {
                         model: [
-                            { value: "auto", label: qsTr("Auto"), tip: qsTr("Graph for up to 128 ranks / nodes, communication matrix for more") },
-                            { value: "graph", label: qsTr("Graph"), tip: qsTr("Circles and lines: who talks to whom") },
-                            { value: "matrix", label: qsTr("Matrix"), tip: qsTr("Communication matrix: sender rows × receiver columns, colour = bytes, messages or waiting; scales to thousands of ranks") }
+                            { label: "−", tip: qsTr("Zoom out (mouse wheel / pinch)"), act: "out" },
+                            { label: "+", tip: qsTr("Zoom in (mouse wheel / pinch); drag to move"), act: "in" },
+                            { label: qsTr("Fit"), tip: qsTr("Show the whole graph"), act: "fit" }
                         ]
                         delegate: Rectangle {
                             required property var modelData
-                            readonly property bool active: graph.view === modelData.value
-                            width: viewText.implicitWidth + 12
+                            width: Math.max(22, zoomText.implicitWidth + 10)
                             height: trace_graph_view.embedded ? 18 : 22
                             radius: 3
-                            color: active ? "#1d4ed8" : (viewMouse.containsMouse ? "#666666" : "#5a5a5a")
+                            color: zoomMouse.containsMouse ? "#666666" : "#5a5a5a"
                             Text {
-                                id: viewText
+                                id: zoomText
                                 anchors.centerIn: parent
-                                text: modelData.label + (modelData.value === "auto" && parent.active
-                                      ? " (" + (graph.effectiveView === "matrix" ? qsTr("matrix") : qsTr("graph")) + ")" : "")
+                                text: modelData.label
                                 color: "white"
-                                font.pointSize: 9
+                                font.pointSize: 10
+                                font.bold: true
                             }
                             MouseArea {
-                                id: viewMouse
+                                id: zoomMouse
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 onClicked: {
-                                    if (trace_graph_view.traceState)
-                                        trace_graph_view.traceState.graphView = modelData.value
+                                    if (modelData.act === "fit")
+                                        graph.resetView()
+                                    else
+                                        graph.zoomAt(graph.width / 2, graph.height / 2, modelData.act === "in" ? 1.5 : 1 / 1.5)
                                 }
                             }
-                            ToolTip.visible: viewMouse.containsMouse
+                            ToolTip.visible: zoomMouse.containsMouse
                             ToolTip.delay: 500
                             ToolTip.text: modelData.tip
                         }
+                    }
+                    Text {
+                        visible: graph.zoom > 1.01
+                        anchors.verticalCenter: parent.verticalCenter
+                        leftPadding: 4
+                        text: graph.zoom.toFixed(1) + "×"
+                        color: "#cccccc"
+                        font.pointSize: 9
                     }
                 }
                 Rectangle {
@@ -174,7 +221,7 @@ Rectangle {
                         var t = qsTr("%1 edges").arg(graph.edgeCount)
                         if (graph.communicatorsMerged)
                             t += qsTr(" · communicators merged")
-                        if (graph.shownEdgeCount < graph.edgeCount && graph.effectiveView !== "matrix")
+                        if (graph.shownEdgeCount < graph.edgeCount)
                             t += qsTr(" (heaviest %1 shown)").arg(graph.shownEdgeCount)
                         if (graph.maxWaitSeconds > 0)
                             t += (graph.effectiveLevel === "nodes" ? qsTr(" · max. waiting per node %1 ms") : qsTr(" · max. waiting per rank %1 ms"))
@@ -209,7 +256,7 @@ Rectangle {
                 // Colours as in the 3D view (Cores3D.qml): P2P green, collectives black,
                 // waiting per process white to blue. New: communicator node, host border.
                 Repeater {
-                    model: graph.effectiveView === "matrix" ? [] : [
+                    model: [
                         { label: qsTr("P2P message"), colour: "#00d500", dashed: false },
                         { label: qsTr("Collective → communicator"), colour: "#000000", dashed: true }
                     ]
@@ -243,7 +290,6 @@ Rectangle {
                 }
                 Row {
                     spacing: 4
-                    visible: graph.effectiveView !== "matrix"
                     Canvas {
                         width: 14
                         height: 14
@@ -273,7 +319,7 @@ Rectangle {
                 }
                 Row {
                     spacing: 4
-                    visible: graph.effectiveLevel === "ranks" && graph.effectiveView !== "matrix"
+                    visible: graph.effectiveLevel === "ranks"
                     Rectangle {
                         width: 12
                         height: 12
@@ -292,7 +338,7 @@ Rectangle {
                 }
                 Row {
                     spacing: 4
-                    visible: graph.effectiveLevel === "nodes" && graph.effectiveView !== "matrix"
+                    visible: graph.effectiveLevel === "nodes"
                     Rectangle {
                         width: 12
                         height: 12
@@ -342,7 +388,7 @@ Rectangle {
                     text: {
                         var w = graph.weight === "messages" ? qsTr("number of messages")
                               : graph.weight === "wait" ? qsTr("waiting time") : qsTr("bytes")
-                        return graph.effectiveView === "matrix" ? qsTr("Cell colour: %1").arg(w) : qsTr("Edge width: %1").arg(w)
+                        return qsTr("Edge width: %1").arg(w)
                     }
                     color: "#374151"
                     font.pointSize: 11
@@ -366,9 +412,7 @@ Rectangle {
                     wrapMode: Text.WordWrap
                     color: "#374151"
                     font.pointSize: 10
-                    text: graph.effectiveView === "matrix"
-                          ? qsTr("Communication matrix: row = sender, column = receiver, darker = more. Bands next to the diagonal are neighbour exchanges, blocks are compute nodes; the strip on the right is the waiting of each row (white = least, blue = most). Click a cell to select the sender.")
-                          : graph.effectiveLevel === "nodes"
+                    text: graph.effectiveLevel === "nodes"
                           ? qsTr("Each circle is one compute node (all its ranks together). Lines: messages between ranks of different nodes. Green ring: messages inside the node. Double-click a node to show its ranks.")
                           : qsTr("Each circle is one MPI rank, border colour = its compute node. Lines: messages, arrow from sender to receiver. Click a rank to select it, hover for details.")
                 }
@@ -398,51 +442,18 @@ Rectangle {
                         + "• Black dashed lines: collectives (MPI_Allreduce, …) to a diamond per communicator.\n"
                         + "• Fill white → blue: waiting time (late sender), as in the 3D view.\n"
                         + "• Auto: ranks when zoomed in to single steps (≤ 50 ms) or for ≤ 64 ranks, nodes otherwise.\n"
-                        + "• Matrix: sender rows × receiver columns; for many ranks (Auto: more than 128) it shows the pattern where circles would overlap.\n"
-                        + "• Yellow box: findings of the window – communication pattern, share of traffic inside the compute nodes, ranks that wait far more than the others, senders that make others wait (click one to select the rank).\n"
-                        + "Hover a circle, line or cell for its numbers; double-click a node to open it into its ranks.")
+                        + "• Layout Auto: chosen from the data so that partners sit next to each other (see the Layout box).\n"
+                        + "• Zoom: mouse wheel or pinch, drag to move, Fit to see everything; rank numbers appear when zoomed in far enough.\n"
+                        + "• Findings (right): communication pattern, locality, waiting, slow nodes, late senders. Hover one to highlight its ranks, click to zoom there and select the rank.\n"
+                        + "Hover a circle or line for its numbers; double-click a node to open it into its ranks.")
                 }
             }
         }
 
-        // Findings of the window (pattern, locality, waiting outliers, late senders).
-        Rectangle {
+        RowLayout {
             Layout.fillWidth: true
-            visible: graph.findings.length > 0 && !trace_graph_view.embedded
-            Layout.preferredHeight: visible ? findingsColumn.implicitHeight + 8 : 0
-            color: "#fffbeb"
-            border.color: "#fde68a"
-            Column {
-                id: findingsColumn
-                anchors.fill: parent
-                anchors.margins: 4
-                anchors.leftMargin: 8
-                spacing: 1
-                Repeater {
-                    model: graph.findings
-                    delegate: Text {
-                        required property string modelData
-                        required property int index
-                        readonly property int rank: graph.findingRanks[index]
-                        width: findingsColumn.width
-                        elide: Text.ElideRight
-                        text: (rank >= 0 ? "▸ " : "• ") + modelData
-                        color: rank >= 0 && findingMouse.containsMouse ? "#1d4ed8" : "#374151"
-                        font.pointSize: 10
-                        MouseArea {
-                            id: findingMouse
-                            anchors.fill: parent
-                            hoverEnabled: rank >= 0
-                            cursorShape: rank >= 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
-                            onClicked: {
-                                if (rank >= 0 && trace_graph_view.traceState)
-                                    trace_graph_view.traceState.selectedRank = rank
-                            }
-                        }
-                    }
-                }
-            }
-        }
+            Layout.fillHeight: true
+            spacing: 0
 
         TraceGraphItem {
             id: graph
@@ -458,9 +469,8 @@ Rectangle {
             weight: trace_graph_view.traceState ? trace_graph_view.traceState.graphWeight : "bytes"
             level: trace_graph_view.traceState ? trace_graph_view.traceState.graphLevel : "auto"
             communicators: trace_graph_view.traceState && trace_graph_view.traceState.graphCommunicators ? trace_graph_view.traceState.graphCommunicators : "auto"
-            layout: trace_graph_view.traceState ? trace_graph_view.traceState.graphLayout : "circle"
+            layout: trace_graph_view.traceState && trace_graph_view.traceState.graphLayout ? trace_graph_view.traceState.graphLayout : "auto"
             maxEdges: trace_graph_view.traceState ? trace_graph_view.traceState.graphMaxEdges : 500
-            view: trace_graph_view.traceState && trace_graph_view.traceState.graphView ? trace_graph_view.traceState.graphView : "auto"
 
             onSelectedRankChanged: {
                 if (trace_graph_view.traceState && trace_graph_view.traceState.selectedRank !== selectedRank)
@@ -494,6 +504,186 @@ Rectangle {
                 visible: graphHover.hovered && text !== ""
                 delay: 250
             }
+
+            // Zoom: wheel / trackpad scroll around the pointer, pinch; drag moves the view.
+            WheelHandler {
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                onWheel: (event) => {
+                    var d = event.angleDelta.y !== 0 ? event.angleDelta.y : event.pixelDelta.y * 2
+                    graph.zoomAt(point.position.x, point.position.y, Math.pow(1.0015, d))
+                }
+            }
+            PinchHandler {
+                id: pinch
+                target: null
+                property real last: 1
+                onActiveChanged: last = 1
+                onActiveScaleChanged: {
+                    graph.zoomAt(centroid.position.x, centroid.position.y, activeScale / last)
+                    last = activeScale
+                }
+            }
+            DragHandler {
+                target: null
+                property point last: Qt.point(0, 0)
+                onActiveChanged: last = Qt.point(0, 0)
+                onTranslationChanged: {
+                    graph.panBy(translation.x - last.x, translation.y - last.y)
+                    last = Qt.point(translation.x, translation.y)
+                }
+            }
+        }
+
+        // Findings of the window: one card each; hover highlights its ranks / link in the graph,
+        // click zooms there and selects the rank (also in the timeline), click again resets.
+        Rectangle {
+            id: findingsPanel
+            Layout.fillHeight: true
+            Layout.preferredWidth: visible ? (trace_graph_view.embedded ? 260 : 320) : 0
+            visible: graph.findingList.length > 0 && trace_graph_view.width > 700
+            color: "#f9fafb"
+            border.color: "#e5e7eb"
+            property int pinned: -1
+
+            Connections {
+                target: graph
+                function onGraphChanged() {
+                    if (findingsPanel.pinned >= graph.findingList.length)
+                        findingsPanel.pinned = -1
+                }
+            }
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 6
+                spacing: 6
+                Text {
+                    text: qsTr("Findings in this window")
+                    font.bold: true
+                    font.pointSize: 11
+                    color: "#111827"
+                }
+                Text {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    text: qsTr("Hover to highlight, click to zoom there.")
+                    font.pointSize: 9
+                    color: "#6b7280"
+                }
+                ListView {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    spacing: 6
+                    model: graph.findingList
+                    ScrollBar.vertical: ScrollBar {}
+                    delegate: Rectangle {
+                        id: card
+                        required property var modelData
+                        required property int index
+                        readonly property bool active: findingsPanel.pinned === index || cardMouse.containsMouse
+                        readonly property color severityColor: modelData.severity >= 2 ? "#dc2626"
+                                                             : modelData.severity === 1 ? "#f59e0b" : "#9ca3af"
+                        width: ListView.view.width
+                        height: cardColumn.implicitHeight + 14
+                        radius: 6
+                        color: active ? "#fff7ed" : "#ffffff"
+                        border.color: active ? "#f97316" : "#e5e7eb"
+                        border.width: active ? 2 : 1
+                        Rectangle {
+                            width: 4
+                            radius: 2
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            anchors.margins: 3
+                            color: card.severityColor
+                        }
+                        ColumnLayout {
+                            id: cardColumn
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.leftMargin: 14
+                            anchors.rightMargin: 8
+                            anchors.topMargin: 7
+                            spacing: 2
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                Text {
+                                    text: {
+                                        switch (card.modelData.kind) {
+                                        case "pattern": return "◇"
+                                        case "locality": return "⌂"
+                                        case "waiting": return "◷"
+                                        case "outlier": return "▲"
+                                        case "imbalance": return "⚖"
+                                        case "cause": return "⇢"
+                                        case "link": return "⇄"
+                                        }
+                                        return "•"
+                                    }
+                                    color: card.severityColor
+                                    font.pointSize: 13
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: card.modelData.title
+                                    font.bold: true
+                                    font.pointSize: 10
+                                    color: "#111827"
+                                    elide: Text.ElideRight
+                                }
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: card.modelData.metric
+                                font.pointSize: 12
+                                font.bold: true
+                                color: card.modelData.severity >= 2 ? "#b91c1c" : "#1f2937"
+                                wrapMode: Text.WordWrap
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: card.modelData.detail
+                                font.pointSize: 9
+                                color: "#4b5563"
+                                wrapMode: Text.WordWrap
+                            }
+                        }
+                        MouseArea {
+                            id: cardMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onContainsMouseChanged: {
+                                if (findingsPanel.pinned < 0)
+                                    graph.highlightedFinding = containsMouse ? card.index : -1
+                            }
+                            onClicked: {
+                                if (findingsPanel.pinned === card.index) {
+                                    findingsPanel.pinned = -1
+                                    graph.highlightedFinding = -1
+                                    graph.resetView()
+                                    return
+                                }
+                                findingsPanel.pinned = card.index
+                                var f = card.modelData
+                                if (f.ranks.length > 0 || f.nodes.length > 0)
+                                    graph.zoomToFinding(card.index)
+                                else
+                                    graph.highlightedFinding = card.index
+                                // Late sender / link: the sender, else the rank of the finding.
+                                var r = f.fromRank >= 0 ? f.fromRank : f.rank
+                                if (r >= 0 && trace_graph_view.traceState)
+                                    trace_graph_view.traceState.selectedRank = r
+                            }
+                        }
+                    }
+                }
+            }
+        }
         }
     }
 
