@@ -477,9 +477,36 @@ public:
         , m_regions(resolveRegions(d))
         , m_comms(resolveComms(d))
     {
+        // Regions by reference in a vector (looked up for every Enter / Leave) when the
+        // references are dense, as Score-P writes them; otherwise the hash.
+        OTF2_RegionRef maxRef = 0;
+        for (auto it = m_regions.cbegin(); it != m_regions.cend(); ++it)
+            maxRef = std::max(maxRef, it.key());
+        if (!m_regions.isEmpty() && maxRef < OTF2_RegionRef(kDenseLimit)) {
+            m_regionByRef.resize(qsizetype(maxRef) + 1);
+            for (auto it = m_regions.cbegin(); it != m_regions.cend(); ++it)
+                m_regionByRef[qsizetype(it.key())] = &it.value();
+        }
     }
 
-    void addLocation(OTF2_LocationRef loc, int rank) { m_locations[loc].rank = rank; }
+    void addLocation(OTF2_LocationRef loc, int rank)
+    {
+        LocationState *st = location(loc);
+        if (!st) {
+            const int idx = int(m_states.size());
+            m_states.append(LocationState());
+            m_stateRefs.append(loc);
+            if (loc < OTF2_LocationRef(kDenseLimit)) {
+                if (qsizetype(loc) >= m_stateByRef.size())
+                    m_stateByRef.resize(qsizetype(loc) + 1, -1);
+                m_stateByRef[qsizetype(loc)] = idx;
+            } else {
+                m_stateBySparseRef.insert(loc, idx);
+            }
+            st = &m_states.last();
+        }
+        st->rank = rank;
+    }
     bool cancelled() const { return m_cancel && m_cancel->load(std::memory_order_relaxed); }
 
     // Early stop (TraceSink::stopAfterNs); stopAfterNs < 0 = never.
@@ -493,7 +520,7 @@ public:
         if (m_stopAfter < 0 || ns <= m_stopAfter || ++m_sinceStopCheck < kStopCheckEvents)
             return false;
         m_sinceStopCheck = 0;
-        for (const LocationState &st : std::as_const(m_locations))
+        for (const LocationState &st : std::as_const(m_states))
             for (const OpenRegion &r : st.stack)
                 if (r.enterNs <= m_stopAfter)
                     return false;
@@ -545,9 +572,13 @@ public:
         // a varying number of events.
         Q_UNUSED(current);
         cp->positions.reserve(m_indexLocations.size());
-        for (OTF2_LocationRef loc : std::as_const(m_indexLocations))
-            cp->positions.insert(loc, m_locations.value(loc).delivered + 1);
-        cp->locations = m_locations;
+        for (OTF2_LocationRef loc : std::as_const(m_indexLocations)) {
+            const LocationState *st = location(loc);
+            cp->positions.insert(loc, (st ? st->delivered : 0) + 1);
+        }
+        cp->locations.reserve(m_states.size());
+        for (qsizetype i = 0; i < m_states.size(); ++i)
+            cp->locations.insert(m_stateRefs[i], m_states[i]);
         cp->maxNs = m_maxNs;
         m_sink.saveMatchStateInto(&cp->match);
         m_index->append(ns, std::move(cp));
@@ -557,7 +588,10 @@ public:
     // its time (only the last event of locations already exhausted there) are skipped.
     void resume(const ReadCheckpoint &cp)
     {
-        m_locations = cp.locations;
+        for (auto it = cp.locations.cbegin(); it != cp.locations.cend(); ++it) {
+            addLocation(it.key(), it->rank);
+            *location(it.key()) = it.value();
+        }
         m_maxNs = cp.maxNs;
         m_resumeRaw = cp.raw;
         m_sink.restoreMatchState(cp.match);
@@ -566,8 +600,12 @@ public:
 
     LocationState *location(OTF2_LocationRef loc)
     {
-        const auto it = m_locations.find(loc);
-        return it == m_locations.end() ? nullptr : &it.value();
+        int idx = -1;
+        if (loc < OTF2_LocationRef(m_stateByRef.size()))
+            idx = m_stateByRef[qsizetype(loc)];
+        else if (!m_stateBySparseRef.isEmpty())
+            idx = m_stateBySparseRef.value(loc, -1);
+        return idx >= 0 ? &m_states[idx] : nullptr;
     }
 
     void enter(LocationState &st, OTF2_RegionRef region, qint64 ns)
@@ -665,13 +703,13 @@ public:
     {
         if (m_stopped) {
             // Regions entered after the stop time are not needed (and their real end unknown).
-            for (LocationState &st : m_locations) {
+            for (LocationState &st : m_states) {
                 st.stack.clear();
                 while (!st.userStack.isEmpty() && st.userStack.last().enterNs > m_stopAfter)
                     st.userStack.removeLast();
             }
         }
-        for (LocationState &st : m_locations) {
+        for (LocationState &st : m_states) {
             while (!st.stack.isEmpty()) {
                 const OpenRegion r = st.stack.takeLast();
                 emitRegion(st, r, std::max(endNs, r.enterNs));
@@ -684,6 +722,8 @@ public:
 private:
     const RegionInfo *regionInfo(OTF2_RegionRef region) const
     {
+        if (!m_regionByRef.isEmpty())
+            return region < OTF2_RegionRef(m_regionByRef.size()) ? m_regionByRef[qsizetype(region)] : nullptr;
         const auto it = m_regions.constFind(region);
         return it == m_regions.cend() ? nullptr : &it.value();
     }
@@ -692,7 +732,7 @@ private:
     void emitUserRegion(LocationState &st, qint64 leaveNs)
     {
         const OpenUserRegion u = st.userStack.takeLast();
-        m_sink.addUserRegion({st.rank, m_regions[u.region].name, int(st.userStack.size()), u.enterNs, leaveNs});
+        m_sink.addUserRegion({st.rank, regionInfo(u.region)->name, int(st.userStack.size()), u.enterNs, leaveNs});
     }
 
     int worldRank(OTF2_CommRef comm, uint32_t local, int self) const
@@ -709,7 +749,7 @@ private:
 
     void emitRegion(const LocationState &st, const OpenRegion &r, qint64 leaveNs)
     {
-        const RegionInfo &info = m_regions[r.region];
+        const RegionInfo &info = *regionInfo(r.region); // only known regions are opened
         m_sink.addCall({st.rank, info.kind, info.name, r.enterNs, leaveNs});
         for (P2PSend s : r.sends) {
             s.function = info.name;
@@ -741,7 +781,14 @@ private:
     uint64_t m_offset;
     QHash<OTF2_RegionRef, RegionInfo> m_regions;
     QHash<OTF2_CommRef, CommInfo> m_comms;
-    QHash<OTF2_LocationRef, LocationState> m_locations;
+    // Location states in a vector, found by reference through m_stateByRef (references below
+    // kDenseLimit, as Score-P writes them) or m_stateBySparseRef: a lookup per event.
+    static constexpr quint64 kDenseLimit = quint64(1) << 22;
+    QVector<const RegionInfo *> m_regionByRef; // empty: references not dense, use m_regions
+    QVector<LocationState> m_states;
+    QVector<OTF2_LocationRef> m_stateRefs;
+    QVector<int> m_stateByRef;
+    QHash<OTF2_LocationRef, int> m_stateBySparseRef;
     qint64 m_maxNs = 0;
     static constexpr int kStopCheckEvents = 4096;
     TraceIndex *m_index = nullptr;
