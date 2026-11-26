@@ -30,6 +30,8 @@ add_library(edumpi_trace STATIC
     timeline_builder.cpp
     otf2_trace_reader.h
     otf2_trace_reader.cpp
+    evt_prefetch.h
+    evt_prefetch.cpp
     ${PROJECT_SOURCE_DIR}/data_column.h
     trace_data_source.h
     trace_data_source.cpp

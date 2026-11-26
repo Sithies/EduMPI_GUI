@@ -1,3 +1,4 @@
+#include <QElapsedTimer>
 #include <QtTest>
 #include <QThread>
 
@@ -11,6 +12,7 @@
 #include <sys/resource.h>
 #endif
 
+#include "evt_prefetch.h"
 #include "otf2_fixture.h"
 #include "otf2_trace_reader.h"
 #include "ring4_scenario.h"
@@ -430,6 +432,43 @@ private slots:
         QVERIFY2(error.contains(QStringLiteral("ulimit -n")), qPrintable(error));
         QVERIFY2(!error.contains(QStringLiteral("damaged")), qPrintable(error));
 #endif
+    }
+
+    // Read-ahead of the event files: paths, and it stops at once (also while files are missing).
+    void prefetchesEventFiles()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = ring4In(tmp.path());
+        QVERIFY(!anchor.isEmpty());
+        QStringList files;
+        for (quint64 loc = 0; loc < 4; ++loc) {
+            files << EvtPrefetcher::evtFile(anchor, loc);
+            QVERIFY2(QFileInfo::exists(files.last()), qPrintable(files.last()));
+        }
+        files << tmp.filePath(QStringLiteral("traces/99.evt")); // missing
+        QElapsedTimer t;
+        t.start();
+        {
+            EvtPrefetcher prefetch(files);
+            prefetch.setProgress(0.5);
+            prefetch.setProgress(1.0);
+            prefetch.stop();
+            prefetch.stop(); // twice is fine
+        }
+        QVERIFY(t.elapsed() < 2000);
+        // A whole-trace (pipelined) read with read-ahead delivers the same records.
+        TraceAggregator a, b;
+        TraceMeta ma, mb;
+        QString error;
+        ReadOptions o;
+        o.pipelined = true;
+        QVERIFY(readOtf2(anchor, a, &ma, &error, o));
+        QVERIFY(readOtf2(anchor, b, &mb, &error));
+        QCOMPARE(ma.eventCount, mb.eventCount);
+        const TraceSummary sa = a.finish(ma.traceLengthNs), sb = b.finish(mb.traceLengthNs);
+        QCOMPARE(sa.unmatchedMessages, sb.unmatchedMessages);
+        QCOMPARE(sa.rows.size(), sb.rows.size());
+        QCOMPARE(sa.details.size(), sb.details.size());
     }
 
     // Traces without local definition files are still read.
