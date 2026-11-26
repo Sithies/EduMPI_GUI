@@ -14,7 +14,10 @@
  * Build:  gcc -O2 -o gen_trace gen_trace.c $(otf2-config --cflags --ldflags --libs) -lm
  *         (Ubuntu: apt install libotf2-trace-dev otf2-tools)
  * Usage:  ./gen_trace --out DIR [--ranks 1024] [--ranks-per-node 32]
- *                     [--iterations N | --target-gb 8] [--seed 1]
+ *                     [--iterations N | --target-gb 8] [--seed 1] [--rank-order row|random]
+ *         --rank-order random places the ranks on the grid in random order (the same for the
+ *         same seed): neighbours are no longer rank +-1 / +-PX, e.g. to test layouts that must
+ *         find the grid without the numbering.
  * Output: DIR/traces.otf2 (+ traces.def, traces/); open it in the GUI as a trace.
  */
 #include <otf2/otf2.h>
@@ -25,7 +28,7 @@
 #include <string.h>
 
 /* ---- Parameter ---------------------------------------------------------------- */
-static int P = 1024, RPN = 32, SEED = 1;
+static int P = 1024, RPN = 32, SEED = 1, RANDOM_ORDER = 0;
 static long ITERS = 0;
 static double TARGET_GB = 0;
 static int ALLTOALL_EVERY = 10, BCAST_EVERY = 50, PIPE_EVERY = 25;
@@ -61,6 +64,9 @@ static double *slow;      /* load factor per rank */
 static double *sendT;     /* send time per rank x direction */
 static uint64_t *req;     /* request ids per rank */
 static int PX, PY, NODES;
+/* Grid position <-> rank (--rank-order random: ranks placed on the grid in random order). */
+static int *rankAt;  /* grid position -> rank */
+static int *posOf;   /* rank -> grid position */
 static const uint64_t T0 = 1000000000ull; /* Global Offset */
 static uint64_t tmax = 0;
 
@@ -69,10 +75,10 @@ static inline void enter(int r, int reg) { OTF2_EvtWriter_Enter(ew[r], NULL, ts(
 static inline void leave(int r, int reg) { OTF2_EvtWriter_Leave(ew[r], NULL, ts(r), reg); nev[r]++; }
 static inline int node_of(int r) { return r / RPN; }
 static inline int nb(int r, int d) {
-    int x = r % PX, y = r / PX;
+    int x = posOf[r] % PX, y = posOf[r] / PX;
     switch (d) { case 0: x = (x + 1) % PX; break; case 1: x = (x + PX - 1) % PX; break;
                  case 2: y = (y + 1) % PY; break; default: y = (y + PY - 1) % PY; }
-    return y * PX + x;
+    return rankAt[y * PX + x];
 }
 static inline double xfer(int a, int b, double bytes) { /* latency + bytes / bandwidth [ns] */
     return node_of(a) == node_of(b) ? 400 + bytes / 8.0 : 1800 + bytes / 2.5;
@@ -112,7 +118,7 @@ static OTF2_FlushCallbacks flush_cb = { pre_flush, post_flush };
 static void usage(void)
 {
     fprintf(stderr, "Usage: gen_trace --out DIR [--ranks N] [--ranks-per-node N] "
-                    "[--iterations N | --target-gb X] [--seed N] [--bytes-per-event X]\n");
+                    "[--iterations N | --target-gb X] [--seed N] [--bytes-per-event X] [--rank-order row|random]\n");
     exit(1);
 }
 
@@ -127,6 +133,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--iterations")) ITERS = atol(v);
         else if (!strcmp(a, "--target-gb")) TARGET_GB = atof(v);
         else if (!strcmp(a, "--seed")) SEED = atoi(v);
+        else if (!strcmp(a, "--rank-order")) RANDOM_ORDER = v && !strcmp(v, "random");
         else if (!strcmp(a, "--bytes-per-event")) BYTES_PER_EVENT = atof(v);
         else usage();
         ++i;
@@ -139,7 +146,17 @@ int main(int argc, char **argv)
     const double evPerIter = 47.0;
     if (!ITERS) ITERS = TARGET_GB > 0 ? (long)(TARGET_GB * 1e9 / (BYTES_PER_EVENT * evPerIter * P)) : 200;
     if (ITERS < 1) ITERS = 1;
-    fprintf(stderr, "Ranks %d, nodes %d (%d/node), grid %dx%d, iterations %ld\n", P, NODES, RPN, PX, PY, ITERS);
+    rankAt = malloc(sizeof(int) * P);
+    posOf = malloc(sizeof(int) * P);
+    for (int i = 0; i < P; ++i) rankAt[i] = i;
+    if (RANDOM_ORDER) /* Fisher-Yates with its own seed, the same for the same --seed */
+        for (int i = P - 1; i > 0; --i) {
+            int j = (int)(rnd() % (uint64_t)(i + 1)), tmp = rankAt[i];
+            rankAt[i] = rankAt[j]; rankAt[j] = tmp;
+        }
+    for (int i = 0; i < P; ++i) posOf[rankAt[i]] = i;
+    fprintf(stderr, "Ranks %d, nodes %d (%d/node), grid %dx%d, iterations %ld, rank order %s\n", P, NODES, RPN, PX, PY,
+            ITERS, RANDOM_ORDER ? "random" : "row by row");
 
     ew = calloc(P, sizeof *ew); nev = calloc(P, sizeof *nev); t = calloc(P, sizeof *t);
     slow = calloc(P, sizeof *slow); sendT = calloc((size_t)P * 4, sizeof *sendT); req = calloc(P, sizeof *req);
@@ -147,7 +164,7 @@ int main(int argc, char **argv)
 
     /* Load profile: base noise, some slow nodes, gradient over the grid */
     for (int r = 0; r < P; ++r) {
-        slow[r] = 1.0 + 0.04 * nrand() + 0.10 * ((double)(r % PX) / PX);
+        slow[r] = 1.0 + 0.04 * nrand() + 0.10 * ((double)(posOf[r] % PX) / PX);
         if (node_of(r) % 7 == 3) slow[r] += 0.18; /* "slow node" */
         if (r % 97 == 13) slow[r] += 0.35;        /* single hotspot ranks */
         if (slow[r] < 0.8) slow[r] = 0.8;
@@ -223,7 +240,7 @@ int main(int argc, char **argv)
         /* ---- Alltoall in the row communicators ---- */
         if (it % ALLTOALL_EVERY == ALLTOALL_EVERY - 1)
             for (int y = 0; y < PY; ++y) {
-                for (int x = 0; x < PX; ++x) mem[x] = y * PX + x;
+                for (int x = 0; x < PX; ++x) mem[x] = rankAt[y * PX + x];
                 collective(R_ROWX, R_ALLTOALL, OTF2_COLLECTIVE_OP_ALLTOALL, rowComm0 + y, mem, PX,
                            OTF2_UNDEFINED_UINT32, 4096, 900.0 * PX + 20000);
             }
@@ -339,7 +356,7 @@ int main(int argc, char **argv)
         OTF2_GlobalDefWriter_WriteComm(g, C_NODE0 + n, sid++, gid++, C_WORLD, OTF2_COMM_FLAG_NONE);
     }
     for (int y = 0; y < PY; ++y) {
-        for (int x = 0; x < PX; ++x) m64[x] = y * PX + x;
+        for (int x = 0; x < PX; ++x) m64[x] = rankAt[y * PX + x];
         snprintf(buf, sizeof buf, "row_comm %d", y);
         OTF2_GlobalDefWriter_WriteString(g, sid, buf);
         OTF2_GlobalDefWriter_WriteGroup(g, gid, S_EMPTY, OTF2_GROUP_TYPE_COMM_GROUP, OTF2_PARADIGM_MPI, OTF2_GROUP_FLAG_NONE, PX, m64);

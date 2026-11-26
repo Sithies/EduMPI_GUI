@@ -617,6 +617,24 @@ private slots:
         }
         tl.setLinkFrom(-1);
         QVERIFY(tl.arrowMessages().isEmpty() || tl.selectedRank() >= 0 || tl.allArrows());
+
+        // The clicked edge carries its message with the longest waiting (jump target).
+        TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setLayout(QStringLiteral("circle"));
+        item.setModel(&model);
+        item.setWidth(600);
+        item.setHeight(400);
+        item.setViewStartNs(0);
+        item.setViewEndNs(1000 * kMs);
+        const QPointF mid = item.edgeMidpoint(edgeIndex(item.graph(), 3, 0));
+        QSignalSpy clicked(&item, &TraceGraphItem::edgeClicked);
+        item.clickAt(mid.x(), mid.y());
+        QCOMPARE(clicked.count(), 1);
+        const QVariantMap d = clicked.first().first().toMap();
+        QVERIFY(d.value(QStringLiteral("longestSendNs")).toLongLong() >= 0);
+        QVERIFY(d.value(QStringLiteral("longestRecvNs")).toLongLong() >= d.value(QStringLiteral("longestSendNs")).toLongLong());
+        QVERIFY(d.value(QStringLiteral("longestWaitSeconds")).toDouble() > 0.2);
     }
 
     // Wait colours span the window's least to most waiting rank (white to blue).

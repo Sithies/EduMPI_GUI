@@ -287,6 +287,22 @@ Rectangle {
                 text: trace_options.edge ? trace_options.edgeLines().join("\n")
                                          : qsTr("Click an edge in the Trace Graph to see its details.")
             }
+            // Zooms the timeline / graph to the message of this link with the longest waiting
+            // (a little before its send to a little after its receive).
+            Button {
+                visible: trace_options.edge !== null && trace_options.edge.longestSendNs !== undefined
+                         && trace_options.edge.longestSendNs >= 0
+                text: qsTr("Jump to the longest wait (%1 ms)")
+                      .arg(trace_options.edge ? formatNumber(trace_options.edge.longestWaitSeconds * 1000, 3) : "")
+                onClicked: {
+                    var e = trace_options.edge
+                    var span = Math.max(e.longestRecvNs - e.longestSendNs, 1000)
+                    var pad = Math.max(span * 0.5, 20000)
+                    traceState.graphLinkFrom = e.fromRank
+                    traceState.graphLinkTo = e.toRank
+                    traceState.viewRequested(Math.max(0, e.longestSendNs - pad), e.longestRecvNs + pad)
+                }
+            }
 
             Text {
                 text: qsTr("Trace:")

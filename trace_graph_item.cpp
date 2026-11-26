@@ -969,6 +969,26 @@ void TraceGraphItem::clickAt(qreal x, qreal y)
     d.insert(QStringLiteral("directed"), e.kind == GraphEdge::Kind::P2P && m_options.directed);
     d.insert(QStringLiteral("fromNs"), windowStart());
     d.insert(QStringLiteral("toNs"), windowEnd());
+    // The message of this link with the longest waiting in the window (rank level), for
+    // "jump to the longest wait": its send and receive times.
+    qint64 lwSend = -1, lwRecv = -1;
+    double lwWait = 0;
+    const auto detail = m_model ? m_model->detail() : nullptr;
+    if (detail && e.kind == GraphEdge::Kind::P2P && a.kind == GraphNode::Kind::Rank && b.kind == GraphNode::Kind::Rank) {
+        const qint64 from = windowStart(), to = windowEnd();
+        auto first = std::lower_bound(detail->messages.cbegin(), detail->messages.cend(), from,
+                                      [](const trace::Message &m, qint64 t) { return m.sendNs < t; });
+        for (auto it = first; it != detail->messages.cend() && it->sendNs < to; ++it)
+            if (it->sender == a.rank && it->receiver == b.rank && it->recvNs >= 0
+                && (lwSend < 0 || it->lateSender > lwWait)) {
+                lwSend = it->sendNs;
+                lwRecv = it->recvNs;
+                lwWait = it->lateSender;
+            }
+    }
+    d.insert(QStringLiteral("longestSendNs"), lwSend);
+    d.insert(QStringLiteral("longestRecvNs"), lwRecv);
+    d.insert(QStringLiteral("longestWaitSeconds"), lwWait);
     emit edgeClicked(d);
 }
 

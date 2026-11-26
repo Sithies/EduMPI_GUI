@@ -29,6 +29,7 @@ gcc -O2 -o gen_trace gen_trace.c $(otf2-config --cflags --ldflags --libs) -lm
 | `--target-gb X` | – | approximate size on disk; sets the number of iterations |
 | `--iterations N` | 200 | iterations instead of `--target-gb` |
 | `--seed N` | 1 | random seed (same seed = same trace) |
+| `--rank-order O` | `row` | `random`: ranks placed on the grid in random order (neighbours are not rank ±1 / ±width) |
 
 Examples (4 cores): 8 GB / 1024 ranks ~1.5 min, 0.5 GB / 256 ranks
 (`--ranks 256 --target-gb 0.5`) ~2 s.
