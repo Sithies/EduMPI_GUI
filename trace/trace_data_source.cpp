@@ -160,7 +160,8 @@ void Trace_Data_Source::threadbuildClusterComponents()
 
     TraceAggregator agg;
     TraceMeta meta;
-    const quint64 budget = memoryBudgetBytes();
+    const MemoryBudget memory = resolveMemoryBudget();
+    const quint64 budget = memory.bytes;
     BudgetedTimelineSink sink(agg, budget);
     const ReadProgress report = progressReporter(false);
     const auto progress = [&sink, &report](quint64 done, quint64 total) {
@@ -201,6 +202,10 @@ void Trace_Data_Source::threadbuildClusterComponents()
     m_current = -1;
     m_windowed.store(m_overview && !m_overview->complete);
 
+    static const char *const kSources[] = {"environment", "setting", "automatic"};
+    constexpr quint64 kMiB = 1024 * 1024;
+    emit memoryInfoReady(qint64(budget / kMiB), QString::fromLatin1(kSources[memory.source]),
+                         qint64(memory.availableBytes / kMiB), !m_windowed.load());
     emit traceInfoReady(m_meta.name, m_summary.rankCount, double(m_meta.traceLengthNs) / 1e9,
                         m_summary.unmatchedMessages);
     m_maxDetailWindowNs = maxDetailWindowNs(m_meta, m_rankCount, m_budget, sink.bytesPerEvent());

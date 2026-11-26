@@ -97,6 +97,62 @@ private slots:
         QVERIFY(trace::memoryBudgetBytes() >= 1); // automatic
     }
 
+    // resolveMemoryBudget: the budget and where it came from (environment > setting > automatic).
+    void memoryBudgetReportsSource()
+    {
+        QSettings settings(QStringLiteral("EduMPI"), QStringLiteral("EduMPI_GUI"));
+        const QString key = QStringLiteral("trace/memoryBudgetMB");
+        const QVariant saved = settings.value(key);
+        auto restore = qScopeGuard([&] {
+            QSettings s(QStringLiteral("EduMPI"), QStringLiteral("EduMPI_GUI"));
+            if (saved.isValid())
+                s.setValue(key, saved);
+            else
+                s.remove(key);
+        });
+        const quint64 mib = 1024 * 1024;
+        trace::setMemoryBudgetSettingMB(0);
+        trace::MemoryBudget b = trace::resolveMemoryBudget();
+        QCOMPARE(b.source, trace::MemoryBudget::Automatic);
+        QVERIFY(b.availableBytes > 0);
+        QCOMPARE(b.bytes, std::max<quint64>(b.availableBytes / 2, 1));
+
+        trace::setMemoryBudgetSettingMB(300);
+        b = trace::resolveMemoryBudget();
+        QCOMPARE(b.source, trace::MemoryBudget::Setting);
+        QCOMPARE(b.bytes, 300 * mib);
+
+        qputenv("EDUMPI_TRACE_BUDGET_MB", "77");
+        b = trace::resolveMemoryBudget();
+        QCOMPARE(b.source, trace::MemoryBudget::Environment);
+        QCOMPARE(b.bytes, 77 * mib);
+        QCOMPARE(trace::memoryBudgetBytes(), 77 * mib);
+    }
+
+    // memoryInfoReady after the load (before timelineReady): budget in MB, its source and
+    // whether the whole timeline fits (complete) or details are loaded on demand.
+    void reportsMemoryInfo()
+    {
+        for (const auto &[mb, complete] : {std::pair{256, true}, std::pair{1, false}}) {
+            qputenv("EDUMPI_TRACE_BUDGET_MB", QByteArray::number(mb));
+            Trace_Data_Source src(m_many);
+            QSignalSpy info(&src, &Trace_Data_Source::memoryInfoReady);
+            QSignalSpy timeline(&src, &Trace_Data_Source::timelineReady);
+            int infoBeforeTimeline = -1;
+            connect(&src, &Trace_Data_Source::timelineReady, this,
+                    [&] { if (infoBeforeTimeline < 0) infoBeforeTimeline = int(info.count()); });
+            load(src);
+            if (QTest::currentTestFailed())
+                return;
+            QCOMPARE(info.count(), 1);
+            QCOMPARE(infoBeforeTimeline, 1);
+            QCOMPARE(info.first().at(0).toLongLong(), qint64(mb));
+            QCOMPARE(info.first().at(1).toString(), QStringLiteral("environment"));
+            QVERIFY(info.first().at(2).toLongLong() > 0); // available memory at the load
+            QCOMPARE(info.first().at(3).toBool(), complete);
+        }
+    }
+
     void connectsAndClears()
     {
         Trace_Data_Source src(m_anchor);

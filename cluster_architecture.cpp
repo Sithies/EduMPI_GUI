@@ -134,6 +134,7 @@ bool Cluster_Architecture::startTraceSource(const QString &tracePathOrUrl){
         if (auto *m = qobject_cast<TraceTimelineModel *>(m_timeline))
             m->addSnapshot(snapshot);
     });
+    connect(src, &Trace_Data_Source::memoryInfoReady, this, &Cluster_Architecture::traceMemoryInfo);
     connect(src, &Trace_Data_Source::loadProgress, this, [this](int percent, bool detail) {
         if (!detail)
             emit traceLoadProgress(percent);

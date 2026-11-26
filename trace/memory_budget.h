@@ -14,7 +14,14 @@ quint64 availableMemoryBytes();
 
 // Budget for the timeline: env EDUMPI_TRACE_BUDGET_MB (> 0) overrides QSettings
 // ("EduMPI", "EduMPI_GUI") key trace/memoryBudgetMB; 0 / missing = availableMemoryBytes() / 2.
-quint64 memoryBudgetBytes();
+struct MemoryBudget {
+    enum Source { Environment, Setting, Automatic };
+    quint64 bytes = 1;
+    Source source = Automatic;
+    quint64 availableBytes = 0; // availableMemoryBytes() when resolved (also for the others)
+};
+MemoryBudget resolveMemoryBudget();
+quint64 memoryBudgetBytes(); // resolveMemoryBudget().bytes
 
 // The user setting behind memoryBudgetBytes(): QSettings ("EduMPI", "EduMPI_GUI") key
 // trace/memoryBudgetMB in MB, 0 = automatic. Negative values are stored as 0.

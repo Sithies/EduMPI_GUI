@@ -57,17 +57,32 @@ quint64 availableMemoryBytes()
     return kFallbackBytes;
 }
 
-quint64 memoryBudgetBytes()
+MemoryBudget resolveMemoryBudget()
 {
+    MemoryBudget b;
+    b.availableBytes = availableMemoryBytes();
     bool ok = false;
     const quint64 envMb = qEnvironmentVariable("EDUMPI_TRACE_BUDGET_MB").toULongLong(&ok);
-    if (ok && envMb > 0)
-        return envMb * kMiB;
+    if (ok && envMb > 0) {
+        b.bytes = envMb * kMiB;
+        b.source = MemoryBudget::Environment;
+        return b;
+    }
     const QSettings settings(QStringLiteral("EduMPI"), QStringLiteral("EduMPI_GUI"));
     const quint64 mb = settings.value(QStringLiteral("trace/memoryBudgetMB"), 0).toULongLong(&ok);
-    if (ok && mb > 0)
-        return mb * kMiB;
-    return std::max<quint64>(availableMemoryBytes() / 2, 1);
+    if (ok && mb > 0) {
+        b.bytes = mb * kMiB;
+        b.source = MemoryBudget::Setting;
+        return b;
+    }
+    b.bytes = std::max<quint64>(b.availableBytes / 2, 1);
+    b.source = MemoryBudget::Automatic;
+    return b;
+}
+
+quint64 memoryBudgetBytes()
+{
+    return resolveMemoryBudget().bytes;
 }
 
 int memoryBudgetSettingMB()

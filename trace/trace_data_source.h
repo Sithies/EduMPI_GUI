@@ -80,6 +80,11 @@ signals:
     // (detail = false, ends with 100 before timelineReady) and each detail read (detail = true;
     // a read that is superseded or cancelled stops early).
     void loadProgress(int percent, bool detail);
+    // After the load, before timelineReady: the memory budget used (MB), where it came from
+    // ("environment" = EDUMPI_TRACE_BUDGET_MB, "setting" = the Memory budget field,
+    // "automatic" = half of availableMB), the memory available at the load (MB) and whether
+    // the whole timeline fits (complete) or details are loaded on demand when zooming in.
+    void memoryInfoReady(qint64 budgetMB, QString source, qint64 availableMB, bool complete);
 
     // After the load (before clusterComponentsReady) and after each detail load.
     void timelineReady(trace::TimelineSnapshot snapshot);

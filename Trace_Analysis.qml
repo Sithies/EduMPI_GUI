@@ -60,6 +60,11 @@ Window {
         property int ranks: 0
         property real durationSeconds: 0
         property int unmatched: 0
+        // Memory budget of the load (Cluster_Architecture::traceMemoryInfo); budgetMB 0 = not known yet.
+        property real budgetMB: 0
+        property string budgetSource: ""
+        property real availableMB: 0
+        property bool completeInMemory: false
         // Overview bar moved the window: the timeline sets both ends at once.
         signal viewRequested(real startNs, real endNs)
     }
@@ -150,6 +155,12 @@ Window {
                     ascreen.push(page, props)
                 }
             }
+            onTraceMemoryInfo: (budgetMB, source, availableMB, complete)=>{
+                          run_analysis_win.traceState.budgetMB = budgetMB
+                          run_analysis_win.traceState.budgetSource = source
+                          run_analysis_win.traceState.availableMB = availableMB
+                          run_analysis_win.traceState.completeInMemory = complete
+                      }
             onTraceLoadProgress: (percent)=>{
                           run_analysis_win.loadProgress = percent
                       }

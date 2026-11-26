@@ -19,6 +19,26 @@ Rectangle {
         return Number(value).toLocaleString(Qt.locale("en_US"), "f", decimals)
     }
 
+    // MB like the Memory budget field (8000 entered shows as 8,000 MB, not 7.8 GB).
+    function formatMB(mb) {
+        return qsTr("%1 MB").arg(formatNumber(mb, 0))
+    }
+
+    // Budget actually used by the load and the resulting mode (traceState, set from
+    // Cluster_Architecture::traceMemoryInfo).
+    function memoryLines() {
+        if (!traceState || traceState.budgetMB <= 0)
+            return [qsTr("Loading…")]
+        var budget = formatMB(traceState.budgetMB)
+        if (traceState.budgetSource === "automatic")
+            budget = qsTr("%1 (automatic: half of %2 free)").arg(budget).arg(formatMB(traceState.availableMB))
+        else if (traceState.budgetSource === "environment")
+            budget = qsTr("%1 (from EDUMPI_TRACE_BUDGET_MB)").arg(budget)
+        return [qsTr("Budget: %1").arg(budget),
+                traceState.completeInMemory ? qsTr("Mode: complete in memory")
+                                            : qsTr("Mode: overview, details loaded when zooming in")]
+    }
+
     function barLines() {
         if (!bar)
             return []
@@ -150,6 +170,18 @@ Rectangle {
                          qsTr("Ranks: %1").arg(traceState.ranks),
                          qsTr("Duration: %1 s").arg(trace_options.formatNumber(traceState.durationSeconds, 3)),
                          qsTr("Unmatched messages: %1").arg(traceState.unmatched)].join("\n")
+            }
+
+            Text {
+                text: qsTr("Memory:")
+                topPadding: 8
+                color: "#00FF00"
+            }
+            Text {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                color: "#999999"
+                text: trace_options.memoryLines().join("\n")
             }
 
             Button {
