@@ -53,3 +53,11 @@ edumpi_add_trace_test(graph_item
     ${PROJECT_SOURCE_DIR}/trace_graph_item.h ${PROJECT_SOURCE_DIR}/trace_graph_item.cpp)
 target_link_libraries(tst_trace_graph_item PRIVATE Qt6::Gui Qt6::Quick)
 set_tests_properties(trace_graph_item PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Not a test: renders TraceGraph.qml for windows of a real trace into PNGs (tools/graph-snapshot).
+qt_add_executable(trace_graph_snapshot
+    ${PROJECT_SOURCE_DIR}/tools/graph-snapshot/graph_snapshot.cpp
+    ${PROJECT_SOURCE_DIR}/trace_timeline_item.h ${PROJECT_SOURCE_DIR}/trace_timeline_item.cpp
+    ${PROJECT_SOURCE_DIR}/trace_graph_item.h ${PROJECT_SOURCE_DIR}/trace_graph_item.cpp)
+target_link_libraries(trace_graph_snapshot PRIVATE Qt6::Gui Qt6::Quick Qt6::Qml edumpi_trace)
+target_compile_definitions(trace_graph_snapshot PRIVATE EDUMPI_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
