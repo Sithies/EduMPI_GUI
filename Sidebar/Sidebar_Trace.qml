@@ -11,19 +11,30 @@ import QtQuick.Dialogs
 
 Item {
     id: item_sidebar_trace
-    width: 270
+    // Folded in: only the toggle strip stays, the view next to it gets the room.
+    property bool collapsed: false
+    readonly property int expandedWidth: 270
+    width: toggle.width + (collapsed ? 0 : expandedWidth)
     height: parent.height
     //implicitHeight: height
     property Item rootScreen: parent
 
+    Sidebar_Toggle {
+        id: toggle
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        collapsed: item_sidebar_trace.collapsed
+        onToggled: item_sidebar_trace.collapsed = !item_sidebar_trace.collapsed
+    }
+
     Rectangle {
         id: rectangle
-        //anchors.fill: parent
-        //x: 0
-        //y: 0
-        width: parent.width
-        height: parent.height
-        anchors.fill: parent
+        visible: !item_sidebar_trace.collapsed
+        anchors.left: toggle.right
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
         color: "#383936"
 
         ListModel {
