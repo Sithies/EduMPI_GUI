@@ -8,7 +8,10 @@ import QtQuick.Dialogs
 
 Item {
     id: item
-    width: 260
+    // Folded in: only the toggle strip stays, the view next to it gets the room.
+    property bool collapsed: false
+    readonly property int expandedWidth: 260
+    width: toggle.width + (collapsed ? 0 : expandedWidth)
     property Item rootScreen: parent
 
     Component.onCompleted: {
@@ -19,11 +22,22 @@ Item {
     }
 
 
+    Sidebar_Toggle {
+        id: toggle
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        collapsed: item.collapsed
+        onToggled: item.collapsed = !item.collapsed
+    }
+
     Rectangle {
         id: rectangle
-        width: parent.width
-        height: parent.height
-        anchors.fill: parent
+        visible: !item.collapsed
+        anchors.left: toggle.right
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
         color: "#383936"
 
         ListModel {
