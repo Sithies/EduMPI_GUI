@@ -1013,6 +1013,75 @@ QVector<GraphFinding> analyzeCommGraph(const CommGraph &g, int gridColumns)
     return out;
 }
 
+FindingSummary summarizeFindings(const CommGraph &g, const QVector<GraphFinding> &findings)
+{
+    FindingSummary out;
+    const int ranks = g.rankNodeCount;
+    const double window = g.windowNs / 1e9;
+    if (ranks <= 0 || window <= 0)
+        return out;
+    double p2p = 0, coll = 0;
+    for (const GraphEdge &e : g.edges) {
+        if (e.kind == GraphEdge::Kind::P2P)
+            p2p += e.waitSeconds + e.lateReceiverSeconds;
+        else
+            coll += e.waitSeconds;
+    }
+    const double total = p2p + coll;
+    out.waitShare = std::min(1.0, total / (ranks * window));
+    // Most severe finding; among equal ones the earlier category of this list.
+    static const QStringList order{QStringLiteral("waiting"), QStringLiteral("collectives"), QStringLiteral("load"),
+                                   QStringLiteral("critical"), QStringLiteral("messages"),
+                                   QStringLiteral("structure"), QStringLiteral("comparison")};
+    auto rankOf = [&](const GraphFinding &f) {
+        const qsizetype c = order.indexOf(f.category);
+        return c < 0 ? order.size() : c;
+    };
+    for (int i = 0; i < findings.size(); ++i) {
+        const GraphFinding &f = findings[i];
+        if (f.title.isEmpty())
+            continue;
+        if (out.finding < 0 || f.severity > findings[out.finding].severity
+            || (f.severity == findings[out.finding].severity && rankOf(f) < rankOf(findings[out.finding])))
+            out.finding = i;
+    }
+    const int worst = out.finding >= 0 ? findings[out.finding].severity : 0;
+    const QString share = QString::number(out.waitShare * 100, 'f', out.waitShare < 0.1 ? 1 : 0);
+    if (out.waitShare < 0.05 && worst < 2) {
+        out.severity = 0;
+        out.text = QStringLiteral("Looks healthy: the ranks wait only %1 % of this window for each other.").arg(share);
+        // The structure is worth naming then (pattern), not a minor finding.
+        for (int i = 0; i < findings.size(); ++i)
+            if (findings[i].kind == QLatin1String("pattern")) {
+                out.text += QStringLiteral(" ") + QStringLiteral("Pattern: %1.").arg(findings[i].title);
+                out.finding = i;
+                break;
+            }
+        if (out.finding >= 0 && findings[out.finding].kind != QLatin1String("pattern"))
+            out.finding = -1;
+        return out;
+    }
+    out.severity = std::max(worst, out.waitShare >= 0.2 ? 2 : 1);
+    out.text = QStringLiteral("The ranks spend %1 % of this window waiting").arg(share);
+    if (total > 0) {
+        const int collPct = int(std::lround(coll / total * 100));
+        if (collPct >= 60)
+            out.text += QStringLiteral(", mostly in collectives (%1 %).").arg(collPct);
+        else if (collPct <= 40)
+            out.text += QStringLiteral(", mostly for point-to-point messages (%1 %).").arg(100 - collPct);
+        else
+            out.text += QStringLiteral(" – about half in collectives, half for messages.");
+    } else {
+        out.text += QStringLiteral(".");
+    }
+    if (out.finding >= 0) {
+        const GraphFinding &f = findings[out.finding];
+        out.text += QStringLiteral(" ") + QStringLiteral("Biggest issue: %1").arg(f.title)
+            + (f.metric.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(f.metric)) + QStringLiteral(".");
+    }
+    return out;
+}
+
 QVector<GraphFinding> compareCommGraphs(const CommGraph &cur, const CommGraph &ref)
 {
     QVector<GraphFinding> out;

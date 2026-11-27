@@ -64,7 +64,7 @@ Window {
         property string graphLevel: "auto"       // "auto", "ranks" or "nodes"
         property string graphCommunicators: "auto" // "auto", "separate" or "merged"
         property string graphLayout: "auto"      // "auto", "circle", "grid", "stress", "spectral", "spectral circle"
-        property int graphMaxEdges: 500          // heaviest edges drawn, 0 = all
+        property int graphMaxEdges: 20000        // edges drawn (heaviest strong, rest pale), 0 = all
         property var lastEdge: null
         // Link clicked in the Trace Graph (sender, receiver): highlighted in the timeline.
         property int graphLinkFrom: -1

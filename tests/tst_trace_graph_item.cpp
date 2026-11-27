@@ -453,6 +453,43 @@ private slots:
     }
 
     // Many ranks: data-driven layout (synchronous here), zoom / pan, findings and highlighting.
+    // All links drawn (up to the limit), the heaviest kNotableEdges strong, the rest pale;
+    // the summary sentence over the findings.
+    void allEdgesDrawnHeaviestStrong()
+    {
+        QTemporaryDir tmp;
+        const int n = 24; // all-to-all: 552 links
+        QVector<QPair<int, int>> edges;
+        for (int a = 0; a < n; ++a)
+            for (int b = 0; b < n; ++b)
+                if (a != b)
+                    edges << QPair<int, int>{a, b};
+        const QString anchor = writeEdgesOtf2(tmp.path(), n, edges, 1);
+        QVERIFY(!anchor.isEmpty());
+        TraceTimelineModel model;
+        model.addSnapshot({build(anchor)});
+        TraceGraphItem item;
+        item.setSynchronousLayout(true);
+        item.setModel(&model);
+        item.setWidth(800);
+        item.setHeight(600);
+        item.setLevel(QStringLiteral("ranks"));
+        item.setShowCollectives(false);
+        QCOMPARE(item.maxEdges(), TraceGraphItem::kDefaultMaxEdges);
+        QCOMPARE(item.edgeCount(), n * (n - 1));
+        QCOMPARE(item.shownEdgeCount(), n * (n - 1));
+        QCOMPARE(item.notableEdgeCount(), TraceGraphItem::kNotableEdges);
+        QVERIFY(nonWhite(render(item)) > 0);
+        item.setMaxEdges(100);
+        QCOMPARE(item.shownEdgeCount(), 100);
+        QCOMPARE(item.notableEdgeCount(), 100);
+        // Summary: one sentence with the waiting share.
+        const QVariantMap sum = item.summary();
+        QVERIFY2(sum.value(QStringLiteral("text")).toString().contains(QStringLiteral("%")),
+                 qPrintable(sum.value(QStringLiteral("text")).toString()));
+        QVERIFY(sum.value(QStringLiteral("finding")).toInt() < item.findingMaps().size());
+    }
+
     void manyRanksLayoutZoomAndFindings()
     {
         QTemporaryDir tmp;
@@ -722,7 +759,7 @@ private slots:
                   "    property string graphLevel: 'ranks'\n"
                   "    property string graphCommunicators: 'auto'\n"
                   "    property string graphLayout: 'circle'\n"
-                  "    property int graphMaxEdges: 500\n"
+                  "    property int graphMaxEdges: 20000\n"
                   "    property var lastEdge: null\n"
                   "    signal viewRequested(real startNs, real endNs)\n"
                   "  }\n"
@@ -744,6 +781,20 @@ private slots:
         auto *own = obj->findChild<QQuickItem *>(QStringLiteral("own"))->findChild<TraceGraphItem *>();
         QVERIFY(own);
         QCOMPARE(own->edgeCount(), 4);
+
+        // Simple mode by default; "More options" shows the rest; help opens.
+        QObject *ownView = obj->findChild<QQuickItem *>(QStringLiteral("own"));
+        QCOMPARE(ownView->property("advanced").toBool(), false);
+        QObject *more = ownView->findChild<QObject *>(QStringLiteral("moreOptionsButton"));
+        QVERIFY(more);
+        QVERIFY(QMetaObject::invokeMethod(more, "clicked"));
+        QCOMPARE(ownView->property("advanced").toBool(), true);
+        QObject *help = ownView->findChild<QObject *>(QStringLiteral("helpPopup"));
+        QVERIFY(help);
+        QVERIFY(QMetaObject::invokeMethod(help, "open"));
+        QTRY_VERIFY(help->property("opened").toBool());
+        QVERIFY(QMetaObject::invokeMethod(help, "close"));
+        QVERIFY(ownView->findChild<QObject *>(QStringLiteral("summaryCard")));
 
         // Options from traceState.
         state->setProperty("graphCollectives", false);

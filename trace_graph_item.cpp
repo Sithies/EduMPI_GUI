@@ -32,6 +32,7 @@ const QColor kHintColor(0x6b, 0x72, 0x80);
 // (late sender per process) white to blue. New elements: communicator node, host colours.
 const QColor kP2PColor(0x00, 0xd5, 0x00);
 const QColor kCollectiveColor(0x00, 0x00, 0x00);
+const QColor kContextEdgeColor(0x6b, 0x72, 0x80); // pale context edges (not the heaviest)
 const QColor kWaitLowColor(0xff, 0xff, 0xff);
 const QColor kWaitHighColor(0x00, 0x00, 0xff);
 const QColor kCommunicatorColor(0xd1, 0xd5, 0xdb);
@@ -485,6 +486,13 @@ void TraceGraphItem::resetView()
     update();
 }
 
+QVariantMap TraceGraphItem::summary() const
+{
+    return QVariantMap{{QStringLiteral("text"), m_summary.text},
+                       {QStringLiteral("finding"), m_summary.finding},
+                       {QStringLiteral("severity"), m_summary.severity}};
+}
+
 QVariantList TraceGraphItem::findingMaps() const
 {
     QVariantList out;
@@ -685,6 +693,13 @@ void TraceGraphItem::rebuild()
             hosts.insert(row.node);
         nodes = hosts.size() > 1;
     }
+    int hostCount = 0;
+    if (overview) {
+        QSet<QString> hosts;
+        for (const auto &row : overview->rows)
+            hosts.insert(row.node);
+        hostCount = int(hosts.size());
+    }
     m_options.level = nodes ? trace::GraphLevel::Nodes : trace::GraphLevel::Ranks;
     QString status;
     QVector<trace::GraphFinding> rankGraphFindings;
@@ -703,6 +718,12 @@ void TraceGraphItem::rebuild()
         status = QStringLiteral("empty");
     } else if (detail && covers(detail.get(), from, to)) {
         m_graph = trace::buildCommGraph(*detail, from, to, m_options);
+        // Auto: too many links to draw them all at rank level -> merged into compute nodes.
+        if (m_levelMode == Mode::Auto && m_options.level == trace::GraphLevel::Ranks && hostCount > 1
+            && m_maxEdges > 0 && m_graph.edges.size() > m_maxEdges) {
+            m_options.level = trace::GraphLevel::Nodes;
+            m_graph = trace::buildCommGraph(*detail, from, to, m_options);
+        }
         // Findings always from the ranks (pattern and outliers need them), directed.
         trace::GraphOptions rankOptions = m_options;
         rankOptions.level = trace::GraphLevel::Ranks;
@@ -744,6 +765,7 @@ void TraceGraphItem::rebuild()
     if (m_commMerged)
         m_graph = trace::mergeCommunicators(m_graph);
     m_findings = rankGraphFindings;
+    m_summary = trace::summarizeFindings(m_rankGraph, m_findings);
     m_gridColumns = gridColumns;
     m_findingSeries.clear();
     m_findingBaseline.clear();
@@ -829,6 +851,14 @@ void TraceGraphItem::reselect()
         m_maxWeight = std::max(m_maxWeight, trace::edgeWeight(m_graph.edges[i], m_weight));
     // Lightest first, so the heavy edges end up on top.
     std::reverse(m_drawn.begin(), m_drawn.end());
+    // Strong: the heaviest kNotableEdges with any weight; with few edges all of them.
+    m_notableFrom = 0;
+    if (m_drawn.size() > kNotableEdges) {
+        m_notableFrom = int(m_drawn.size()) - kNotableEdges;
+        while (m_notableFrom < m_drawn.size()
+               && trace::edgeWeight(m_graph.edges[m_drawn[m_notableFrom]], m_weight) <= 0)
+            ++m_notableFrom;
+    }
     emit graphChanged();
 }
 
@@ -1162,7 +1192,7 @@ void TraceGraphItem::paint(QPainter *painter)
 
     const int focus = focusNode();
     const double nr = nodeRadius();
-    const bool arrows = m_options.directed && m_drawn.size() <= kArrowHeadLimit;
+    const bool arrows = m_options.directed && notableEdgeCount() <= kArrowHeadLimit;
 
     // Partners of the selected rank (drawn in full, the rest dimmed); a highlighted finding
     // takes precedence: its ranks / nodes lit, the rest dimmed.
@@ -1224,9 +1254,35 @@ void TraceGraphItem::paint(QPainter *painter)
         }
     }
 
-    // Edges, lightest first.
-    for (int i : std::as_const(m_drawn)) {
+    // Context: the lighter edges thin and pale in one path (cheap with many thousand), so the
+    // whole structure stays visible; the edges of the selected rank count as strong.
+    {
+        QPainterPath context;
+        for (int k = 0; k < m_notableFrom; ++k) {
+            const GraphEdge &e = m_graph.edges[m_drawn[k]];
+            if ((focus >= 0 && (e.from == focus || e.to == focus)) || (highlight && lit[e.from] && lit[e.to]))
+                continue;
+            const EdgePath path = edgePath(e);
+            if (isWrapEdge(e))
+                continue;
+            context.moveTo(path.from);
+            context.quadTo(path.control, path.to);
+        }
+        if (!context.isEmpty()) {
+            QColor c = kContextEdgeColor;
+            c.setAlphaF(focus >= 0 || highlight ? 0.08 : 0.28);
+            painter->setPen(QPen(c, 0.7));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawPath(context);
+        }
+    }
+
+    // Strong edges, lightest first.
+    for (int k = 0; k < m_drawn.size(); ++k) {
+        const int i = m_drawn[k];
         const GraphEdge &e = m_graph.edges[i];
+        if (k < m_notableFrom && !(focus >= 0 && (e.from == focus || e.to == focus)))
+            continue;
         const EdgePath path = edgePath(e);
         const bool dim = highlight ? !(lit[e.from] && lit[e.to]) : (focus >= 0 && e.from != focus && e.to != focus);
         if (isWrapEdge(e)) {
@@ -1280,7 +1336,7 @@ void TraceGraphItem::paint(QPainter *painter)
 
     // Edges among the highlighted ranks also when they are not among the heaviest drawn.
     if (highlight) {
-        QSet<int> drawn(m_drawn.cbegin(), m_drawn.cend());
+        QSet<int> drawn(m_drawn.cbegin() + m_notableFrom, m_drawn.cend()); // strong ones
         for (int i = 0; i < m_graph.edges.size(); ++i) {
             const GraphEdge &e = m_graph.edges[i];
             if (drawn.contains(i) || e.kind != GraphEdge::Kind::P2P || !m_highlightNodes[e.from] || !m_highlightNodes[e.to])

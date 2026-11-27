@@ -65,6 +65,8 @@ class TraceGraphItem : public QQuickPaintedItem
     Q_PROPERTY(QString status READ status NOTIFY graphChanged)
     Q_PROPERTY(int edgeCount READ edgeCount NOTIFY graphChanged)
     Q_PROPERTY(int shownEdgeCount READ shownEdgeCount NOTIFY graphChanged)
+    // Of those, drawn strong and coloured (the rest thin and pale as context).
+    Q_PROPERTY(int notableEdgeCount READ notableEdgeCount NOTIFY graphChanged)
     // Largest waiting time (late sender) of one rank / host in the window: the blue end of the scale.
     Q_PROPERTY(double maxWaitSeconds READ maxWaitSeconds NOTIFY graphChanged)
     // Smallest waiting time of one rank / host: the white end of the scale (so that differences
@@ -76,6 +78,8 @@ class TraceGraphItem : public QQuickPaintedItem
     Q_PROPERTY(QStringList findings READ findings NOTIFY graphChanged)
     Q_PROPERTY(QVariantList findingRanks READ findingRanks NOTIFY graphChanged)
     Q_PROPERTY(QVariantList findingList READ findingMaps NOTIFY graphChanged)
+    // One sentence over the findings: {text, finding (index into findingList, -1), severity}.
+    Q_PROPERTY(QVariantMap summary READ summary NOTIFY graphChanged)
     // Edge colour: "wait" (default; waiting on the link, green -> yellow -> red), "volume",
     // "size" (average message size), "locality" (inside / between compute nodes), "change"
     // (waiting against the reference window). Edges inside a compute node are drawn lighter.
@@ -101,7 +105,10 @@ class TraceGraphItem : public QQuickPaintedItem
     Q_PROPERTY(int highlightedFinding READ highlightedFinding WRITE setHighlightedFinding NOTIFY highlightChanged)
 
 public:
-    static constexpr int kDefaultMaxEdges = 500;
+    // All edges are drawn up to this many: the heaviest kNotableEdges strong and coloured, the
+    // rest thin and pale as context. Above it, Auto level switches to compute nodes.
+    static constexpr int kDefaultMaxEdges = 20000;
+    static constexpr int kNotableEdges = 300;
     static constexpr int kArrowHeadLimit = 300; // no arrow heads when more edges are drawn
     static constexpr int kLabelLimit = 64;      // rank labels only up to this many ranks (at zoom 1)
     static constexpr double kMaxZoom = 60;
@@ -150,6 +157,7 @@ public:
     int highlightedFinding() const { return m_highlightFinding; }
     void setHighlightedFinding(int index);
     QVariantList findingMaps() const;
+    QVariantMap summary() const;
     // Graph nodes highlighted by the current finding.
     const QVector<bool> &highlightedNodes() const { return m_highlightNodes; }
 
@@ -192,6 +200,7 @@ public:
     QString status() const { return m_status; }
     int edgeCount() const { return int(m_graph.edges.size()); }
     int shownEdgeCount() const { return int(m_drawn.size()); }
+    int notableEdgeCount() const { return int(m_drawn.size()) - m_notableFrom; }
     double maxWaitSeconds() const { return m_maxWait; }
     double minWaitSeconds() const { return m_minWait; }
     QStringList findings() const;
@@ -333,6 +342,8 @@ private:
     QVector<QVariantList> m_findingSeries;      // per finding: waiting over time of its ranks
     QVector<QVariantList> m_findingBaseline;    // per finding: of all ranks
     int m_maxEdges = kDefaultMaxEdges;
+    trace::FindingSummary m_summary;
+    int m_notableFrom = 0; // m_drawn[m_notableFrom..]: drawn strong (the rest: pale context)
 
     trace::CommGraph m_graph;
     QVector<QPointF> m_unitPos; // layoutGraph() result

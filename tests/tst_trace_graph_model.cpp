@@ -700,6 +700,62 @@ private slots:
 
     // Collective calls rebuilt from a window: ring4's MPI_Allreduce in second 1, where rank 2
     // arrives late (1200 ms) and the others wait for it.
+    // The sentence over the findings: share of the window spent waiting, collectives vs.
+    // messages, and the most severe finding to start with.
+    void summaryOfFindings()
+    {
+        CommGraph g;
+        for (int r = 0; r < 4; ++r) {
+            GraphNode nd;
+            nd.kind = GraphNode::Kind::Rank;
+            nd.rank = r;
+            g.nodes << nd;
+        }
+        g.rankNodeCount = 4;
+        g.windowNs = kSec;
+        GraphEdge e;
+        e.from = 0;
+        e.to = 1;
+        e.bytes = 100;
+        e.messages = 1;
+        e.waitSeconds = 0.01;
+        g.edges << e;
+        QVector<GraphFinding> findings;
+        GraphFinding pattern;
+        pattern.kind = QStringLiteral("pattern");
+        pattern.category = QStringLiteral("structure");
+        pattern.title = QStringLiteral("Ring");
+        findings << pattern;
+        FindingSummary s = summarizeFindings(g, findings);
+        QVERIFY2(s.text.startsWith(QStringLiteral("Looks healthy")), qPrintable(s.text));
+        QVERIFY(s.text.contains(QStringLiteral("Ring")));
+        QCOMPARE(s.finding, 0);
+        QCOMPARE(s.severity, 0);
+
+        // 1.2 s of 4 s rank time waiting, most of it in a collective; the problem finding wins.
+        GraphEdge c;
+        c.kind = GraphEdge::Kind::Collective;
+        c.from = 2;
+        c.to = 3;
+        c.waitSeconds = 1.19;
+        g.edges << c;
+        GraphFinding late;
+        late.kind = QStringLiteral("lateatcollective");
+        late.category = QStringLiteral("collectives");
+        late.title = QStringLiteral("Rank 2 arrives last");
+        late.metric = QStringLiteral("1190 ms");
+        late.severity = 2;
+        findings << late;
+        s = summarizeFindings(g, findings);
+        QVERIFY2(s.text.contains(QStringLiteral("30 %")), qPrintable(s.text));
+        QVERIFY2(s.text.contains(QStringLiteral("mostly in collectives")), qPrintable(s.text));
+        QVERIFY2(s.text.contains(QStringLiteral("Rank 2 arrives last (1190 ms)")), qPrintable(s.text));
+        QCOMPARE(s.finding, 1);
+        QCOMPARE(s.severity, 2);
+
+        QVERIFY(summarizeFindings(CommGraph(), findings).text.isEmpty());
+    }
+
     void collectiveCallsAndLateArrival()
     {
         QTemporaryDir tmp;

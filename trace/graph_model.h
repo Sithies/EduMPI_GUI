@@ -153,6 +153,17 @@ QVector<GraphFinding> analyzeCommGraph(const CommGraph &rankGraph, int gridColum
 // change of the total waiting, the ranks and links whose waiting grew / shrank most.
 QVector<GraphFinding> compareCommGraphs(const CommGraph &current, const CommGraph &reference);
 
+// One sentence for the top of the findings: how much of the window the ranks wait, how that
+// splits into collectives / point-to-point, and the most severe finding (index into findings,
+// -1 = none). severity as GraphFinding. Empty text without ranks or window.
+struct FindingSummary {
+    QString text;
+    int finding = -1;
+    int severity = 0;
+    double waitShare = 0; // waiting / (ranks * window)
+};
+FindingSummary summarizeFindings(const CommGraph &rankGraph, const QVector<GraphFinding> &findings);
+
 // One call of a collective operation by all its ranks (an instance), rebuilt from the
 // window's activities: the participations of one communicator that waited for the same last
 // arrival (enter + late sender = the instance's last enter).

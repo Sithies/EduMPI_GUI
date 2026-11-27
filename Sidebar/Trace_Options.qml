@@ -257,8 +257,8 @@ Rectangle {
                 }
                 ComboBox {
                     Layout.fillWidth: true
-                    readonly property var values: ["auto", "circle", "grid", "torus", "tree", "stress", "spectral", "spectral circle"]
-                    model: [qsTr("Auto (from the data)"), qsTr("Circle"), qsTr("Grid"), qsTr("Torus"), qsTr("Tree"), qsTr("Stress"), qsTr("Spectral"), qsTr("Spectral circle")]
+                    readonly property var values: ["auto", "circle", "grid", "torus", "stress"]
+                    model: [qsTr("Auto (from the data)"), qsTr("Circle"), qsTr("Grid"), qsTr("Torus"), qsTr("Stress")]
                     currentIndex: traceState ? Math.max(0, values.indexOf(traceState.graphLayout)) : 0
                     onActivated: (index) => traceState.graphLayout = values[index]
                 }
@@ -268,9 +268,9 @@ Rectangle {
                 }
                 ComboBox {
                     Layout.fillWidth: true
-                    readonly property var values: [100, 500, 2000, 0]
-                    model: [qsTr("Heaviest 100"), qsTr("Heaviest 500"), qsTr("Heaviest 2000"), qsTr("All")]
-                    currentIndex: traceState ? Math.max(0, values.indexOf(traceState.graphMaxEdges)) : 1
+                    readonly property var values: [500, 2000, 20000, 0]
+                    model: [qsTr("Heaviest 500"), qsTr("Heaviest 2000"), qsTr("Up to 20 000 (default)"), qsTr("All")]
+                    currentIndex: traceState ? Math.max(0, values.indexOf(traceState.graphMaxEdges)) : 2
                     onActivated: (index) => traceState.graphMaxEdges = values[index]
                 }
             }

@@ -78,7 +78,7 @@ Item {
     property string graphLevel: 'auto'
     property string graphCommunicators: 'auto'
     property string graphLayout: 'auto'
-    property int graphMaxEdges: 500
+    property int graphMaxEdges: 20000
     property var lastEdge: null
     property int graphLinkFrom: -1
     property int graphLinkTo: -1

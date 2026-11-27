@@ -19,6 +19,61 @@ Rectangle {
     property bool embedded: false
 
     readonly property var timelineModel: listNodes ? listNodes.timeline : null
+    // Simple mode (default): level, zoom, legend and findings only; "More options" shows layout,
+    // colour pickers, filters, reference and the collective stepping.
+    property bool advanced: false
+
+    // Opens finding i (card pinned, its ranks highlighted and zoomed to, its rank / link selected);
+    // the same finding again closes it.
+    function openFinding(i) {
+        if (i < 0 || i >= graph.findingList.length)
+            return
+        if (findingsPanel.pinned === i) {
+            findingsPanel.pinned = -1
+            graph.highlightedFinding = -1
+            graph.resetView()
+            return
+        }
+        findingsPanel.pinned = i
+        var f = graph.findingList[i]
+        var c = Object.assign({}, findingsPanel.collapsed)
+        c[f.category] = false
+        findingsPanel.collapsed = c
+        if (f.ranks.length > 0 || f.nodes.length > 0)
+            graph.zoomToFinding(i)
+        else
+            graph.highlightedFinding = i
+        var r = f.fromRank >= 0 ? f.fromRank : f.rank
+        if (r >= 0 && traceState)
+            traceState.selectedRank = r
+        if (f.fromRank >= 0 && f.toRank >= 0 && traceState) {
+            traceState.graphLinkFrom = f.fromRank
+            traceState.graphLinkTo = f.toRank
+        }
+    }
+
+    // Plain-language meaning of a finding kind (shown in the opened card).
+    function explainKind(kind) {
+        switch (kind) {
+        case "pattern": return qsTr("Who talks to whom follows a regular scheme (e.g. every rank with its grid neighbours). Not a problem – it tells you how the program is organised.")
+        case "hub": return qsTr("One rank exchanges messages with very many others (e.g. a master collecting results). It can become a bottleneck when the others have to wait for it.")
+        case "locality": return qsTr("How much traffic stays inside a compute node (fast, shared memory) versus crossing the network between nodes (slower).")
+        case "mapping": return qsTr("A different placement of the ranks on the compute nodes would keep more partners on the same node, so fewer messages cross the network.")
+        case "waiting": return qsTr("Ranks sit idle inside MPI because the data they need is not there yet. That time is lost for computing.")
+        case "outlier": return qsTr("A rank or node behaves clearly differently from the rest – often a slower node or a rank with more work.")
+        case "imbalance": return qsTr("The work is not spread evenly: some ranks compute much longer, the others wait for them.")
+        case "compute": return qsTr("How the time outside MPI (computing) is spread over the ranks; large differences mean uneven work.")
+        case "cause": return qsTr("Late sender: the receiver is ready but the message is sent late, so the receiver waits. The sender is the cause – look at what it does before sending.")
+        case "latereceiver": return qsTr("Late receiver: the sender has to wait until the receiver finally asks for the message (blocking send of a large message).")
+        case "chain": return qsTr("Waiting passes on: A waits for B, B waits for C … The real cause is at the end of the chain.")
+        case "link": return qsTr("The single connection between two ranks with the most waiting.")
+        case "size": return qsTr("Many very small messages cost mostly latency; very large ones cost bandwidth. Bundling small messages often helps.")
+        case "lateatcollective": return qsTr("In a collective (e.g. MPI_Allreduce) everybody waits for the last rank to arrive. The rank shown arrives late most often – it is the one to look at.")
+        case "collectiveops": return qsTr("Which collective operations take the most time in this window.")
+        case "critical": return qsTr("The chain of computing and hand-overs that decides how long the window takes. Speeding up anything off this path does not make the program faster.")
+        }
+        return qsTr("A change compared with the reference window you set.")
+    }
 
     // Next / previous collective call: view around it, its last arriver selected; none left in
     // the loaded window: the window moves on by its length (click again once loaded).
@@ -132,14 +187,15 @@ Rectangle {
                 // Layout: Auto (chosen from the data) or a fixed one, shared with Trace Options.
                 ComboBox {
                     id: layoutBox
+                    visible: trace_graph_view.advanced
                     implicitHeight: trace_graph_view.embedded ? 18 : 22
                     implicitWidth: 170
                     font.pointSize: 9
-                    readonly property var values: ["auto", "circle", "grid", "torus", "tree", "stress", "spectral", "spectral circle"]
+                    // Tree and the spectral layouts only through Auto (rarely the best, hard to read).
+                    readonly property var values: ["auto", "circle", "grid", "torus", "stress"]
                     model: [
                         qsTr("Layout: Auto") + (graph.layout === "auto" ? " (" + graph.effectiveLayout + ")" : ""),
-                        qsTr("Layout: Circle"), qsTr("Layout: Grid"), qsTr("Layout: Torus"), qsTr("Layout: Tree"), qsTr("Layout: Stress"),
-                        qsTr("Layout: Spectral"), qsTr("Layout: Spectral circle")
+                        qsTr("Layout: Circle"), qsTr("Layout: Grid"), qsTr("Layout: Torus"), qsTr("Layout: Stress")
                     ]
                     currentIndex: Math.max(0, values.indexOf(graph.layout))
                     onActivated: (index) => {
@@ -153,9 +209,7 @@ Rectangle {
                         + "• Grid: the process grid of a detected 2D stencil\n"
                         + "• Stress: distances in the picture follow the hops between ranks (grids become grids, rings rings, clusters clusters)\n"
                         + "• Torus: a periodic grid (edges wrap around) cut open flat, found from the data; links across the cut are short dotted stubs at the border\n"
-                        + "• Tree: root at the top, levels below – for tree-shaped communication (reductions, broadcast trees)\n"
-                        + "• Spectral: from the eigenvectors of the communication graph\n"
-                        + "• Spectral circle: a circle in which partners sit next to each other")
+                        + "Auto may also pick a tree (root at the top) or a spectral layout when they fit the data best.")
                 }
                 // Zoom: − / + / Fit (also mouse wheel or pinch; drag to move).
                 Row {
@@ -237,6 +291,8 @@ Rectangle {
                             t += qsTr(" · communicators merged")
                         if (graph.shownEdgeCount < graph.edgeCount)
                             t += qsTr(" (heaviest %1 shown)").arg(graph.shownEdgeCount)
+                        else if (graph.notableEdgeCount < graph.shownEdgeCount)
+                            t += qsTr(" · heaviest %1 strong, the rest pale").arg(graph.notableEdgeCount)
                         if (graph.maxWaitSeconds > 0)
                             t += (graph.effectiveLevel === "nodes" ? qsTr(" · max. waiting per node %1 ms") : qsTr(" · max. waiting per rank %1 ms"))
                                  .arg((graph.maxWaitSeconds * 1000).toFixed(3))
@@ -251,6 +307,34 @@ Rectangle {
                             return qsTr("%1 – %2 s").arg((s.viewStartNs / 1e9).toFixed(6)).arg((s.viewEndNs / 1e9).toFixed(6))
                         return qsTr("whole run")
                     }
+                }
+                component ToolButtonText: Rectangle {
+                    property alias label: tbText.text
+                    property bool active: false
+                    property string tip: ""
+                    signal clicked()
+                    width: tbText.implicitWidth + 12
+                    height: trace_graph_view.embedded ? 18 : 22
+                    radius: 3
+                    color: active ? "#00a000" : (tbMouse.containsMouse ? "#666666" : "#5a5a5a")
+                    Text { id: tbText; anchors.centerIn: parent; color: "white"; font.pointSize: 9 }
+                    MouseArea { id: tbMouse; anchors.fill: parent; hoverEnabled: true; onClicked: parent.clicked() }
+                    ToolTip.visible: tip !== "" && tbMouse.containsMouse
+                    ToolTip.delay: 500
+                    ToolTip.text: tip
+                }
+                ToolButtonText {
+                    objectName: "helpButton"
+                    label: qsTr("? What am I looking at")
+                    tip: qsTr("Explains the picture, the colours and the findings in plain words")
+                    onClicked: helpPopup.open()
+                }
+                ToolButtonText {
+                    objectName: "moreOptionsButton"
+                    label: trace_graph_view.advanced ? qsTr("Fewer options ▴") : qsTr("More options ▾")
+                    active: trace_graph_view.advanced
+                    tip: qsTr("Layout, colour choices, filters, comparison with a reference window, stepping through collectives")
+                    onClicked: trace_graph_view.advanced = !trace_graph_view.advanced
                 }
             }
         }
@@ -316,7 +400,15 @@ Rectangle {
                         color: "#111827"
                         font.pointSize: 10
                     }
+                    Text {
+                        visible: !trace_graph_view.advanced
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: graph.edgeLegend.title !== undefined ? graph.edgeLegend.title : ""
+                        color: "#374151"
+                        font.pointSize: 10
+                    }
                     Picker {
+                        visible: trace_graph_view.advanced
                         implicitWidth: 170
                         values: graph.hasReference ? ["wait", "volume", "size", "locality", "change"] : ["wait", "volume", "size", "locality"]
                         model: graph.hasReference
@@ -342,8 +434,9 @@ Rectangle {
                     }
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
-                        text: qsTr("· width: %1 · strong = between nodes, light = inside a node · dashed = collective")
+                        text: qsTr("· thicker = more %1 · dashed = collective%2")
                               .arg(graph.weight === "messages" ? qsTr("messages") : graph.weight === "wait" ? qsTr("waiting") : qsTr("bytes"))
+                              .arg(graph.notableEdgeCount < graph.shownEdgeCount ? qsTr(" · pale grey = the lighter links") : "")
                         color: "#6b7280"
                         font.pointSize: 10
                     }
@@ -358,7 +451,15 @@ Rectangle {
                         color: "#111827"
                         font.pointSize: 10
                     }
+                    Text {
+                        visible: !trace_graph_view.advanced
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: graph.nodeLegend.title !== undefined ? graph.nodeLegend.title : ""
+                        color: "#374151"
+                        font.pointSize: 10
+                    }
                     Picker {
+                        visible: trace_graph_view.advanced
                         implicitWidth: 150
                         values: ["wait", "compute", "ratio", "arrival"]
                         model: [qsTr("fill: waiting"), qsTr("fill: compute time"), qsTr("fill: sent / received"), qsTr("fill: arrival at collective")]
@@ -379,6 +480,7 @@ Rectangle {
                 }
                 // Filter, rank search, reference.
                 Row {
+                    visible: trace_graph_view.advanced
                     spacing: 6
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
@@ -432,6 +534,7 @@ Rectangle {
                 // Step from collective call to collective call (window follows; the rank that
                 // arrived last is selected). At the end of the loaded window the window moves on.
                 Row {
+                    visible: trace_graph_view.advanced
                     spacing: 4
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
@@ -501,37 +604,6 @@ Rectangle {
                           ? qsTr("Each circle is one compute node (all its ranks together). Lines: messages between ranks of different nodes. Green ring: messages inside the node. Double-click a node to show its ranks.")
                           : qsTr("Each circle is one MPI rank, border colour = its compute node. Lines: messages, arrow from sender to receiver. Click a rank to select it, hover for details.")
                 }
-                Rectangle {
-                    width: 16
-                    height: 16
-                    radius: 8
-                    color: infoMouse.containsMouse ? "#4a90e2" : "#9ca3af"
-                    Text {
-                        anchors.centerIn: parent
-                        text: "i"
-                        font.bold: true
-                        font.pixelSize: 10
-                        color: "white"
-                    }
-                    MouseArea {
-                        id: infoMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                    }
-                    ToolTip.visible: infoMouse.containsMouse
-                    ToolTip.delay: 300
-                    ToolTip.text: qsTr("Trace Graph: who talks to whom in the current time window.\n"
-                        + "• Ranks: one circle per MPI process, grouped by compute node (border colour).\n"
-                        + "• Nodes: the ranks of each compute node merged into one circle; only messages between nodes are lines, messages inside a node are the green ring (wider = more).\n"
-                        + "• Green lines: point-to-point messages (width = bytes, messages or waiting time).\n"
-                        + "• Black dashed lines: collectives (MPI_Allreduce, …) to a diamond per communicator.\n"
-                        + "• Fill white → blue: waiting time (late sender), as in the 3D view.\n"
-                        + "• Auto: ranks when zoomed in to single steps (≤ 50 ms) or for ≤ 64 ranks, nodes otherwise.\n"
-                        + "• Layout Auto: chosen from the data so that partners sit next to each other (see the Layout box).\n"
-                        + "• Zoom: mouse wheel or pinch, drag to move, Fit to see everything; rank numbers appear when zoomed in far enough.\n"
-                        + "• Findings (right): communication pattern, locality, waiting, slow nodes, late senders. Hover one to highlight its ranks, click to zoom there and select the rank.\n"
-                        + "Hover a circle or line for its numbers; double-click a node to open it into its ranks.")
-                }
             }
         }
 
@@ -555,7 +627,7 @@ Rectangle {
             level: trace_graph_view.traceState ? trace_graph_view.traceState.graphLevel : "auto"
             communicators: trace_graph_view.traceState && trace_graph_view.traceState.graphCommunicators ? trace_graph_view.traceState.graphCommunicators : "auto"
             layout: trace_graph_view.traceState && trace_graph_view.traceState.graphLayout ? trace_graph_view.traceState.graphLayout : "auto"
-            maxEdges: trace_graph_view.traceState ? trace_graph_view.traceState.graphMaxEdges : 500
+            maxEdges: trace_graph_view.traceState ? trace_graph_view.traceState.graphMaxEdges : 20000
             edgeColor: trace_graph_view.traceState && trace_graph_view.traceState.graphEdgeColor ? trace_graph_view.traceState.graphEdgeColor : "wait"
             nodeColor: trace_graph_view.traceState && trace_graph_view.traceState.graphNodeColor ? trace_graph_view.traceState.graphNodeColor : "wait"
             edgeFilter: trace_graph_view.traceState && trace_graph_view.traceState.graphEdgeFilter ? trace_graph_view.traceState.graphEdgeFilter : "all"
@@ -689,6 +761,37 @@ Rectangle {
                     font.bold: true
                     font.pointSize: 11
                     color: "#111827"
+                }
+                // In one sentence: how bad is it, and where to start (click opens that finding).
+                Rectangle {
+                    objectName: "summaryCard"
+                    Layout.fillWidth: true
+                    visible: graph.summary.text !== ""
+                    Layout.preferredHeight: visible ? summaryText.implicitHeight + 14 : 0
+                    radius: 6
+                    readonly property int severity: graph.summary.severity !== undefined ? graph.summary.severity : 0
+                    color: severity >= 2 ? "#fef2f2" : severity === 1 ? "#fffbeb" : "#f0fdf4"
+                    border.color: severity >= 2 ? "#dc2626" : severity === 1 ? "#f59e0b" : "#16a34a"
+                    border.width: summaryMouse.containsMouse ? 2 : 1
+                    Text {
+                        id: summaryText
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.margins: 8
+                        wrapMode: Text.WordWrap
+                        font.pointSize: 10
+                        color: "#111827"
+                        text: graph.summary.text + (graph.summary.finding >= 0 ? qsTr("  → show") : "")
+                    }
+                    MouseArea {
+                        id: summaryMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        enabled: graph.summary.finding >= 0
+                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: trace_graph_view.openFinding(graph.summary.finding)
+                    }
                 }
                 Text {
                     Layout.fillWidth: true
@@ -838,6 +941,15 @@ Rectangle {
                                             }
                                             Text {
                                                 Layout.fillWidth: true
+                                                visible: card.expanded
+                                                text: qsTr("What does this mean? ") + trace_graph_view.explainKind(card.f.kind)
+                                                font.pointSize: 9
+                                                font.italic: true
+                                                color: "#1e3a8a"
+                                                wrapMode: Text.WordWrap
+                                            }
+                                            Text {
+                                                Layout.fillWidth: true
                                                 visible: card.expanded && card.f.action !== ""
                                                 text: qsTr("What to do: ") + card.f.action
                                                 font.pointSize: 9
@@ -890,27 +1002,7 @@ Rectangle {
                                                 if (findingsPanel.pinned < 0)
                                                     graph.highlightedFinding = containsMouse ? card.index : -1
                                             }
-                                            onClicked: {
-                                                if (findingsPanel.pinned === card.index) {
-                                                    findingsPanel.pinned = -1
-                                                    graph.highlightedFinding = -1
-                                                    graph.resetView()
-                                                    return
-                                                }
-                                                findingsPanel.pinned = card.index
-                                                var f = card.f
-                                                if (f.ranks.length > 0 || f.nodes.length > 0)
-                                                    graph.zoomToFinding(card.index)
-                                                else
-                                                    graph.highlightedFinding = card.index
-                                                var r = f.fromRank >= 0 ? f.fromRank : f.rank
-                                                if (r >= 0 && trace_graph_view.traceState)
-                                                    trace_graph_view.traceState.selectedRank = r
-                                                if (f.fromRank >= 0 && f.toRank >= 0 && trace_graph_view.traceState) {
-                                                    trace_graph_view.traceState.graphLinkFrom = f.fromRank
-                                                    trace_graph_view.traceState.graphLinkTo = f.toRank
-                                                }
-                                            }
+                                            onClicked: trace_graph_view.openFinding(card.index)
                                         }
                                     }
                                 }
@@ -920,6 +1012,77 @@ Rectangle {
                 }
             }
         }
+        }
+    }
+
+    // "What am I looking at?": the view in plain words, for people new to MPI performance analysis.
+    Popup {
+        id: helpPopup
+        objectName: "helpPopup"
+        parent: trace_graph_view
+        anchors.centerIn: parent
+        width: Math.min(trace_graph_view.width - 40, 640)
+        height: Math.min(trace_graph_view.height - 40, 560)
+        modal: true
+        padding: 14
+        background: Rectangle { color: "#ffffff"; radius: 8; border.color: "#d1d5db" }
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 8
+            RowLayout {
+                Layout.fillWidth: true
+                Text {
+                    Layout.fillWidth: true
+                    text: qsTr("What am I looking at?")
+                    font.bold: true
+                    font.pointSize: 13
+                    color: "#111827"
+                }
+                Button { text: qsTr("Close"); onClicked: helpPopup.close() }
+            }
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                contentWidth: availableWidth
+                Text {
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.StyledText
+                    font.pointSize: 10
+                    color: "#1f2937"
+                    text: qsTr("<b>The picture</b><br>"
+                        + "Every <b>circle</b> is one MPI process (rank) – or, when zoomed out on big runs, one compute node with all its ranks. "
+                        + "Every <b>line</b> means: these two exchanged messages in the time window above the timeline. "
+                        + "Thicker line = more data. Dashed lines go to a ◇, which stands for a collective operation (e.g. MPI_Allreduce) of a group of ranks.<br><br>"
+                        + "<b>The colours</b><br>"
+                        + "Circles: white = hardly waits, dark blue = waits a lot for others. "
+                        + "Lines: green = nobody waits on this link, yellow = some waiting, red = a lot. "
+                        + "With many links only the most important ones are drawn strong; the rest stay pale grey, so you still see the whole structure.<br><br>"
+                        + "<b>How to read it</b><br>"
+                        + "A healthy program looks calm: mostly white circles and green lines. "
+                        + "Dark circles and red lines show where time is lost. "
+                        + "If only a few ranks are dark, they wait for someone – the finding “late sender” or “wait chain” tells you for whom.<br><br>"
+                        + "<b>Typical shapes</b><br>"
+                        + "• Grid or torus: every rank talks to its neighbours (e.g. a simulation on a mesh).<br>"
+                        + "• Ring: each rank passes data on to the next one.<br>"
+                        + "• Star: one rank talks to all (master/worker) – can become a bottleneck.<br>"
+                        + "• Clusters: groups that mostly talk among themselves.<br>"
+                        + "The layout is chosen automatically so that partners sit next to each other.<br><br>"
+                        + "<b>The findings (right)</b><br>"
+                        + "Start with the sentence at the top: it says how much time is lost waiting and where to start. "
+                        + "Red = problem, orange = worth a look, grey = information. Hover a card to light up its ranks, click it to zoom there and read what it means and what to do.<br><br>"
+                        + "<b>Words</b><br>"
+                        + "• <b>Late sender</b>: the receiver is ready, the message comes late – the receiver waits.<br>"
+                        + "• <b>Late receiver</b>: the sender has to wait until the receiver asks for the message.<br>"
+                        + "• <b>Collective</b>: an operation of many ranks together; all wait for the last one to arrive.<br>"
+                        + "• <b>Load imbalance</b>: some ranks have more work than others, the rest wait.<br>"
+                        + "• <b>Critical path</b>: the chain of work that decides the run time – only speeding up this chain helps.<br><br>"
+                        + "<b>Using it</b><br>"
+                        + "Mouse wheel / pinch to zoom, drag to move, Fit for everything. Click a circle to select the rank (also in the timeline), click a line for its details. "
+                        + "Ranks / Nodes switches between single processes and compute nodes. “More options” has layouts, other colourings, filters, comparison of two windows and stepping through collective calls.")
+                }
+            }
         }
     }
 
