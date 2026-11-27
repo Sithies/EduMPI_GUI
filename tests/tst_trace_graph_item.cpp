@@ -796,6 +796,23 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(help, "close"));
         QVERIFY(ownView->findChild<QObject *>(QStringLiteral("summaryCard")));
 
+        // Questions set colours / filter; the same one again goes back to the default view.
+        QVERIFY(QMetaObject::invokeMethod(ownView, "askQuestion", Q_ARG(QVariant, QStringLiteral("load"))));
+        QCOMPARE(own->nodeColor(), QStringLiteral("compute"));
+        QCOMPARE(ownView->property("activeQuestion").toString(), QStringLiteral("load"));
+        QVERIFY(!ownView->property("questionAnswer").toString().isEmpty());
+        QVERIFY(QMetaObject::invokeMethod(ownView, "askQuestion", Q_ARG(QVariant, QStringLiteral("mapping"))));
+        QCOMPARE(own->edgeColor(), QStringLiteral("locality"));
+        QCOMPARE(own->edgeFilter(), QStringLiteral("between"));
+        QVERIFY(QMetaObject::invokeMethod(ownView, "askQuestion", Q_ARG(QVariant, QStringLiteral("runtime"))));
+        QVERIFY(own->showCriticalPath());
+        QVERIFY(QMetaObject::invokeMethod(ownView, "askQuestion", Q_ARG(QVariant, QStringLiteral("runtime"))));
+        QVERIFY(!own->showCriticalPath());
+        QCOMPARE(own->edgeColor(), QStringLiteral("wait"));
+        QCOMPARE(own->nodeColor(), QStringLiteral("wait"));
+        QCOMPARE(own->edgeFilter(), QStringLiteral("all"));
+        QCOMPARE(ownView->property("activeQuestion").toString(), QString());
+
         // Options from traceState.
         state->setProperty("graphCollectives", false);
         state->setProperty("viewEndNs", 2500.0 * kMs);

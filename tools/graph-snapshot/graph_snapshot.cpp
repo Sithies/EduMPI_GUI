@@ -268,6 +268,11 @@ int main(int argc, char **argv)
                     graph->zoomToFinding(idx);
                     continue;
                 }
+                if (key == QLatin1String("question")) {
+                    // As a click on a question button.
+                    QMetaObject::invokeMethod(obj->findChild<QObject *>(QStringLiteral("graph")), "askQuestion", Q_ARG(QVariant, kv.section(QLatin1Char('='), 1)));
+                    continue;
+                }
                 if (key == QLatin1String("critical") && graph) {
                     graph->setShowCriticalPath(kv.section(QLatin1Char('='), 1) == QLatin1String("true"));
                     continue;

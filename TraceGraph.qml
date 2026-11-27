@@ -52,6 +52,112 @@ Rectangle {
         }
     }
 
+    // Questions (row above the legend): each sets line / circle colours, filter and critical
+    // path so the picture answers it, opens only the matching finding categories and opens the
+    // finding that answers it best. The same question again goes back to the default view.
+    readonly property var questions: [
+        { key: "wait", label: qsTr("Where is time lost waiting?"),
+          tip: qsTr("Lines and circles by waiting, only links with waiting; opens the biggest late sender / wait chain"),
+          edge: "wait", node: "wait", filter: "waiting", critical: false,
+          categories: ["waiting"], kinds: ["cause", "chain", "link", "outlier", "waiting", "latereceiver"] },
+        { key: "load", label: qsTr("Is the load balanced?"),
+          tip: qsTr("Circles by compute time (orange = computes longer); opens the load imbalance findings"),
+          edge: "wait", node: "compute", filter: "all", critical: false,
+          categories: ["load"], kinds: ["imbalance", "compute", "outlier"] },
+        { key: "mapping", label: qsTr("Do the ranks fit the nodes?"),
+          tip: qsTr("Lines by inside / between compute nodes, only links between nodes; opens locality and the suggested placement"),
+          edge: "locality", node: "wait", filter: "between", critical: false,
+          categories: ["structure"], kinds: ["mapping", "locality"] },
+        { key: "collectives", label: qsTr("Who slows down the collectives?"),
+          tip: qsTr("Opens who arrives last at collective calls and which collectives cost most; ◀ ▶ under More options steps through the calls"),
+          edge: "wait", node: "wait", filter: "all", critical: false,
+          categories: ["collectives"], kinds: ["lateatcollective", "collectiveops"] },
+        { key: "structure", label: qsTr("What does the structure look like?"),
+          tip: qsTr("Lines by data volume, circles by sent / received; opens the communication pattern and hubs"),
+          edge: "volume", node: "ratio", filter: "all", critical: false,
+          categories: ["structure"], kinds: ["pattern", "hub"] },
+        { key: "runtime", label: qsTr("What decides the run time?"),
+          tip: qsTr("Draws the critical path in gold and opens its time split: only speeding up this chain helps"),
+          edge: "wait", node: "wait", filter: "all", critical: true,
+          categories: ["critical"], kinds: ["critical"] },
+        { key: "messages", label: qsTr("Are the messages efficient?"),
+          tip: qsTr("Lines by average message size; opens the message size finding (many tiny or huge messages)"),
+          edge: "size", node: "ratio", filter: "all", critical: false,
+          categories: ["messages"], kinds: ["size"] },
+        { key: "change", label: qsTr("What changed vs. the reference?"), needsReference: true,
+          tip: qsTr("Lines by change of waiting against the reference window; opens the comparison"),
+          edge: "change", node: "wait", filter: "all", critical: false,
+          categories: ["comparison"], kinds: ["compare", "compare-ranks", "compare-link"] }
+    ]
+    property string activeQuestion: ""
+    property string questionAnswer: ""
+
+    function setOption(stateKey, itemKey, value) {
+        if (traceState && traceState[stateKey] !== undefined)
+            traceState[stateKey] = value
+        else
+            graph[itemKey] = value
+    }
+    function questionOf(key) {
+        for (var i = 0; i < questions.length; ++i)
+            if (questions[i].key === key)
+                return questions[i]
+        return null
+    }
+    // Index of the finding answering question q (first of its kinds in the order given), -1 = none.
+    function answerFinding(q) {
+        var list = graph.findingList
+        for (var k = 0; k < q.kinds.length; ++k)
+            for (var i = 0; i < list.length; ++i)
+                if (list[i].kind === q.kinds[k] && q.categories.indexOf(list[i].category) >= 0)
+                    return i
+        return -1
+    }
+    function updateAnswer() {
+        var q = questionOf(activeQuestion)
+        if (!q) {
+            questionAnswer = ""
+            return
+        }
+        var i = answerFinding(q)
+        questionAnswer = i >= 0 ? graph.findingList[i].title + (graph.findingList[i].metric !== "" ? " – " + graph.findingList[i].metric : "")
+                                : qsTr("Nothing notable for this question in this window.")
+    }
+    function askQuestion(key) {
+        var q = questionOf(key)
+        findingsPanel.pinned = -1
+        graph.highlightedFinding = -1
+        if (!q || activeQuestion === key) {
+            // Back to the default view.
+            activeQuestion = ""
+            setOption("graphEdgeColor", "edgeColor", "wait")
+            setOption("graphNodeColor", "nodeColor", "wait")
+            setOption("graphEdgeFilter", "edgeFilter", "all")
+            graph.showCriticalPath = false
+            findingsPanel.collapsed = ({})
+            graph.resetView()
+            updateAnswer()
+            return
+        }
+        activeQuestion = key
+        setOption("graphEdgeColor", "edgeColor", q.edge)
+        setOption("graphNodeColor", "nodeColor", q.node)
+        setOption("graphEdgeFilter", "edgeFilter", q.filter)
+        graph.showCriticalPath = q.critical
+        var c = {}
+        for (var j = 0; j < findingsPanel.categories.length; ++j) {
+            var cat = findingsPanel.categories[j].key
+            c[cat] = q.categories.indexOf(cat) < 0
+        }
+        findingsPanel.collapsed = c
+        var i = answerFinding(q)
+        if (i >= 0)
+            openFinding(i)
+        else
+            graph.resetView()
+        updateAnswer()
+    }
+
     // Plain-language meaning of a finding kind (shown in the opened card).
     function explainKind(kind) {
         switch (kind) {
@@ -107,6 +213,11 @@ Rectangle {
             ++u
         }
         return bytes.toFixed(u === 0 ? 0 : 1) + " " + units[u]
+    }
+
+    Connections {
+        target: graph
+        function onGraphChanged() { trace_graph_view.updateAnswer() }
     }
 
     // Own view: the overview bar moves the window (in the timeline view the timeline does).
@@ -335,6 +446,68 @@ Rectangle {
                     active: trace_graph_view.advanced
                     tip: qsTr("Layout, colour choices, filters, comparison with a reference window, stepping through collectives")
                     onClicked: trace_graph_view.advanced = !trace_graph_view.advanced
+                }
+            }
+        }
+
+        // Questions: one click sets the view up to answer it (see askQuestion).
+        Rectangle {
+            objectName: "questionBar"
+            Layout.fillWidth: true
+            Layout.preferredHeight: questionFlow.implicitHeight + 8
+            color: "#eef2ff"
+            Flow {
+                id: questionFlow
+                anchors.fill: parent
+                anchors.margins: 4
+                spacing: 6
+                Text {
+                    height: 22
+                    verticalAlignment: Text.AlignVCenter
+                    text: qsTr("Ask:")
+                    font.bold: true
+                    font.pointSize: 10
+                    color: "#1e3a8a"
+                }
+                Repeater {
+                    model: trace_graph_view.questions
+                    delegate: Rectangle {
+                        required property var modelData
+                        readonly property bool active: trace_graph_view.activeQuestion === modelData.key
+                        objectName: "question_" + modelData.key
+                        visible: !modelData.needsReference || graph.hasReference
+                        width: qText.implicitWidth + 16
+                        height: 22
+                        radius: 11
+                        color: active ? "#1d4ed8" : (qMouse.containsMouse ? "#dbeafe" : "#ffffff")
+                        border.color: "#1d4ed8"
+                        Text {
+                            id: qText
+                            anchors.centerIn: parent
+                            text: modelData.label
+                            color: parent.active ? "white" : "#1e3a8a"
+                            font.pointSize: 10
+                        }
+                        MouseArea {
+                            id: qMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: trace_graph_view.askQuestion(modelData.key)
+                        }
+                        ToolTip.visible: qMouse.containsMouse
+                        ToolTip.delay: 500
+                        ToolTip.text: modelData.tip + (active ? qsTr("\n(click again: back to the default view)") : "")
+                    }
+                }
+                Text {
+                    visible: trace_graph_view.questionAnswer !== ""
+                    height: 22
+                    verticalAlignment: Text.AlignVCenter
+                    text: "→ " + trace_graph_view.questionAnswer
+                    font.pointSize: 10
+                    font.bold: true
+                    color: "#111827"
                 }
             }
         }
@@ -1051,7 +1224,9 @@ Rectangle {
                     textFormat: Text.StyledText
                     font.pointSize: 10
                     color: "#1f2937"
-                    text: qsTr("<b>The picture</b><br>"
+                    text: qsTr("<b>Start with a question</b><br>"
+                        + "The blue buttons under the toolbar (“Where is time lost waiting?”, “Is the load balanced?” …) set the colours, the filter and the findings so the picture answers that question; the answer appears next to them. Click the same button again for the normal view.<br><br>"
+                        + "<b>The picture</b><br>"
                         + "Every <b>circle</b> is one MPI process (rank) – or, when zoomed out on big runs, one compute node with all its ranks. "
                         + "Every <b>line</b> means: these two exchanged messages in the time window above the timeline. "
                         + "Thicker line = more data. Dashed lines go to a ◇, which stands for a collective operation (e.g. MPI_Allreduce) of a group of ranks.<br><br>"
