@@ -7,6 +7,7 @@
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QJSValue>
 #include <QQuickWindow>
 #include <QPointingDevice>
 
@@ -306,8 +307,186 @@ private slots:
         QCOMPARE(d.value(QStringLiteral("partner")).toInt(), 3);
         for (const char *key : {"bytes", "tag", "comm", "callPath", "messageCount", "completes"})
             QVERIFY2(d.contains(QLatin1String(key)), key);
+        QCOMPARE(d.value(QStringLiteral("startNs")).toDouble(), 101e6);
+        QCOMPARE(d.value(QStringLiteral("messageSender")).toInt(), 3);
+        QCOMPARE(d.value(QStringLiteral("messageReceiver")).toInt(), 0);
+        QCOMPARE(d.value(QStringLiteral("messageSendNs")).toDouble(), 400e6);
         item.clickAt(kL + 200, 5); // axis: nothing
         QCOMPARE(spy.count(), 1);
+    }
+
+    // The send R3 -> R0 at 2400 ms is never received: no message to jump to.
+    void unmatchedSendHasNoMessageKey()
+    {
+        TraceTimelineModel model;
+        TraceTimelineItem item;
+        setupRing4(model, item);
+        QSignalSpy spy(&item, &TraceTimelineItem::barClicked);
+        const qreal r3 = 22 + 16 + 2 * 18 + 16 + 18 + 9; // second rank of nodeB
+        item.clickAt(kL + 2400.5, r3);
+        QCOMPARE(spy.count(), 1);
+        const QVariantMap d = spy.first().at(0).toMap();
+        QCOMPARE(d.value(QStringLiteral("function")).toString(), QStringLiteral("MPI_Send"));
+        QCOMPARE(d.value(QStringLiteral("rank")).toInt(), 3);
+        QVERIFY(!d.contains(QStringLiteral("messageSender")));
+        QVERIFY(!d.contains(QStringLiteral("messageReceiver")));
+        QVERIFY(!d.contains(QStringLiteral("messageSendNs")));
+    }
+
+    // The click time comes from x alone, also while only the overview is loaded.
+    void timeClickedWithoutDetail()
+    {
+        TraceTimelineModel model;
+        model.addSnapshot({build(m_ring4, false), -1, -1, 1000 * kMs});
+        QVERIFY(!model.detail());
+        TraceTimelineItem item;
+        item.setShowPhases(false);
+        item.setModel(&model);
+        item.setWidth(kL + 2500);
+        item.setHeight(300);
+        item.setViewStartNs(0);
+        item.setViewEndNs(2500 * kMs);
+        QSignalSpy times(&item, &TraceTimelineItem::timeClicked);
+        QSignalSpy bars(&item, &TraceTimelineItem::barClicked);
+        item.clickAt(kL + 400, kTop + 9);
+        QCOMPARE(times.count(), 1);
+        QCOMPARE(times.first().at(1).toInt(), 0);
+        const double span = double(item.viewEndNs() - item.viewStartNs());
+        const double perColumn = span / 2500;
+        const double expected = item.viewStartNs() + 400.0 / 2500 * span;
+        QVERIFY(qAbs(times.first().at(0).toLongLong() - expected) <= perColumn);
+        QCOMPARE(bars.count(), 0);
+        item.clickAt(10, kTop + 9); // label: selects, no time
+        QCOMPARE(times.count(), 1);
+    }
+
+    // Clicks on a node header or below the last row also set the time (rank -1); the axis does not.
+    void timeClickedOnEmptyArea()
+    {
+        TraceTimelineModel model;
+        TraceTimelineItem item;
+        setupRing4(model, item);
+        QVERIFY(item.contentHeight() + TraceTimelineItem::kAxisHeight < 250);
+        QSignalSpy times(&item, &TraceTimelineItem::timeClicked);
+        QSignalSpy bars(&item, &TraceTimelineItem::barClicked);
+        item.clickAt(kL + 700, 250); // below R3
+        QCOMPARE(times.count(), 1);
+        QCOMPARE(times.at(0).at(1).toInt(), -1);
+        QVERIFY(qAbs(times.at(0).at(0).toLongLong() - 700 * kMs) <= kMs);
+        item.clickAt(kL + 700, TraceTimelineItem::kAxisHeight + 8); // header of nodeA
+        QCOMPARE(times.count(), 2);
+        QCOMPARE(times.at(1).at(1).toInt(), -1);
+        item.clickAt(kL + 700, 5); // axis
+        item.clickAt(10, 250);     // label column, no row
+        QCOMPARE(times.count(), 2);
+        QCOMPARE(bars.count(), 0);
+    }
+
+    void drawsCursor()
+    {
+        TraceTimelineModel model;
+        TraceTimelineItem item;
+        setupRing4(model, item);
+        item.setWidth(kL + 1000); // 2.5 ms per column
+        const int r0 = kTop + 9;
+        const QImage plain = render(item);
+        QSignalSpy changed(&item, &TraceTimelineItem::cursorChanged);
+        item.setCursorNs(1000 * kMs);
+        item.setCursorWidthNs(250 * kMs);
+        QCOMPARE(changed.count(), 2);
+        QCOMPARE(item.cursorNs(), 1000 * kMs);
+        QCOMPARE(item.cursorWidthNs(), 250 * kMs);
+        const QImage img = render(item);
+        QCOMPARE(hex(px(img, kL + 400, r0)), QStringLiteral("#ff0000"));
+        QVERIFY(px(img, kL + 450, r0) != px(plain, kL + 450, r0));
+        QCOMPARE(px(img, kL + 600, r0), px(plain, kL + 600, r0)); // behind the area: untouched
+    }
+
+    void cursorOutsideViewDrawsNothing()
+    {
+        TraceTimelineModel model;
+        TraceTimelineItem item;
+        setupRing4(model, item);
+        QCOMPARE(item.cursorNs(), qint64(-1));
+        const QImage plain = render(item);
+        item.setCursorWidthNs(250 * kMs);
+        QCOMPARE(render(item), plain); // cursorNs = -1
+        item.setCursorNs(3000 * kMs); // after the view
+        QCOMPARE(render(item), plain);
+    }
+
+    // The real TraceTimeline.qml with the window's shared state: a click on a call moves the
+    // cursor to its start and selects its message; a click on computation only moves the cursor.
+    void clickSetsCursorInTraceTimelineQml()
+    {
+        const QString qmlFile = QFINDTESTDATA("../TraceTimeline.qml");
+        QVERIFY2(!qmlFile.isEmpty(), "TraceTimeline.qml not found");
+        qmlRegisterType<TraceTimelineItem>("GUI_Cluster", 1, 0, "TraceTimelineItem");
+        TraceTimelineModel model;
+        model.addSnapshot({build(m_ring4)});
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("tlModel"), &model);
+        QQmlComponent c(&engine);
+        c.setData("import QtQuick\n"
+                  "TraceTimeline {\n"
+                  "  width: 1000; height: 500; listNodes: ({timeline: tlModel})\n"
+                  "  traceState: QtObject {\n"
+                  "    property real viewStartNs: 0\n"
+                  "    property real viewEndNs: 0\n"
+                  "    property int selectedRank: -1\n"
+                  "    property bool showArrows: true\n"
+                  "    property bool allArrows: false\n"
+                  "    property bool highlightWait: true\n"
+                  "    property bool showPhases: false\n"
+                  "    property string phaseLevel: \"outer\"\n"
+                  "    property var lastBar: null\n"
+                  "    property real cursorNs: 0\n"
+                  "    property real stepNs: 10000000\n"
+                  "    property bool playing: false\n"
+                  "    property int stepsPerSecond: 5\n"
+                  "    property var selectedMessage: null\n"
+                  "    signal viewRequested(real startNs, real endNs)\n"
+                  "  }\n"
+                  "}\n",
+                  QUrl::fromLocalFile(QFileInfo(qmlFile).absolutePath() + QStringLiteral("/__cursor_test.qml")));
+        std::unique_ptr<QObject> obj(c.create());
+        QVERIFY2(obj, qPrintable(c.errorString()));
+        QQuickWindow win;
+        win.resize(1000, 500);
+        auto *rootItem = qobject_cast<QQuickItem *>(obj.get());
+        QVERIFY(rootItem);
+        rootItem->setParentItem(win.contentItem());
+        win.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&win));
+        auto *item = rootItem->findChild<TraceTimelineItem *>();
+        QVERIFY(item);
+        auto *state = obj->property("traceState").value<QObject *>();
+        QVERIFY(state);
+        QTRY_VERIFY(item->viewEndNs() > item->viewStartNs());
+        QCOMPARE(item->cursorWidthNs(), 10 * kMs); // bound to stepNs
+
+        const double plot = item->width() - kL;
+        const double span = double(item->viewEndNs() - item->viewStartNs());
+        auto xAt = [&](qint64 ns) { return kL + (double(ns - item->viewStartNs()) / span) * plot; };
+        auto message = [&]() {
+            const QVariant v = state->property("selectedMessage");
+            return v.canConvert<QJSValue>() ? qvariant_cast<QJSValue>(v) : QJSValue(QJSValue::NullValue);
+        };
+
+        item->clickAt(xAt(200 * kMs), kTop + 9); // R0: MPI_Recv [101, 402] ms from R3
+        QCOMPARE(state->property("cursorNs").toDouble(), 101e6);
+        QCOMPARE(item->cursorNs(), 101 * kMs);
+        const QJSValue m = message();
+        QVERIFY(m.isObject());
+        QCOMPARE(m.property(QStringLiteral("sender")).toInt(), 3);
+        QCOMPARE(m.property(QStringLiteral("receiver")).toInt(), 0);
+        QCOMPARE(m.property(QStringLiteral("sendNs")).toNumber(), 400e6);
+        QCOMPARE(state->property("lastBar").toMap().value(QStringLiteral("function")).toString(),
+                 QStringLiteral("MPI_Recv"));
+
+        item->clickAt(xAt(250 * kMs), kTop + TraceTimelineItem::kBarRow + 9); // R1: computation
+        QVERIFY(qAbs(state->property("cursorNs").toDouble() - 250e6) <= span / plot);
+        QVERIFY(message().isNull());
     }
 
     // The real TraceTimeline.qml: a mouse wheel over the plot zooms around the pointer.
@@ -462,6 +641,36 @@ private slots:
         QCOMPARE(spy.count(), 1);
         item.setAllArrows(false);
         QVERIFY(!item.arrowsCapped());
+    }
+
+    // Coverage and event queries answer from the complete overview, or from the loaded detail
+    // window in windowed mode.
+    void modelCoversAndFindsEvents()
+    {
+        TraceTimelineModel full;
+        full.addSnapshot({build(m_ring4)});
+        QVERIFY(full.covers(0, 2500 * kMs));
+        QCOMPARE(full.adjacentEventNs(102 * kMs, -1, true), 400 * kMs);
+        QCOMPARE(full.adjacentEventNs(1100 * kMs, 2, true), 1200 * kMs);
+
+        TraceTimelineModel windowed;
+        windowed.addSnapshot({build(m_ring4, false), -1, -1, 1000 * kMs});
+        QVERIFY(windowed.windowed());
+        QVERIFY(!windowed.covers(0, kMs));
+        QCOMPARE(windowed.adjacentEventNs(0, -1, true), qint64(-1));
+
+        QVERIFY(windowed.requestDetail(50 * kMs, 150 * kMs));
+        TraceAggregator agg;
+        TimelineBuilder builder(agg, 50 * kMs, 150 * kMs, true, 0);
+        TraceMeta meta;
+        QString error;
+        QVERIFY(readOtf2(m_ring4, builder, &meta, &error));
+        agg.finish(meta.traceLengthNs);
+        windowed.addSnapshot({builder.finish(), 50 * kMs, 150 * kMs});
+        QVERIFY(windowed.covers(100 * kMs, 101 * kMs));
+        QVERIFY(!windowed.covers(100 * kMs, 200 * kMs));
+        QCOMPARE(windowed.adjacentEventNs(101 * kMs, -1, true), 102 * kMs);
+        QCOMPARE(windowed.adjacentEventNs(102 * kMs, -1, true), qint64(-1)); // 400 ms not loaded
     }
 
     void requestsDetailOnlyWhenViewChanges()

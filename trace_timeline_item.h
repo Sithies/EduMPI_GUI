@@ -35,6 +35,10 @@ class TraceTimelineItem : public QQuickPaintedItem
     Q_PROPERTY(qreal contentY READ contentY WRITE setContentY NOTIFY contentYChanged)
     Q_PROPERTY(qreal contentHeight READ contentHeight NOTIFY contentHeightChanged)
     Q_PROPERTY(bool arrowsCapped READ arrowsCapped NOTIFY arrowsCappedChanged)
+    // Shared time cursor: red line at cursorNs, area [cursorNs, cursorNs + cursorWidthNs) tinted
+    // green; cursorNs < 0 = no cursor.
+    Q_PROPERTY(qint64 cursorNs READ cursorNs WRITE setCursorNs NOTIFY cursorChanged)
+    Q_PROPERTY(qint64 cursorWidthNs READ cursorWidthNs WRITE setCursorWidthNs NOTIFY cursorChanged)
 
 public:
     static constexpr int kLabelWidth = 48;
@@ -69,6 +73,10 @@ public:
     void setContentY(qreal y);
     qreal contentHeight() const { return m_contentHeight; }
     bool arrowsCapped() const { return m_arrowsCapped; }
+    qint64 cursorNs() const { return m_cursorNs; }
+    void setCursorNs(qint64 ns);
+    qint64 cursorWidthNs() const { return m_cursorWidthNs; }
+    void setCursorWidthNs(qint64 ns);
 
     // The time under x stays fixed; the window is clamped to [10 µs, trace length] and into
     // [0, trace length].
@@ -79,8 +87,10 @@ public:
     // Sets both ends at once (no inverted intermediate range), clamped like zoomAt / panBy:
     // span to [10 µs, trace length], window into [0, trace length].
     Q_INVOKABLE void setView(qint64 start, qint64 end);
-    // Label area: toggles selectedRank; phase band / bar: emits barClicked with the activity
-    // (or computation gap) under the point; elsewhere nothing.
+    // Label area: toggles selectedRank; right of it, below the axis: emits timeClicked with the
+    // time under the point (also without detail; rank -1 on a node header or below the last
+    // row), then on a phase band / bar barClicked with the activity (or computation gap) under
+    // it; axis: nothing.
     Q_INVOKABLE void clickAt(qreal x, qreal y);
 
     void paint(QPainter *painter) override;
@@ -93,9 +103,12 @@ signals:
     void contentYChanged();
     void contentHeightChanged();
     void arrowsCappedChanged();
-    // Keys: function, rank, startUs, durationUs, waitUs, partner, bytes, tag, comm, callPath
-    // (QStringList, outermost first), messageCount.
+    void cursorChanged();
+    // Keys: function, rank, startNs, startUs, durationUs, waitUs, partner, bytes, tag, comm,
+    // callPath (QStringList, outermost first), completes, messageCount; for a P2P call with a
+    // matched message also messageSender, messageReceiver, messageSendNs.
     void barClicked(QVariantMap details);
+    void timeClicked(qint64 ns, int rank);
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -134,6 +147,8 @@ private:
     qreal m_contentY = 0;
     qreal m_contentHeight = 0;
     bool m_arrowsCapped = false;
+    qint64 m_cursorNs = -1;
+    qint64 m_cursorWidthNs = 0;
 
     QVector<RowLayout> m_rows;
     QVector<HeaderLayout> m_headers;

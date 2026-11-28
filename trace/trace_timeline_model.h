@@ -50,6 +50,13 @@ public:
     // memory budget and the new range is at most half as long.
     Q_INVOKABLE bool requestDetail(qint64 fromNs, qint64 toNs);
 
+    // Exact data (activities, messages) for [fromNs, toNs] is available: the overview is
+    // complete, or detail() covers the range.
+    Q_INVOKABLE bool covers(qint64 fromNs, qint64 toNs) const;
+    // trace::adjacentEventNs on the complete overview, else on detail(); -1 if nothing is loaded
+    // or there is no event (rank -1 = all ranks).
+    Q_INVOKABLE qint64 adjacentEventNs(qint64 ns, int rank, bool forward) const;
+
 public slots:
     void addSnapshot(const trace::TimelineSnapshot &snapshot);
     // Trace_Data_Source::loadProgress of a detail read; ignored while no load is pending.

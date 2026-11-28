@@ -54,6 +54,14 @@ Window {
         property bool showPhases: true
         property string phaseLevel: "outer"
         property var lastBar: null
+        // Shared time cursor of the trace views (ns from trace start) and the step the time bar
+        // moves it by; the timeline tints [cursorNs, cursorNs + stepNs).
+        property real cursorNs: 0
+        property real stepNs: 10000000 // 10 ms
+        property bool playing: false
+        property int stepsPerSecond: 5
+        // Message of the last clicked P2P call: null or {sender, receiver, sendNs}.
+        property var selectedMessage: null
         property string name: ""
         // Loaded file or folder as a local path (the file dialog yields file:// URLs).
         readonly property string path: decodeURIComponent(run_analysis_win.tracePath.replace(/^file:\/\//, ""))

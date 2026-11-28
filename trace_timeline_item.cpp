@@ -28,6 +28,8 @@ const QColor kHeaderBackground(0xe5, 0xe7, 0xeb);
 const QColor kTextColor(0x37, 0x41, 0x51);
 const QColor kArrowColor(0x11, 0x18, 0x27);
 const QColor kSelectionColor(0x1d, 0x4e, 0xd8);
+const QColor kCursorLine(0xff, 0x00, 0x00);
+const QColor kCursorArea(0x00, 0xff, 0x00, 0x30);
 
 // Fixed pastel palette of the phase band, indexed by qHash(function name) % 12.
 const QColor kPhasePalette[12] = {
@@ -194,6 +196,25 @@ void TraceTimelineItem::setContentY(qreal y)
         return;
     m_contentY = y;
     emit contentYChanged();
+    update();
+}
+
+void TraceTimelineItem::setCursorNs(qint64 ns)
+{
+    if (ns == m_cursorNs)
+        return;
+    m_cursorNs = ns;
+    emit cursorChanged();
+    update();
+}
+
+void TraceTimelineItem::setCursorWidthNs(qint64 ns)
+{
+    ns = std::max<qint64>(0, ns);
+    if (ns == m_cursorWidthNs)
+        return;
+    m_cursorWidthNs = ns;
+    emit cursorChanged();
     update();
 }
 
@@ -374,25 +395,34 @@ const TraceTimelineItem::RowLayout *TraceTimelineItem::rowAtY(qreal y) const
 
 void TraceTimelineItem::clickAt(qreal x, qreal y)
 {
-    const RowLayout *row = rowAtY(y);
-    if (!row || x < 0 || x >= width())
+    if (x < 0 || x >= width() || y < kAxisHeight)
         return;
+    const RowLayout *row = rowAtY(y);
     if (x < kLabelWidth) {
-        setSelectedRank(m_selectedRank == row->rank ? -1 : row->rank);
+        if (row)
+            setSelectedRank(m_selectedRank == row->rank ? -1 : row->rank);
         return;
     }
-    const auto detail = m_model ? m_model->detail() : nullptr;
-    if (!detail || m_viewEnd <= m_viewStart)
+    if (m_viewEnd <= m_viewStart || plotWidth() <= 0)
         return;
-    const int rowIndex = detail->rowIndexOfRank(row->rank);
     const double frac = (x - kLabelWidth) / plotWidth();
     const qint64 ns = m_viewStart + qint64(frac * double(m_viewEnd - m_viewStart));
+    // Copied before the emit: a handler may change the model and rebuild m_rows.
+    const int rank = row ? row->rank : -1;
+    emit timeClicked(ns, rank);
+    if (rank < 0)
+        return; // node header or below the last row: only the time
+    const auto detail = m_model ? m_model->detail() : nullptr;
+    if (!detail)
+        return;
+    const int rowIndex = detail->rowIndexOfRank(rank);
     const trace::HitResult hit = trace::activityAt(*detail, rowIndex, ns);
     if (!hit.valid)
         return;
     QVariantMap d;
     d.insert(QStringLiteral("function"), hit.function);
     d.insert(QStringLiteral("rank"), hit.rank);
+    d.insert(QStringLiteral("startNs"), double(hit.startNs));
     d.insert(QStringLiteral("startUs"), double(hit.startNs) / 1000.0);
     d.insert(QStringLiteral("durationUs"), double(hit.durationNs) / 1000.0);
     d.insert(QStringLiteral("waitUs"), double(hit.waitNs) / 1000.0);
@@ -403,6 +433,14 @@ void TraceTimelineItem::clickAt(qreal x, qreal y)
     d.insert(QStringLiteral("callPath"), hit.callPath);
     d.insert(QStringLiteral("completes"), hit.completes);
     d.insert(QStringLiteral("messageCount"), hit.messageCount);
+    if (hit.messageIndex >= 0 && hit.messageIndex < detail->messages.size()) {
+        const trace::Message &m = detail->messages[hit.messageIndex];
+        if (m.sendNs >= 0 && m.receiver >= 0) {
+            d.insert(QStringLiteral("messageSender"), m.sender);
+            d.insert(QStringLiteral("messageReceiver"), m.receiver);
+            d.insert(QStringLiteral("messageSendNs"), double(m.sendNs));
+        }
+    }
     emit barClicked(d);
 }
 
@@ -536,6 +574,19 @@ void TraceTimelineItem::paint(QPainter *painter)
         }
         painter->setRenderHint(QPainter::Antialiasing, false);
         painter->setBrush(Qt::NoBrush);
+    }
+
+    // Cursor over the rows: tinted area, then the red line at cursorNs.
+    if (m_cursorNs >= 0 && m_cursorNs <= m_viewEnd && m_cursorNs + m_cursorWidthNs >= m_viewStart) {
+        painter->setClipRect(kLabelWidth, kAxisHeight, w - kLabelWidth, h - kAxisHeight);
+        if (m_cursorWidthNs > 0) {
+            const double x0 = std::max<double>(kLabelWidth, xOf(m_cursorNs));
+            const double x1 = std::min<double>(w, xOf(m_cursorNs + m_cursorWidthNs));
+            if (x1 > x0)
+                painter->fillRect(QRectF(x0, kAxisHeight, x1 - x0, h - kAxisHeight), kCursorArea);
+        }
+        if (m_cursorNs >= m_viewStart)
+            painter->fillRect(QRectF(xOf(m_cursorNs), kAxisHeight, 2, h - kAxisHeight), kCursorLine);
     }
     painter->restore();
 

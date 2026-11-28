@@ -6,8 +6,9 @@ import GUI_Cluster 1.0
 // "Trace Timeline" view of the trace window: per-rank timeline (TraceTimelineItem) with
 // toolbar, legend and hints. Uses trace-only types: loaded (Options_Views, traceMode) only when
 // the window's Cluster_Architecture has a timeline, i.e. only in trace builds.
-// View range, display options and the last clicked bar are kept in the window's traceState
-// (Trace_Analysis.qml), shared with Trace_Options.qml and the overview bar.
+// View range, display options, the last clicked bar and the time cursor are kept in the
+// window's traceState (Trace_Analysis.qml), shared with Trace_Options.qml, the overview bar and
+// the other trace views.
 Rectangle {
     id: trace_timeline_view
     color: "#ffffff"
@@ -201,6 +202,8 @@ Rectangle {
                 highlightWait: trace_timeline_view.traceState ? trace_timeline_view.traceState.highlightWait : true
                 showPhases: trace_timeline_view.traceState ? trace_timeline_view.traceState.showPhases : true
                 phaseLevel: trace_timeline_view.traceState ? trace_timeline_view.traceState.phaseLevel : "outer"
+                cursorNs: trace_timeline_view.traceState ? trace_timeline_view.traceState.cursorNs : -1
+                cursorWidthNs: trace_timeline_view.traceState ? trace_timeline_view.traceState.stepNs : 0
 
                 onViewChanged: trace_timeline_view.syncState()
                 // Rows stay within [0, max(0, contentHeight − (height − 22))].
@@ -213,9 +216,23 @@ Rectangle {
                     if (trace_timeline_view.traceState && trace_timeline_view.restored)
                         trace_timeline_view.traceState.selectedRank = selectedRank
                 }
-                onBarClicked: (details) => {
+                // Click into the rows: the cursor goes to the time under the pointer; a click on a
+                // call then moves it to the call's start and selects its message (if matched).
+                onTimeClicked: (ns, rank) => {
                     if (trace_timeline_view.traceState)
-                        trace_timeline_view.traceState.lastBar = details
+                        trace_timeline_view.traceState.cursorNs = ns
+                }
+                onBarClicked: (details) => {
+                    var st = trace_timeline_view.traceState
+                    if (!st)
+                        return
+                    st.lastBar = details
+                    if (details.function !== "Computation")
+                        st.cursorNs = details.startNs
+                    st.selectedMessage = details.messageSender !== undefined
+                            ? {sender: details.messageSender, receiver: details.messageReceiver,
+                               sendNs: details.messageSendNs}
+                            : null
                 }
 
                 // Wheel / two-finger swipe up-down: zoom around the pointer; swipe sideways (or a

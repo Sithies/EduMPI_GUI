@@ -52,6 +52,7 @@ struct HitResult {
     quint32 tag = 0;
     quint64 comm = 0;
     int messageCount = 0;
+    int messageIndex = -1; // into detail.messages: first P2P link of the call (also unmatched)
     QStringList callPath; // user functions open at the hit time, outermost first
     // Calls this one completes that carry another name, e.g. "MPI_Irecv from rank 3" for a
     // MPI_Wait; equal entries are counted ("2× MPI_Irecv from rank 0"). Empty for calls that
@@ -83,5 +84,17 @@ QVector<int> samplePhaseBand(const TimelineStore &store, int rowIndex, qint64 fr
 // start are not considered (bounds the cost at deep zoom into long traces).
 constexpr int kMessageLookback = 65536;
 QVector<int> messagesInView(const TimelineStore &detail, int rank, qint64 fromNs, qint64 toNs, int cap);
+
+// Per row of overview (same order) the category of the window [fromNs, toNs) as one column of
+// sampleRow (raw activities when a store holding them covers the window, else the pyramid).
+// Empty for an empty window.
+QVector<ColumnSample> rankStatesInWindow(const TimelineStore &overview, const TimelineStore *detail, qint64 fromNs,
+                                         qint64 toNs);
+
+// Nearest event strictly after (forward) or before ns: the start or end of an activity (MPI
+// call) of rank, or of any rank for rank -1. For an incomplete store only events within
+// [store.fromNs, store.toNs] count, and ns before (forward) / after (backward) that window gives
+// -1 (the events in between are not loaded). -1 if there is none (or the rank is unknown).
+qint64 adjacentEventNs(const TimelineStore &store, int rank, qint64 ns, bool forward);
 
 } // namespace trace

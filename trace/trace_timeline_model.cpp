@@ -1,5 +1,7 @@
 #include "trace_timeline_model.h"
 
+#include "timeline_view_math.h"
+
 #include <algorithm>
 
 using trace::TimelineSnapshot;
@@ -39,6 +41,20 @@ std::shared_ptr<const TimelineStore> TraceTimelineModel::detail() const
     if (m_requestFrom >= m_detail->fromNs && m_requestTo <= m_detail->toNs)
         return m_detail;
     return {};
+}
+
+bool TraceTimelineModel::covers(qint64 fromNs, qint64 toNs) const
+{
+    const auto store = detail();
+    if (!store)
+        return false;
+    return store->complete || (fromNs >= store->fromNs && toNs <= store->toNs);
+}
+
+qint64 TraceTimelineModel::adjacentEventNs(qint64 ns, int rank, bool forward) const
+{
+    const auto store = detail();
+    return store ? trace::adjacentEventNs(*store, rank, ns, forward) : -1;
 }
 
 bool TraceTimelineModel::requestDetail(qint64 fromNs, qint64 toNs)

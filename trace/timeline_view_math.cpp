@@ -332,6 +332,7 @@ HitResult activityAt(const TimelineStore &detail, int rowIndex, qint64 ns)
                 }
             } else if (target >= 0 && target < detail.messages.size()) {
                 const Message &m = detail.messages[target];
+                h.messageIndex = target;
                 const bool isSend = m.sender == row.rank && m.sendNs == hit->startNs;
                 h.partner = isSend ? (m.receiver >= 0 ? m.receiver : m.destination) : m.sender;
                 h.bytes = m.bytes;
@@ -505,6 +506,77 @@ QVector<int> messagesInView(const TimelineStore &detail, int rank, qint64 fromNs
             out.append(list[i]);
     }
     return out;
+}
+
+QVector<ColumnSample> rankStatesInWindow(const TimelineStore &overview, const TimelineStore *detail, qint64 fromNs,
+                                         qint64 toNs)
+{
+    QVector<ColumnSample> out;
+    if (toNs <= fromNs)
+        return out;
+    out.reserve(overview.rows.size());
+    for (int i = 0; i < overview.rows.size(); ++i) {
+        const QVector<ColumnSample> one = sampleRow(overview, detail, i, fromNs, toNs, 1);
+        out.append(one.isEmpty() ? ColumnSample{Category::Compute, false} : one[0]);
+    }
+    return out;
+}
+
+namespace {
+
+// Activities that may still be open at a time: MPI calls nest only a few levels deep (e.g. a
+// MPI_Wait inside a tool's wrapper), so a short look back finds every open one.
+constexpr int kOpenLookback = 64;
+
+// Nearest activity start / end of one row strictly after (forward) or before ns; -1 if none.
+qint64 adjacentInRow(const RankRow &row, qint64 ns, bool forward)
+{
+    const QVector<Activity> &acts = row.activities;
+    qint64 best = -1;
+    auto take = [&](qint64 e) {
+        if (forward ? (e > ns && (best < 0 || e < best)) : (e < ns && (best < 0 || e > best)))
+            best = e;
+    };
+    if (forward) {
+        // First start after ns; before it only the ends of calls open at ns can be earlier.
+        auto it = std::upper_bound(acts.begin(), acts.end(), ns,
+                                   [](qint64 t, const Activity &a) { return t < a.startNs; });
+        if (it != acts.end())
+            take(it->startNs);
+        for (auto b = it; b != acts.begin() && it - b < kOpenLookback;) {
+            --b;
+            take(b->endNs);
+        }
+    } else {
+        auto it = std::lower_bound(acts.begin(), acts.end(), ns,
+                                   [](const Activity &a, qint64 t) { return a.startNs < t; });
+        for (auto b = it; b != acts.begin() && it - b < kOpenLookback;) {
+            --b;
+            take(b->startNs);
+            take(b->endNs);
+        }
+    }
+    return best;
+}
+
+} // namespace
+
+qint64 adjacentEventNs(const TimelineStore &store, int rank, qint64 ns, bool forward)
+{
+    // Before (forward) / after (backward) a loaded window the events in between are unknown.
+    if (!store.complete && (forward ? ns < store.fromNs : ns > store.toNs))
+        return -1;
+    qint64 best = -1;
+    for (const RankRow &row : store.rows) {
+        if (rank >= 0 && row.rank != rank)
+            continue;
+        const qint64 e = adjacentInRow(row, ns, forward);
+        if (e >= 0 && (best < 0 || (forward ? e < best : e > best)))
+            best = e;
+    }
+    if (best >= 0 && !store.complete && (best < store.fromNs || best > store.toNs))
+        return -1;
+    return best;
 }
 
 } // namespace trace

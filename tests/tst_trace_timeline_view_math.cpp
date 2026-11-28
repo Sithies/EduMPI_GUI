@@ -280,6 +280,21 @@ private slots:
         QCOMPARE(coll.bytes, quint64(64));
     }
 
+    // The hit names the message of a P2P call, so the views can show the same event.
+    void activityAtCarriesMessageIndex()
+    {
+        QTemporaryDir tmp;
+        const auto s = build(writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))));
+        QVERIFY(s);
+        const HitResult h = activityAt(*s, s->rowIndexOfRank(0), 200 * kMs);
+        QVERIFY(h.messageIndex >= 0 && h.messageIndex < s->messages.size());
+        QCOMPARE(s->messages[h.messageIndex].sender, 3);
+        QCOMPARE(s->messages[h.messageIndex].receiver, 0);
+        const HitResult gap = activityAt(*s, s->rowIndexOfRank(1), 250 * kMs);
+        QCOMPARE(gap.function, QStringLiteral("Computation"));
+        QCOMPARE(gap.messageIndex, -1);
+    }
+
     // A MPI_Wait* that completes nonblocking receives names them: why the rank waits.
     void activityAtNamesCompletedCalls()
     {
@@ -511,6 +526,102 @@ private slots:
                 const qint64 from = qint64(rng.bounded(quint64(length / 2)));
                 QCOMPARE(samplePhaseBand(*s, 0, from, from + 20 * kMs, 400, level),
                          refBand(*s, 0, from, from + 20 * kMs, 400, level));
+            }
+        }
+    }
+
+    void rankStatesInWindowRing4()
+    {
+        QTemporaryDir tmp;
+        const auto s = build(writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))));
+        QVERIFY(s);
+        auto cats = [](const QVector<ColumnSample> &v) {
+            QVector<int> c;
+            for (const ColumnSample &x : v)
+                c << int(x.category);
+            return c;
+        };
+        QCOMPARE(cats(rankStatesInWindow(*s, s.get(), 200 * kMs, 201 * kMs)),
+                 (QVector<int>{int(Category::Wait), int(Category::Compute), int(Category::Compute),
+                               int(Category::Compute)}));
+        QCOMPARE(cats(rankStatesInWindow(*s, s.get(), 1100 * kMs, 1101 * kMs)),
+                 (QVector<int>{int(Category::Collective), int(Category::Collective), int(Category::Compute),
+                               int(Category::Collective)}));
+        QCOMPARE(cats(rankStatesInWindow(*s, s.get(), 400 * kMs + 200'000, 400 * kMs + 700'000)),
+                 (QVector<int>{int(Category::Recv), int(Category::Compute), int(Category::Compute),
+                               int(Category::Send)}));
+        QVERIFY(rankStatesInWindow(*s, s.get(), 5 * kMs, 5 * kMs).isEmpty());
+    }
+
+    void adjacentEventRing4()
+    {
+        QTemporaryDir tmp;
+        const auto s = build(writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))));
+        QVERIFY(s);
+        QCOMPARE(adjacentEventNs(*s, -1, 102 * kMs, true), 400 * kMs);
+        QCOMPARE(adjacentEventNs(*s, -1, 402 * kMs, true), 1000 * kMs);
+        QCOMPARE(adjacentEventNs(*s, 0, 101 * kMs + 1, true), 402 * kMs);
+        QCOMPARE(adjacentEventNs(*s, 2, 1100 * kMs, true), 1200 * kMs);
+        QCOMPARE(adjacentEventNs(*s, -1, 1000 * kMs, false), 402 * kMs);
+        QCOMPARE(adjacentEventNs(*s, -1, 100 * kMs, false), qint64(-1));
+        QCOMPARE(adjacentEventNs(*s, -1, 2401 * kMs, true), qint64(-1));
+        QCOMPARE(adjacentEventNs(*s, 7, 0, true), qint64(-1)); // unknown rank
+    }
+
+    // An event exactly at ns is not "next": the jump moves on instead of staying.
+    void adjacentEventIsStrict()
+    {
+        QTemporaryDir tmp;
+        const auto s = build(writeRing4Otf2(tmp.filePath(QStringLiteral("r4"))));
+        QVERIFY(s);
+        QCOMPARE(adjacentEventNs(*s, -1, 100 * kMs, true), 101 * kMs);
+        QCOMPARE(adjacentEventNs(*s, -1, 101 * kMs, false), 100 * kMs);
+    }
+
+    // A detail window [50, 150] ms keeps R0's MPI_Recv [101, 402], but 402 lies outside it.
+    void adjacentEventStaysInLoadedWindow()
+    {
+        QTemporaryDir tmp;
+        const QString anchor = writeRing4Otf2(tmp.filePath(QStringLiteral("r4")));
+        const auto d = build(anchor, 50 * kMs, 150 * kMs, true, 0);
+        QVERIFY(d && !d->complete);
+        QCOMPARE(adjacentEventNs(*d, -1, 102 * kMs, true), qint64(-1));
+        QCOMPARE(adjacentEventNs(*d, -1, 101 * kMs, true), 102 * kMs);
+        // From before / after the loaded window the gap is unknown: no answer, so the caller loads.
+        const auto late = build(anchor, 150 * kMs, 2000 * kMs, true, 0);
+        QVERIFY(late && !late->complete);
+        QCOMPARE(adjacentEventNs(*late, -1, 101 * kMs, true), qint64(-1)); // 102 ms is not loaded
+        QCOMPARE(adjacentEventNs(*late, -1, 1100 * kMs, true), 1200 * kMs);
+        QCOMPARE(adjacentEventNs(*d, -1, 400 * kMs, false), qint64(-1)); // after [50, 150] ms
+        QCOMPARE(adjacentEventNs(*d, -1, 120 * kMs, false), 102 * kMs);
+    }
+
+    void adjacentEventMatchesBruteForce()
+    {
+        QTemporaryDir tmp;
+        const auto s = build(writeManyMessagesOtf2(tmp.filePath(QStringLiteral("many")), 4, 200));
+        QVERIFY(s);
+        auto reference = [&](int rank, qint64 ns, bool forward) {
+            qint64 best = -1;
+            for (const RankRow &row : s->rows) {
+                if (rank >= 0 && row.rank != rank)
+                    continue;
+                for (const Activity &a : row.activities) {
+                    for (qint64 e : {a.startNs, a.endNs}) {
+                        if (forward ? (e > ns && (best < 0 || e < best)) : (e < ns && (best < 0 || e > best)))
+                            best = e;
+                    }
+                }
+            }
+            return best;
+        };
+        QRandomGenerator rng(42);
+        const qint64 length = s->traceLengthNs;
+        for (int k = 0; k < 200; ++k) {
+            const qint64 ns = qint64(rng.bounded(quint64(length + 1)));
+            for (int rank : {-1, 1}) {
+                for (bool forward : {true, false})
+                    QCOMPARE(adjacentEventNs(*s, rank, ns, forward), reference(rank, ns, forward));
             }
         }
     }
